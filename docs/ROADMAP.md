@@ -6,13 +6,29 @@ Build a modern open-source Terraform provider for Netcup.
 
 The provider should expose a clean Terraform interface and hide SCP, CCP, and future API implementation details behind stable resources.
 
+The project should also provide a reusable Go SDK foundation. A small companion CLI, `netcupctl`, may be included to support login, token refresh, API debugging, and provider development.
+
+## Authentication Direction
+
+The SCP API should be modeled around:
+
+- access token
+- refresh token
+- token refresh flow
+
+Do not design the MVP around client ID / client secret unless Netcup later exposes an official machine-to-machine flow.
+
 ## v0.1.0 - Foundation
 
 Initial scope:
 
-- Provider configuration
-- SCP authentication
+- Shared Go SDK package
+- SCP access-token authentication
+- Refresh-token support
 - Environment variable support
+- Optional `netcupctl auth refresh`
+- Optional `netcupctl server list`
+- Provider configuration
 - `netcup_servers` data source
 - `netcup_server` data source
 - `netcup_rdns` resource
@@ -22,10 +38,13 @@ Initial scope:
 - GitHub Actions CI
 - Release automation
 
-## v0.2.0 - Operations
+## v0.2.0 - CLI and Operations
 
 Planned scope:
 
+- `netcupctl auth login` helper if the device-login flow is stable enough
+- `netcupctl rdns get`
+- `netcupctl rdns set`
 - Image data sources
 - Snapshot data sources
 - Power state management
@@ -54,6 +73,7 @@ Planned scope:
 Requirements:
 
 - Stable provider API
+- Stable SDK interfaces
 - Terraform Registry publication
 - Documentation for all resources
 - Import support for all resources
