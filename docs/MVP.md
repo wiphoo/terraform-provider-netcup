@@ -8,10 +8,24 @@ The MVP should provide immediate operational value while minimizing risk and mai
 
 ## Included
 
+SDK features:
+
+- Shared Go SDK package
+- SCP HTTP client wrapper
+- Access-token authentication
+- Refresh-token support
+- Friendly error mapping
+
+CLI features:
+
+- Minimal `netcupctl` command structure
+- Optional token refresh command
+- Optional server list command for API debugging
+
 Provider features:
 
 - Provider configuration
-- Authentication
+- Access token and refresh token configuration
 - Environment variable support
 - Documentation
 
@@ -28,6 +42,8 @@ Resources:
 
 The MVP does not include:
 
+- Client ID / client secret auth flow
+- Full interactive login unless the SCP flow is stable and documented enough
 - Power operations
 - Rescue mode
 - ISO mounting
@@ -42,9 +58,49 @@ The MVP does not include:
 
 The provider should support direct configuration and environment variables.
 
+Planned configuration:
+
+```hcl
+provider "netcup" {
+  access_token  = var.netcup_access_token
+  refresh_token = var.netcup_refresh_token
+}
+```
+
+Supported environment variables:
+
+- NETCUP_ACCESS_TOKEN
+- NETCUP_REFRESH_TOKEN
+- NETCUP_API_ENDPOINT
+
 Default API endpoint:
 
 https://www.servercontrolpanel.de/scp-core/api/v1
+
+## Authentication Requirements
+
+The provider must not assume client ID / client secret authentication.
+
+The provider should:
+
+- Send access tokens as bearer tokens.
+- Refresh access tokens when possible.
+- Avoid logging tokens.
+- Avoid storing tokens in Terraform state unless unavoidable.
+- Return clear authentication diagnostics.
+
+## CLI Requirements
+
+The optional `netcupctl` CLI should use the same SDK as the provider.
+
+Potential MVP commands:
+
+```bash
+netcupctl auth refresh
+netcupctl server list
+```
+
+CLI output should be useful for debugging provider development.
 
 ## Data Source: netcup_servers
 
@@ -125,7 +181,7 @@ Acceptance criteria:
 
 ## Testing Strategy
 
-Unit tests should cover service-layer behavior.
+Unit tests should cover SDK and service-layer behavior.
 
 Acceptance tests should cover:
 
@@ -145,7 +201,8 @@ Pull requests should pass:
 
 v0.1.0 is complete when:
 
-- A user can authenticate.
+- A user can authenticate using access and refresh tokens.
+- A user can refresh a token through shared SDK logic.
 - A user can discover servers.
 - A user can inspect a server.
 - A user can manage reverse DNS.
