@@ -21,22 +21,31 @@ provider is then built on the same proven SDK.
 2. `netcupctl` CLI (device login, token refresh, server list, rDNS inspection)
 3. Terraform provider (data sources and `netcup_rdns` resource) on top of the SDK
 
-## Planned v0.1.0 Scope
+## Release Plan
 
-- Shared Go SDK foundation
+Each capability area ships the `netcupctl` CLI first, then the Terraform provider
+in the following minor release (see [Roadmap](docs/ROADMAP.md)).
+
+### v0.1.0 — netcupctl foundation (CLI)
+
+- Shared Go SDK foundation (`pkg/netcup`)
 - SCP OAuth 2.0 device-authorization login
-- Access-token authentication
-- Refresh-token support
-- `netcupctl` CLI for device login, token refresh, and API debugging
-- Provider configuration
+- Refresh-token support and environment variable configuration
+- `netcupctl` CLI: `auth login`, `auth refresh`, `server list`, `server get`, `rdns get`, `rdns set`
+- Unit tests
+- GitHub Actions CI (test + lint)
+- `netcupctl` release automation
+
+### v0.2.0 — Terraform provider foundation
+
+- Provider configuration (pre-issued tokens, environment variables)
 - `netcup_servers` data source
 - `netcup_server` data source
 - `netcup_rdns` resource
 - Import support for reverse DNS
-- Unit tests
+- Examples and `terraform validate` in CI
 - Acceptance test foundation
-- GitHub Actions CI
-- Release automation
+- Provider release + Terraform Registry publication
 
 ## Authentication Model
 
