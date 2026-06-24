@@ -27,44 +27,69 @@ The SCP API is an OAuth 2.0 / OIDC API backed by Keycloak. The MVP is modeled ar
 
 Do not design the MVP around client ID / client secret. There is no machine-to-machine client-secret flow today; the device flow plus refresh tokens is the supported model.
 
-## v0.1.0 - Foundation
+## Release Strategy
 
-Initial scope:
+Each capability area ships in two steps: the `netcupctl` CLI first (one minor
+release), then Terraform provider support for that area (the following minor
+release). The CLI validates the SDK and authentication against the live SCP API
+before the provider consumes the same SDK. Minor versions therefore alternate
+CLI → provider as the project grows.
 
-- Shared Go SDK package
-- SCP access-token authentication
-- Refresh-token support
-- Environment variable support
-- Optional `netcupctl auth refresh`
-- Optional `netcupctl server list`
-- Provider configuration
+## v0.1.0 - netcupctl foundation (CLI)
+
+Scope:
+
+- Shared Go SDK package (`pkg/netcup`): HTTP client, OIDC device flow, token refresh
+- SCP OAuth 2.0 device-authorization login
+- Refresh-token support and environment variable configuration
+- `netcupctl auth login`
+- `netcupctl auth refresh`
+- `netcupctl server list`
+- `netcupctl server get`
+- `netcupctl rdns get`
+- `netcupctl rdns set`
+- Unit tests
+- GitHub Actions CI (test + lint)
+- `netcupctl` release automation
+
+## v0.2.0 - Terraform provider foundation
+
+Scope:
+
+- Provider configuration (pre-issued tokens, environment variables)
 - `netcup_servers` data source
 - `netcup_server` data source
 - `netcup_rdns` resource
 - Import support for `netcup_rdns`
-- Unit tests
+- Examples and `terraform validate` in CI
 - Acceptance test foundation
-- GitHub Actions CI
-- Release automation
+- Provider release automation and Terraform Registry publication
 
-## v0.2.0 - CLI and Operations
+## v0.3.0 - Operations (CLI)
 
-Planned scope:
+Scope:
 
-- `netcupctl rdns get`
-- `netcupctl rdns set`
-- Image data sources
-- Snapshot data sources
-- Power state management
-- Rescue mode support
+- `netcupctl` power state management
+- `netcupctl` rescue mode
+- `netcupctl` image listing
+- `netcupctl` snapshot listing
 
 Power and rescue features must document downtime and operational risk.
 
-## v0.3.0 - Provisioning and Reinstallation
+## v0.4.0 - Operations (Terraform provider)
 
-Planned scope:
+Scope:
 
-- Server provisioning / OS install through the native SCP API
+- Power state management
+- Rescue mode support
+- Image data sources
+- Snapshot data sources
+
+## v0.5.0 - Provisioning and Reinstallation (CLI)
+
+Scope:
+
+- `netcupctl` server provisioning / OS install through the native SCP API
 - OS reinstall workflows
 - `customScript` support for post-install bootstrap (see the SCP REST API provisioning flow)
 - Image selection for installs
@@ -72,21 +97,32 @@ Planned scope:
 
 This uses Netcup's native install + `customScript` mechanism. It is not Terraform-driven SSH, Ansible, or configuration management — those remain non-goals.
 
-## v0.4.0 - Snapshot Management
+## v0.6.0 - Provisioning and Reinstallation (Terraform provider)
 
-Planned scope:
+Scope:
+
+- Provisioning / reinstall resource(s) with `customScript`
+- Image selection
+
+## v0.7.0 - Snapshot Management
+
+Scope:
 
 - Snapshot create
 - Snapshot delete
 - Snapshot restore workflows
 
-## v0.5.0 - DNS Support
+(CLI first, then provider, following the release strategy above.)
 
-Planned scope:
+## v0.8.0 - DNS Support
+
+Scope:
 
 - DNS zones
 - DNS records
 - Examples for cert-manager and ExternalDNS
+
+(CLI first, then provider, following the release strategy above.)
 
 ## v1.0.0
 
@@ -103,8 +139,8 @@ Requirements:
 ## Non-goals
 
 The provider exposes Netcup's native server lifecycle, including OS install/reinstall
-and `customScript` post-install bootstrap (see v0.3.0). It should not, however, become
-a configuration-management or in-guest provisioning tool.
+and `customScript` post-install bootstrap (see v0.5.0/v0.6.0). It should not, however,
+become a configuration-management or in-guest provisioning tool.
 
 Out of scope:
 
@@ -113,5 +149,5 @@ Out of scope:
 - Ansible replacement
 - In-guest application deployment
 
-Note: native OS reinstall and post-install `customScript` are in scope (v0.3.0). What
-stays out of scope is using Terraform itself as an SSH/Ansible/Kubernetes engine.
+Note: native OS reinstall and post-install `customScript` are in scope (v0.5.0/v0.6.0).
+What stays out of scope is using Terraform itself as an SSH/Ansible/Kubernetes engine.
