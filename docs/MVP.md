@@ -90,8 +90,9 @@ ID / client secret authentication.
 
 The provider should:
 
-- Support tokens minted by the device-authorization flow (via `netcupctl auth login`).
-- Accept pre-issued access and refresh tokens for headless use.
+- Accept pre-issued access and refresh tokens (minted by `netcupctl auth login`).
+- Not run the interactive device-authorization flow itself; that lives only in the CLI,
+  since `terraform apply` is non-interactive.
 - Send access tokens as Bearer tokens.
 - Refresh short-lived access tokens using the refresh token when possible.
 - Avoid logging tokens.

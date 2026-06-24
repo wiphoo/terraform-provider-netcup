@@ -131,6 +131,10 @@ The SDK should expose:
 - `RefreshToken` — exchanges a refresh token for a new access token
 - a token source that transparently refreshes the access token before REST calls
 
+Only the CLI calls `DeviceLogin` interactively. The provider never runs the interactive
+device flow (Terraform apply is non-interactive); it takes pre-issued tokens and uses
+`RefreshToken` / the token source for non-interactive renewal.
+
 Environment variables:
 
 - NETCUP_API_ENDPOINT (default `https://www.servercontrolpanel.de/scp-core/api/v1`)

@@ -70,7 +70,9 @@ Login flow (handled by `netcupctl auth login`):
    device code for an `access_token` (short-lived, ~300s) and a `refresh_token`.
 4. Renew on demand: `POST {OIDC}/token` with `grant_type=refresh_token`.
 
-For headless/automation use, the provider also accepts pre-issued tokens directly:
+The interactive device-login flow lives only in `netcupctl`. The Terraform provider
+does not initiate browser approval during `terraform apply` (apply is non-interactive);
+it consumes pre-issued tokens and refreshes them non-interactively:
 
 ```bash
 export NETCUP_ACCESS_TOKEN="..."
