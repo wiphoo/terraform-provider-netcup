@@ -22,29 +22,37 @@ CLI command -> CLI layer -> SDK layer -> API client layer -> Netcup APIs
 
 ## Repository Strategy
 
-The SDK, CLI, and Terraform provider start in a single repository (monorepo). This
-keeps the SDK, its first consumer (`netcupctl`), and the provider in lockstep while the
-internal APIs are still changing, and avoids premature cross-repo version coordination.
+Decision: the SDK, CLI, and Terraform provider live in a single repository (monolith).
+This keeps the SDK, its first consumer (`netcupctl`), and the provider in lockstep while
+the APIs are still changing, and avoids premature cross-repo version coordination. The
+repo name `terraform-provider-netcup` is also what the Terraform Registry expects, so a
+single repo does not block publishing.
 
-To keep a future split cheap, the SDK is treated as a stable, self-contained boundary:
+To keep the SDK reusable and a future split cheap, the SDK is a public, self-contained
+boundary:
 
+- The SDK lives under `pkg/netcup/`, not `internal/`, so it is importable by external
+  consumers and by the CLI and provider.
 - The SDK must not import provider or CLI packages.
 - The SDK exposes its own types; resources and CLI commands do not depend on generated
   OpenAPI models directly.
 - The CLI and provider depend on the SDK only through its public package surface.
 
-If the SDK matures and gains external consumers, it can be promoted to its own Go module
-or repository without rewriting callers. Until then, one repo is the simpler choice.
+Splitting is deferred until there is a concrete reason — an external consumer that should
+not pull the provider dependency tree, or independent release cadences. The first step
+then is a second `go.mod` inside this repo (a multi-module monorepo such as
+`github.com/wiphoo/terraform-provider-netcup/sdk`), not a separate repository. A separate
+repo is a last resort.
 
 ## Repository Structure
 
 - cmd/terraform-provider-netcup/
 - cmd/netcupctl/
+- pkg/netcup/ (public, reusable SDK)
 - internal/provider/
 - internal/datasources/
 - internal/resources/
 - internal/services/
-- internal/sdk/
 - internal/client/
 - internal/models/
 - docs/
@@ -73,7 +81,9 @@ The CLI must use the same SDK and client packages as the provider.
 
 ## SDK Layer
 
-Responsible for stable internal APIs used by both the Terraform provider and CLI.
+The public, reusable layer under `pkg/netcup/`, used by both the Terraform provider and
+the CLI, and importable by external consumers. It owns the HTTP client, the OIDC device
+flow, and token refresh, and exposes its own types rather than generated OpenAPI models.
 
 The SDK should expose provider-friendly operations such as:
 
