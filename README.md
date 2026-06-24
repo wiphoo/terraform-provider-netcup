@@ -10,12 +10,24 @@ Early planning / bootstrap stage.
 
 The first target release is `v0.1.0`.
 
+## Build Order
+
+The `netcupctl` CLI is the first deliverable, not an optional add-on. Building the
+CLI first lets us exercise the shared SDK and the device-authorization login flow
+against the real SCP API before any Terraform resource is written. The Terraform
+provider is then built on the same proven SDK.
+
+1. Shared Go SDK foundation (HTTP client, OIDC device flow, token refresh)
+2. `netcupctl` CLI (device login, token refresh, server list, rDNS inspection)
+3. Terraform provider (data sources and `netcup_rdns` resource) on top of the SDK
+
 ## Planned v0.1.0 Scope
 
 - Shared Go SDK foundation
-- SCP access-token authentication
+- SCP OAuth 2.0 device-authorization login
+- Access-token authentication
 - Refresh-token support
-- Optional `netcupctl` CLI for login, token refresh, and API debugging
+- `netcupctl` CLI for device login, token refresh, and API debugging
 - Provider configuration
 - `netcup_servers` data source
 - `netcup_server` data source
@@ -28,28 +40,56 @@ The first target release is `v0.1.0`.
 
 ## Authentication Model
 
-The Netcup SCP REST API should be treated as an access-token and refresh-token API.
+The Netcup SCP REST API is an OAuth 2.0 / OIDC API backed by Keycloak. There is no
+traditional client ID / client secret flow — clients authenticate against the public
+`scp` client using the **device authorization flow** and then call the REST API with
+a short-lived Bearer access token.
 
-Do not assume a traditional client ID / client secret flow for the provider MVP.
+There are two independent gates:
 
-Supported environment variables:
+1. **IP allowlist** — your client IP (or CIDR) must be allowed in the SCP REST API
+   settings before any token-based call succeeds.
+2. **Device authorization** — browser approval grants tokens to the `scp` client
+   without putting your account password in a script.
+
+Base URLs:
+
+```bash
+export NETCUP_SCP_BASE_URL="https://www.servercontrolpanel.de"
+export NETCUP_API_ENDPOINT="${NETCUP_SCP_BASE_URL}/scp-core/api/v1"
+export NETCUP_OIDC_ENDPOINT="${NETCUP_SCP_BASE_URL}/realms/scp/protocol/openid-connect"
+```
+
+Login flow (handled by `netcupctl auth login`):
+
+1. `POST {OIDC}/auth/device` with `client_id=scp` and `scope=offline_access openid`
+   to obtain a `device_code` and a `verification_uri_complete`.
+2. Approve the device in the browser.
+3. `POST {OIDC}/token` with
+   `grant_type=urn:ietf:params:oauth:grant-type:device_code` to exchange the
+   device code for an `access_token` (short-lived, ~300s) and a `refresh_token`.
+4. Renew on demand: `POST {OIDC}/token` with `grant_type=refresh_token`.
+
+For headless/automation use, the provider also accepts pre-issued tokens directly:
 
 ```bash
 export NETCUP_ACCESS_TOKEN="..."
 export NETCUP_REFRESH_TOKEN="..."
-export NETCUP_API_ENDPOINT="https://www.servercontrolpanel.de/scp-core/api/v1"
 ```
 
 Planned provider configuration:
 
 ```hcl
 provider "netcup" {
+  # Pre-issued tokens (e.g. minted by `netcupctl auth login`).
   access_token  = var.netcup_access_token
   refresh_token = var.netcup_refresh_token
 }
 ```
 
-The provider should avoid writing tokens to Terraform state unless unavoidable.
+Treat the refresh token like a password: it can mint new access tokens without
+another browser approval. The provider should avoid writing tokens to Terraform
+state unless unavoidable, and should never log them.
 
 ## Example
 
@@ -72,19 +112,21 @@ resource "netcup_rdns" "server" {
 }
 ```
 
-## CLI Plan
+## CLI: `netcupctl`
 
-Netcup does not appear to provide an official general-purpose CLI for SCP automation.
+Netcup does not provide an official general-purpose CLI for SCP automation, so this
+project ships one. `netcupctl` is the first thing built and the reference consumer of
+the shared SDK:
 
-This project may include a small companion CLI named `netcupctl` to help with:
-
-- Device/login flow helper
-- Access token refresh
-- Server listing
+- `netcupctl auth login` — OAuth 2.0 device-authorization login (prints the
+  verification URL, polls for approval, stores the resulting tokens)
+- `netcupctl auth refresh` — refresh the access token from a refresh token
+- `netcupctl server list` — list servers (smoke test for both auth gates)
 - Reverse DNS inspection
 - API debugging during provider development
 
-The CLI should reuse the same internal SDK as the Terraform provider.
+The CLI reuses the same internal SDK as the Terraform provider, so the device-flow
+and token-refresh logic is written and tested once.
 
 ## Design Principles
 

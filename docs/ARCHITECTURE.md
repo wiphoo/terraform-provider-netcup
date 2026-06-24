@@ -20,6 +20,22 @@ Terraform configuration -> Terraform Plugin Framework -> Provider layer -> Servi
 
 CLI command -> CLI layer -> SDK layer -> API client layer -> Netcup APIs
 
+## Repository Strategy
+
+The SDK, CLI, and Terraform provider start in a single repository (monorepo). This
+keeps the SDK, its first consumer (`netcupctl`), and the provider in lockstep while the
+internal APIs are still changing, and avoids premature cross-repo version coordination.
+
+To keep a future split cheap, the SDK is treated as a stable, self-contained boundary:
+
+- The SDK must not import provider or CLI packages.
+- The SDK exposes its own types; resources and CLI commands do not depend on generated
+  OpenAPI models directly.
+- The CLI and provider depend on the SDK only through its public package surface.
+
+If the SDK matures and gains external consumers, it can be promoted to its own Go module
+or repository without rewriting callers. Until then, one repo is the simpler choice.
+
 ## Repository Structure
 
 - cmd/terraform-provider-netcup/
@@ -81,19 +97,39 @@ Generated clients should live under internal client generated directories and mu
 
 ## Authentication
 
-The MVP authentication model should use:
+The SCP API is an OAuth 2.0 / OIDC API backed by Keycloak. Authentication logic lives
+in the SDK and is shared by the CLI and the provider.
 
-- access token
-- refresh token
-- API endpoint
+The MVP authentication model uses:
+
+- OAuth 2.0 device authorization flow (public client `client_id=scp`)
+- short-lived Bearer access token (~300s)
+- refresh token (`offline_access` scope) for renewal
+- a separate IP-allowlist gate on the REST API endpoint
+
+Endpoints:
+
+- OIDC base: `{base}/realms/scp/protocol/openid-connect`
+  - device code: `POST {oidc}/auth/device` (`client_id=scp`, `scope=offline_access openid`)
+  - token: `POST {oidc}/token`
+    (`grant_type=urn:ietf:params:oauth:grant-type:device_code` and `grant_type=refresh_token`)
+- REST API base: `{base}/scp-core/api/v1`
+
+The SDK should expose:
+
+- `DeviceLogin` — runs the device flow and returns access + refresh tokens
+- `RefreshToken` — exchanges a refresh token for a new access token
+- a token source that transparently refreshes the access token before REST calls
 
 Environment variables:
 
-- NETCUP_ACCESS_TOKEN
-- NETCUP_REFRESH_TOKEN
-- NETCUP_API_ENDPOINT
+- NETCUP_API_ENDPOINT (default `https://www.servercontrolpanel.de/scp-core/api/v1`)
+- NETCUP_OIDC_ENDPOINT (default `https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect`)
+- NETCUP_ACCESS_TOKEN (pre-issued token for headless use)
+- NETCUP_REFRESH_TOKEN (pre-issued token for headless use)
 
-Do not assume client ID / client secret for the MVP.
+Do not assume client ID / client secret for the MVP. Never log tokens. Treat the
+refresh token as a secret credential.
 
 ## Error Handling
 

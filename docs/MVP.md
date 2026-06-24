@@ -10,17 +10,19 @@ The MVP should provide immediate operational value while minimizing risk and mai
 
 SDK features:
 
-- Shared Go SDK package
+- Shared Go SDK package (built first, before the provider)
 - SCP HTTP client wrapper
+- OAuth 2.0 device-authorization login
 - Access-token authentication
 - Refresh-token support
 - Friendly error mapping
 
-CLI features:
+CLI features (the CLI is the first consumer of the SDK):
 
-- Minimal `netcupctl` command structure
-- Optional token refresh command
-- Optional server list command for API debugging
+- `netcupctl` command structure
+- `netcupctl auth login` device-authorization flow
+- Token refresh command
+- Server list command for API debugging
 
 Provider features:
 
@@ -43,15 +45,14 @@ Resources:
 The MVP does not include:
 
 - Client ID / client secret auth flow
-- Full interactive login unless the SCP flow is stable and documented enough
 - Power operations
 - Rescue mode
 - ISO mounting
-- OS reinstall
+- OS reinstall (planned for v0.3.0 — see ROADMAP)
+- Provisioning / `customScript` bootstrap (planned for v0.3.0)
 - Snapshot create or restore
 - CCP DNS management
-- SSH provisioning
-- Cloud-init execution
+- Terraform-driven SSH provisioning
 - Kubernetes installation
 
 ## Provider Configuration
@@ -69,35 +70,46 @@ provider "netcup" {
 
 Supported environment variables:
 
+- NETCUP_API_ENDPOINT
+- NETCUP_OIDC_ENDPOINT
 - NETCUP_ACCESS_TOKEN
 - NETCUP_REFRESH_TOKEN
-- NETCUP_API_ENDPOINT
 
-Default API endpoint:
+Default REST API endpoint:
 
 https://www.servercontrolpanel.de/scp-core/api/v1
 
+Default OIDC endpoint:
+
+https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect
+
 ## Authentication Requirements
 
-The provider must not assume client ID / client secret authentication.
+The SCP API is an OAuth 2.0 / OIDC API (Keycloak). The provider must not assume client
+ID / client secret authentication.
 
 The provider should:
 
-- Send access tokens as bearer tokens.
-- Refresh access tokens when possible.
+- Support tokens minted by the device-authorization flow (via `netcupctl auth login`).
+- Accept pre-issued access and refresh tokens for headless use.
+- Send access tokens as Bearer tokens.
+- Refresh short-lived access tokens using the refresh token when possible.
 - Avoid logging tokens.
 - Avoid storing tokens in Terraform state unless unavoidable.
-- Return clear authentication diagnostics.
+- Return clear authentication diagnostics, including the IP-allowlist gate as a likely
+  cause of authorization failures.
 
 ## CLI Requirements
 
-The optional `netcupctl` CLI should use the same SDK as the provider.
+The `netcupctl` CLI is the first consumer of the shared SDK and must use the same SDK
+as the provider.
 
-Potential MVP commands:
+MVP commands:
 
 ```bash
-netcupctl auth refresh
-netcupctl server list
+netcupctl auth login     # OAuth 2.0 device-authorization flow
+netcupctl auth refresh   # refresh the access token
+netcupctl server list    # smoke test for both auth gates
 ```
 
 CLI output should be useful for debugging provider development.
@@ -201,7 +213,8 @@ Pull requests should pass:
 
 v0.1.0 is complete when:
 
-- A user can authenticate using access and refresh tokens.
+- A user can authenticate using the device-authorization flow via `netcupctl auth login`.
+- A user can authenticate using pre-issued access and refresh tokens.
 - A user can refresh a token through shared SDK logic.
 - A user can discover servers.
 - A user can inspect a server.
