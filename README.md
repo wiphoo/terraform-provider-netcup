@@ -147,4 +147,4 @@ and token-refresh logic is written and tested once.
 
 ## License
 
-This project is intended to be released under the Mozilla Public License 2.0.
+This project is licensed under the Mozilla Public License 2.0. See [LICENSE](LICENSE).

@@ -1,0 +1,29 @@
+# Compiled binaries
+/terraform-provider-netcup
+/netcupctl
+*.exe
+
+# Go test/build artifacts
+*.test
+*.test.out
+*.out
+/dist/
+
+# Terraform local state and caches
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+*.tfstate.backup
+crash.log
+*.tfvars
+
+# Local provider dev overrides
+.terraformrc
+terraform.rc
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store

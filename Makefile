@@ -1,4 +1,7 @@
-.PHONY: test lint fmt generate
+.PHONY: build test lint fmt generate
+
+build:
+	go build ./...
 
 test:
 	go test ./...

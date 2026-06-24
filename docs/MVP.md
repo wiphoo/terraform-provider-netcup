@@ -204,11 +204,14 @@ Acceptance tests should cover:
 
 ## CI Requirements
 
-Pull requests should pass:
+CI is phased in as the codebase grows so it always reflects what actually runs:
 
-- go test ./...
-- golangci-lint run
-- terraform validate for examples
+- Now (bootstrap): `go test ./...`
+- When the SDK/provider code lands: `golangci-lint run` (config: `.golangci.yml`)
+- When `examples/` exist: `terraform validate` for each example
+
+The target end state is that pull requests pass all three. The `lint` target is
+already available via `make lint` locally.
 
 ## v0.1.0 Definition of Done
 
