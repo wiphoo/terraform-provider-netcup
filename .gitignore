@@ -27,3 +27,7 @@ terraform.rc
 .vscode/
 *.swp
 .DS_Store
+
+# Local tooling artifacts (ruflo / agent DBs)
+ruvector.db
+*.db
