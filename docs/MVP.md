@@ -1,8 +1,13 @@
-# MVP Specification v0.1.0
+# MVP Specification (v0.1.0 + v0.2.0)
 
 ## Objective
 
-Deliver the first usable release of Terraform Provider Netcup.
+Deliver the first usable releases of Terraform Provider Netcup.
+
+The MVP spans two milestones under the CLI-first release strategy (see
+[ROADMAP](ROADMAP.md)): the SDK + `netcupctl` CLI ship in **v0.1.0**, and the
+Terraform provider (configuration, data sources, and the `netcup_rdns` resource)
+ships in **v0.2.0** on top of the same SDK.
 
 The MVP should provide immediate operational value while minimizing risk and maintenance burden.
 
