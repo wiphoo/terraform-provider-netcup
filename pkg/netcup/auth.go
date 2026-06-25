@@ -37,7 +37,7 @@ type TokenResponse struct {
 
 // oidcError is a standard OAuth 2.0 error response.
 type oidcError struct {
-	Err             string `json:"error"`
+	Err              string `json:"error"`
 	ErrorDescription string `json:"error_description,omitempty"`
 }
 

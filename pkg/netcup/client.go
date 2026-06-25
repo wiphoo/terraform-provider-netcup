@@ -30,11 +30,11 @@ const (
 //
 // Construct it with New. The zero value is not usable.
 type Client struct {
-	apiEndpoint   string
-	oidcEndpoint  string
-	accessToken   string
-	refreshToken  string
-	httpClient    *http.Client
+	apiEndpoint  string
+	oidcEndpoint string
+	accessToken  string
+	refreshToken string
+	httpClient   *http.Client
 }
 
 // Option customizes a Client during construction.
