@@ -53,8 +53,8 @@ The MVP does not include:
 - Power operations
 - Rescue mode
 - ISO mounting
-- OS reinstall (planned for v0.3.0 — see ROADMAP)
-- Provisioning / `customScript` bootstrap (planned for v0.3.0)
+- OS reinstall (planned for v0.5.0 — see ROADMAP)
+- Provisioning / `customScript` bootstrap (planned for v0.5.0/v0.6.0)
 - Snapshot create or restore
 - CCP DNS management
 - Terraform-driven SSH provisioning
@@ -124,14 +124,14 @@ CLI output should be useful for debugging provider development.
 
 Purpose: list all servers accessible to the authenticated account.
 
-Computed fields:
+Computed fields (note: `GET /v1/servers` is a **minimal** projection — see [SCP-API-NOTES](SCP-API-NOTES.md); IPs/status are only on the per-server detail endpoint):
 
 - id
+- name
 - hostname
-- status
-- product_name
-- ipv4_addresses
-- ipv6_addresses
+- nickname
+- disabled
+- product_name (from `template.name`)
 
 Acceptance criteria:
 
@@ -179,10 +179,11 @@ Resource ID format:
 
 CRUD behavior:
 
-- Create configures reverse DNS.
-- Read reads current reverse DNS configuration.
-- Update changes hostname.
-- Delete removes or resets the reverse DNS entry depending on API capability.
+- Create/Update configure reverse DNS via `POST /v1/rdns/{ipv4|ipv6}` (upsert; no PUT).
+- Read reads current reverse DNS via `GET /v1/rdns/{ipv4|ipv6}/{ip}` (`rdns: null` ⇒ no custom PTR).
+- Delete removes the custom entry via `DELETE /v1/rdns/{ipv4|ipv6}/{ip}` (`204`); the address reverts to its default PTR.
+
+See [SCP-API-NOTES](SCP-API-NOTES.md) for the pinned endpoint/field shapes and the IPv4/IPv6 routing + normalization rules.
 
 Import example:
 
