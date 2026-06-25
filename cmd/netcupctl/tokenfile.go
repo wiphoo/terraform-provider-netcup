@@ -94,6 +94,10 @@ func saveTokens(tr *netcup.TokenResponse) error {
 	}
 	defer func() { _ = f.Close() }()
 
+	if err := f.Chmod(0600); err != nil {
+		return err
+	}
+
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	return enc.Encode(tr)
