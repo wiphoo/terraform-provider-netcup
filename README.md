@@ -65,7 +65,8 @@ Base URLs:
 
 ```bash
 export NETCUP_SCP_BASE_URL="https://www.servercontrolpanel.de"
-export NETCUP_API_ENDPOINT="${NETCUP_SCP_BASE_URL}/scp-core/api/v1"
+# API root: health check at /ping, versioned resources under /v1
+export NETCUP_API_ENDPOINT="${NETCUP_SCP_BASE_URL}/scp-core/api"
 export NETCUP_OIDC_ENDPOINT="${NETCUP_SCP_BASE_URL}/realms/scp/protocol/openid-connect"
 ```
 

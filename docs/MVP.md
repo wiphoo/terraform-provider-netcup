@@ -80,9 +80,9 @@ Supported environment variables:
 - NETCUP_ACCESS_TOKEN
 - NETCUP_REFRESH_TOKEN
 
-Default REST API endpoint:
+Default REST API endpoint (the `/scp-core/api` root; health check at `/ping`, versioned resources under `/v1`):
 
-https://www.servercontrolpanel.de/scp-core/api/v1
+https://www.servercontrolpanel.de/scp-core/api
 
 Default OIDC endpoint:
 
