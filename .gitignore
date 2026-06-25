@@ -1,4 +1,5 @@
 # Compiled binaries
+/bin/
 /terraform-provider-netcup
 /netcupctl
 *.exe

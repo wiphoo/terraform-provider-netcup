@@ -123,7 +123,7 @@ Endpoints:
   - device code: `POST {oidc}/auth/device` (`client_id=scp`, `scope=offline_access openid`)
   - token: `POST {oidc}/token`
     (`grant_type=urn:ietf:params:oauth:grant-type:device_code` and `grant_type=refresh_token`)
-- REST API base: `{base}/scp-core/api/v1`
+- REST API base: `{base}/scp-core/api` (unauthenticated health check at `/ping`; versioned resources under `/v1`)
 
 The SDK should expose:
 
@@ -137,7 +137,7 @@ device flow (Terraform apply is non-interactive); it takes pre-issued tokens and
 
 Environment variables:
 
-- NETCUP_API_ENDPOINT (default `https://www.servercontrolpanel.de/scp-core/api/v1`)
+- NETCUP_API_ENDPOINT (default `https://www.servercontrolpanel.de/scp-core/api`)
 - NETCUP_OIDC_ENDPOINT (default `https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect`)
 - NETCUP_ACCESS_TOKEN (pre-issued token for headless use)
 - NETCUP_REFRESH_TOKEN (pre-issued token for headless use)
