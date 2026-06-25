@@ -30,10 +30,11 @@ const (
 //
 // Construct it with New. The zero value is not usable.
 type Client struct {
-	apiEndpoint  string
-	oidcEndpoint string
-	accessToken  string
-	httpClient   *http.Client
+	apiEndpoint   string
+	oidcEndpoint  string
+	accessToken   string
+	refreshToken  string
+	httpClient    *http.Client
 }
 
 // Option customizes a Client during construction.
@@ -52,6 +53,11 @@ func WithOIDCEndpoint(endpoint string) Option {
 // WithAccessToken sets the Bearer access token used for authenticated calls.
 func WithAccessToken(token string) Option {
 	return func(c *Client) { c.accessToken = token }
+}
+
+// WithRefreshToken sets the refresh token used for transparent token refresh.
+func WithRefreshToken(token string) Option {
+	return func(c *Client) { c.refreshToken = token }
 }
 
 // WithHTTPClient sets a custom *http.Client (for timeouts, transports, tests).
@@ -83,6 +89,9 @@ func New(opts ...Option) *Client {
 	if v := os.Getenv("NETCUP_ACCESS_TOKEN"); v != "" {
 		c.accessToken = v
 	}
+	if v := os.Getenv("NETCUP_REFRESH_TOKEN"); v != "" {
+		c.refreshToken = v
+	}
 
 	for _, opt := range opts {
 		opt(c)
@@ -95,6 +104,9 @@ func (c *Client) APIEndpoint() string { return c.apiEndpoint }
 
 // OIDCEndpoint returns the configured OIDC base URL.
 func (c *Client) OIDCEndpoint() string { return c.oidcEndpoint }
+
+// RefreshToken returns the configured refresh token, if any.
+func (c *Client) RefreshToken() string { return c.refreshToken }
 
 // newRequest builds a request against the REST API, attaching the Accept header
 // and a Bearer token when one is configured.

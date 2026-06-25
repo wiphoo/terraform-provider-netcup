@@ -25,6 +25,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "ping":
 		return cmdPing(args[1:])
+	case "auth":
+		return cmdAuth(args[1:])
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -45,6 +47,7 @@ Usage:
 
 Commands:
   ping       Check that the SCP REST API is reachable
+  auth       OAuth 2.0 device-authorization login and token refresh
   version    Print the netcupctl version
   help       Show this help
 `)
