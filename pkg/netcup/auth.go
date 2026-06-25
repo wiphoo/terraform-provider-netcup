@@ -155,7 +155,7 @@ func (c *Client) WaitForDeviceAuthorization(ctx context.Context, deviceCode stri
 		switch oerr.Err {
 		case "authorization_pending":
 		case "slow_down":
-			interval += interval / 2
+			interval += 5 * time.Second
 		case "expired_token":
 			return nil, fmt.Errorf("device code expired, restart the login flow")
 		case "access_denied":

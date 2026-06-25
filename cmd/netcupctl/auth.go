@@ -111,6 +111,10 @@ func authRefresh(args []string) error {
 		return fmt.Errorf("refreshing token: %w", err)
 	}
 
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = token.RefreshToken
+	}
+
 	if err := saveTokens(refreshed); err != nil {
 		return fmt.Errorf("saving refreshed tokens: %w", err)
 	}
