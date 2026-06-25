@@ -364,7 +364,7 @@ func TestTokenSource_RefreshesAndUpdatesRefreshToken(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		// Each call returns a different refresh token (rotation).
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"access_token":"at_%d","refresh_token":"rt_%d","expires_in":1,"token_type":"Bearer"}`, callCount.Load(), callCount.Load())))
+		fmt.Fprintf(w, `{"access_token":"at_%d","refresh_token":"rt_%d","expires_in":1,"token_type":"Bearer"}`, callCount.Load(), callCount.Load())
 	}))
 	defer srv.Close()
 
