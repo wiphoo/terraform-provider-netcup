@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	// DefaultAPIEndpoint is the SCP REST API base URL (v1).
-	DefaultAPIEndpoint = "https://www.servercontrolpanel.de/scp-core/api/v1"
+	// DefaultAPIEndpoint is the SCP REST API base URL (the /scp-core/api root).
+	// The unauthenticated health check is at {DefaultAPIEndpoint}/ping; versioned
+	// resources live under {DefaultAPIEndpoint}/v1/...
+	DefaultAPIEndpoint = "https://www.servercontrolpanel.de/scp-core/api"
 
 	// DefaultOIDCEndpoint is the SCP OIDC (Keycloak) base URL for the
 	// authentication endpoints.

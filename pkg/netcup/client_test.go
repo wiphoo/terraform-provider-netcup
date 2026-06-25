@@ -61,6 +61,16 @@ func TestPingMapsErrorResponse(t *testing.T) {
 	}
 }
 
+func TestDefaultAPIEndpointIsAPIRoot(t *testing.T) {
+	// The health check lives at {root}/ping. The default must be the
+	// /scp-core/api root, not the versioned /v1 base — otherwise Ping hits an
+	// authenticated path and fails with 401.
+	const want = "https://www.servercontrolpanel.de/scp-core/api"
+	if DefaultAPIEndpoint != want {
+		t.Fatalf("DefaultAPIEndpoint = %q, want %q", DefaultAPIEndpoint, want)
+	}
+}
+
 func TestNewDefaultsAndEnvAndOptionPrecedence(t *testing.T) {
 	// Defaults when nothing is set.
 	if got := New().APIEndpoint(); got != DefaultAPIEndpoint {
