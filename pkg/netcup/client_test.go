@@ -72,6 +72,12 @@ func TestDefaultAPIEndpointIsAPIRoot(t *testing.T) {
 }
 
 func TestNewDefaultsAndEnvAndOptionPrecedence(t *testing.T) {
+	// Ensure a hermetic environment: the runner (or the documented user setup)
+	// may export these, which would otherwise shadow the defaults below.
+	t.Setenv("NETCUP_API_ENDPOINT", "")
+	t.Setenv("NETCUP_OIDC_ENDPOINT", "")
+	t.Setenv("NETCUP_ACCESS_TOKEN", "")
+
 	// Defaults when nothing is set.
 	if got := New().APIEndpoint(); got != DefaultAPIEndpoint {
 		t.Fatalf("default APIEndpoint = %q, want %q", got, DefaultAPIEndpoint)

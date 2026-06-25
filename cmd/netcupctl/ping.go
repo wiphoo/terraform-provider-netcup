@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 
@@ -13,6 +14,10 @@ func cmdPing(args []string) error {
 	fs := flag.NewFlagSet("ping", flag.ContinueOnError)
 	endpoint := fs.String("endpoint", "", "override the REST API endpoint (defaults to NETCUP_API_ENDPOINT or the public SCP API)")
 	if err := fs.Parse(args); err != nil {
+		// -h/-help: flag already printed usage; exit cleanly.
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 
