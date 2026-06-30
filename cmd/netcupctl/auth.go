@@ -140,14 +140,9 @@ func authRefresh(args []string) error {
 	return nil
 }
 
-// parseNoFlags parses a flag set that takes no flags, treating -h/--help as a
-// clean (nil) exit to match the other auth subcommands.
 func parseNoFlags(name string, args []string) error {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
 		return err
 	}
 	return nil
