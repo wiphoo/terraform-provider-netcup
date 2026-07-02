@@ -100,3 +100,122 @@ func TestServerList_AuthError(t *testing.T) {
 		t.Errorf("error should mention status code, got: %v", err)
 	}
 }
+
+func TestServerGet_TableOutput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/servers/123" {
+			t.Errorf("path = %q, want /v1/servers/123", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id":123,"name":"web-01","hostname":"web-01.example.com","disabled":false,
+			"template":{"id":10,"name":"VM 2000"},
+			"serverLiveInfo":{"state":"running"},
+			"ipv4Addresses":[{"id":1,"ip":"192.0.2.10","netmask":"255.255.255.0"}],
+			"ipv6Addresses":[{"id":2,"networkPrefix":"2a03:4000:6:b1d::","networkPrefixLength":64}]
+		}`))
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := serverGet([]string{"123"}, &buf); err != nil {
+		t.Fatalf("serverGet() error = %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"web-01", "VM 2000", "running", "192.0.2.10", "2a03:4000:6:b1d::/64"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestServerGet_UnknownStatusAndNoAddresses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":5,"name":"db-01","disabled":true,"serverLiveInfo":null}`))
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := serverGet([]string{"5"}, &buf); err != nil {
+		t.Fatalf("serverGet() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("output should show 'unknown' status: %q", out)
+	}
+	if !strings.Contains(out, "Disabled") {
+		t.Errorf("output should show Disabled admin state: %q", out)
+	}
+	// No addresses render as "-".
+	if !strings.Contains(out, "IPv4:") || !strings.Contains(out, "-") {
+		t.Errorf("output should show placeholder for missing addresses: %q", out)
+	}
+}
+
+func TestServerGet_JSONOutput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":7,"name":"srv7","disabled":false}`))
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := serverGet([]string{"--json", "7"}, &buf); err != nil {
+		t.Fatalf("serverGet() error = %v", err)
+	}
+	out := strings.TrimSpace(buf.String())
+	if !strings.HasPrefix(out, "{") || !strings.Contains(out, `"name": "srv7"`) {
+		t.Errorf("JSON output unexpected: %q", out)
+	}
+}
+
+func TestServerGet_MissingID(t *testing.T) {
+	var buf bytes.Buffer
+	err := serverGet(nil, &buf)
+	if err == nil {
+		t.Fatal("serverGet() error = nil, want error for missing ID")
+	}
+	if !strings.Contains(err.Error(), "server ID") {
+		t.Errorf("error should mention missing server ID, got: %v", err)
+	}
+}
+
+func TestServerGet_InvalidID(t *testing.T) {
+	var buf bytes.Buffer
+	err := serverGet([]string{"not-a-number"}, &buf)
+	if err == nil {
+		t.Fatal("serverGet() error = nil, want error for non-integer ID")
+	}
+	if !strings.Contains(err.Error(), "invalid server ID") {
+		t.Errorf("error should mention invalid server ID, got: %v", err)
+	}
+}
+
+func TestServerGet_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"server not found"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	err := serverGet([]string{"999"}, &buf)
+	if err == nil {
+		t.Fatal("serverGet() error = nil, want not-found error")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention 404, got: %v", err)
+	}
+}
