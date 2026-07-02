@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -62,6 +63,53 @@ func TestGetServerSuccess(t *testing.T) {
 	}
 	if want := "Bearer tok123"; gotAuth != want {
 		t.Errorf("Authorization = %q, want %q", gotAuth, want)
+	}
+}
+
+// TestGetServerDecodesRealDetailPayload decodes a full, real-shaped response
+// captured from GET /v1/servers/{id}. It guards against struct/API type
+// mismatches — e.g. `site` is an object, not a string; before that field was
+// modeled correctly this test failed with an unmarshal error. The Server struct
+// intentionally models a subset of fields, so extra keys (the many
+// serverLiveInfo details) must decode without error rather than being rejected.
+func TestGetServerDecodesRealDetailPayload(t *testing.T) {
+	body, err := os.ReadFile("testdata/server_detail.json")
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	server, err := c.GetServer(context.Background(), 882863)
+	if err != nil {
+		t.Fatalf("GetServer() error = %v", err)
+	}
+
+	if server.Site == nil || server.Site.City != "Nuremberg" || server.Site.ID != 1 {
+		t.Errorf("Site = %+v, want {ID:1 City:Nuremberg}", server.Site)
+	}
+	if server.Architecture == nil || *server.Architecture != "AMD64" {
+		t.Errorf("Architecture = %v, want AMD64", server.Architecture)
+	}
+	if server.ServerLiveInfo == nil || server.ServerLiveInfo.State != "RUNNING" {
+		t.Errorf("ServerLiveInfo = %+v, want State=RUNNING", server.ServerLiveInfo)
+	}
+	if server.Template == nil || server.Template.Name != "VPS Lite 1 G12s" {
+		t.Errorf("Template = %+v, want Name=VPS Lite 1 G12s", server.Template)
+	}
+	if len(server.IPv4Addresses) != 1 || server.IPv4Addresses[0].IP != "192.0.2.10" ||
+		server.IPv4Addresses[0].Gateway == nil || *server.IPv4Addresses[0].Gateway != "192.0.2.1" ||
+		server.IPv4Addresses[0].Broadcast == nil || *server.IPv4Addresses[0].Broadcast != "192.0.2.255" {
+		t.Errorf("IPv4Addresses = %+v, want one 192.0.2.10 with gateway/broadcast", server.IPv4Addresses)
+	}
+	if len(server.IPv6Addresses) != 1 || server.IPv6Addresses[0].NetworkPrefix != "2a03:4000:2:8f7::" ||
+		server.IPv6Addresses[0].NetworkPrefixLength != 64 {
+		t.Errorf("IPv6Addresses = %+v, want one 2a03:4000:2:8f7::/64", server.IPv6Addresses)
 	}
 }
 
