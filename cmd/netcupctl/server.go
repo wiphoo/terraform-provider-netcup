@@ -50,7 +50,10 @@ func serverList(args []string, out io.Writer) error {
 		return err
 	}
 
-	client := clientWithToken()
+	client, err := clientWithToken()
+	if err != nil {
+		return err
+	}
 	servers, err := client.ListServers(context.Background())
 	if err != nil {
 		return err
@@ -78,7 +81,7 @@ func serverList(args []string, out io.Writer) error {
 		if s.Template != nil {
 			product = s.Template.Name
 		}
-		status := "Active"
+		status := "Enabled"
 		if s.Disabled {
 			status = "Disabled"
 		}
@@ -87,12 +90,21 @@ func serverList(args []string, out io.Writer) error {
 	return tw.Flush()
 }
 
-func clientWithToken() *netcup.Client {
-	if os.Getenv("NETCUP_ACCESS_TOKEN") == "" {
-		token, err := loadTokens()
-		if err == nil && token != nil && token.AccessToken != "" {
-			return netcup.New(netcup.WithAccessToken(token.AccessToken))
-		}
+// clientWithToken builds a Client, preferring the NETCUP_ACCESS_TOKEN
+// environment variable (consumed by netcup.New) and otherwise falling back to
+// the access token persisted by `netcupctl auth login`. A failure to read the
+// stored token file is surfaced rather than silently downgrading to an
+// unauthenticated client.
+func clientWithToken() (*netcup.Client, error) {
+	if os.Getenv("NETCUP_ACCESS_TOKEN") != "" {
+		return netcup.New(), nil
 	}
-	return netcup.New()
+	token, err := loadTokens()
+	if err != nil {
+		return nil, fmt.Errorf("loading tokens: %w", err)
+	}
+	if token != nil && token.AccessToken != "" {
+		return netcup.New(netcup.WithAccessToken(token.AccessToken)), nil
+	}
+	return netcup.New(), nil
 }

@@ -54,8 +54,8 @@ func TestServerList_TableOutput(t *testing.T) {
 	if !strings.Contains(out, "Disabled") {
 		t.Errorf("output missing Disabled status: %q", out)
 	}
-	if !strings.Contains(out, "Active") {
-		t.Errorf("output missing Active status: %q", out)
+	if !strings.Contains(out, "Enabled") {
+		t.Errorf("output missing Enabled status: %q", out)
 	}
 }
 
