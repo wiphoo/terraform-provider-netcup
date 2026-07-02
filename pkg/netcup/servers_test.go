@@ -26,6 +26,8 @@ func TestGetServerSuccess(t *testing.T) {
 			"disabled":false,
 			"template":{"id":10,"name":"VM 2000"},
 			"serverLiveInfo":{"state":"running"},
+			"architecture":"AMD64",
+			"site":{"id":1,"city":"Nuremberg"},
 			"ipv4Addresses":[{"id":1,"ip":"192.0.2.10","netmask":"255.255.255.0"}],
 			"ipv6Addresses":[{"id":2,"networkPrefix":"2a03:4000:6:b1d::","networkPrefixLength":64}]
 		}`))
@@ -54,6 +56,9 @@ func TestGetServerSuccess(t *testing.T) {
 	}
 	if len(server.IPv6Addresses) != 1 || server.IPv6Addresses[0].NetworkPrefix != "2a03:4000:6:b1d::" || server.IPv6Addresses[0].NetworkPrefixLength != 64 {
 		t.Errorf("IPv6Addresses = %+v, want one 2a03:4000:6:b1d::/64", server.IPv6Addresses)
+	}
+	if server.Site == nil || server.Site.City != "Nuremberg" {
+		t.Errorf("Site = %+v, want City=Nuremberg", server.Site)
 	}
 	if want := "Bearer tok123"; gotAuth != want {
 		t.Errorf("Authorization = %q, want %q", gotAuth, want)

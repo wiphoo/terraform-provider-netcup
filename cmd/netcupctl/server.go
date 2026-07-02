@@ -171,6 +171,11 @@ func serverGet(args []string, out io.Writer) error {
 	fmt.Fprintf(tw, "Admin:\t%s\n", admin)
 	fmt.Fprintf(tw, "IPv4:\t%s\n", formatIPv4(server.IPv4Addresses))
 	fmt.Fprintf(tw, "IPv6:\t%s\n", formatIPv6(server.IPv6Addresses))
+	site := "-"
+	if server.Site != nil && server.Site.City != "" {
+		site = server.Site.City
+	}
+	fmt.Fprintf(tw, "Site:\t%s\n", site)
 	return tw.Flush()
 }
 

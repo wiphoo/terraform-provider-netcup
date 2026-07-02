@@ -43,8 +43,14 @@ type Server struct {
 	IPv4Addresses []IPv4AddressMinimal `json:"ipv4Addresses"`
 	IPv6Addresses []IPv6AddressMinimal `json:"ipv6Addresses"`
 
-	Architecture *string `json:"architecture"`
-	Site         *string `json:"site"`
+	Architecture *string     `json:"architecture"`
+	Site         *ServerSite `json:"site"`
+}
+
+// ServerSite is the datacenter location embedded in Server.
+type ServerSite struct {
+	ID   int32  `json:"id"`
+	City string `json:"city"`
 }
 
 // ServerInfo is the live status object embedded in Server. State is the power
