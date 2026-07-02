@@ -61,6 +61,110 @@ func TestPingMapsErrorResponse(t *testing.T) {
 	}
 }
 
+func TestListServersSuccess(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/servers" {
+			t.Errorf("path = %q, want /v1/servers", r.URL.Path)
+		}
+		if v := r.Header.Get("Accept"); v != "application/json" {
+			t.Errorf("Accept = %q, want application/json", v)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"id":1,"name":"srv1","hostname":"srv1.example","disabled":false,"template":{"id":10,"name":"VM 1000"}}]`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	servers, err := c.ListServers(context.Background())
+	if err != nil {
+		t.Fatalf("ListServers() error = %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("len(servers) = %d, want 1", len(servers))
+	}
+	if servers[0].ID != 1 || servers[0].Name != "srv1" {
+		t.Errorf("server = %+v, want ID=1 Name=srv1", servers[0])
+	}
+	if servers[0].Hostname == nil || *servers[0].Hostname != "srv1.example" {
+		t.Errorf("Hostname = %v, want %q", servers[0].Hostname, "srv1.example")
+	}
+	if servers[0].Template == nil || servers[0].Template.Name != "VM 1000" {
+		t.Errorf("Template = %+v, want Name=VM 1000", servers[0].Template)
+	}
+	if want := "Bearer tok123"; gotAuth != want {
+		t.Errorf("Authorization = %q, want %q", gotAuth, want)
+	}
+}
+
+func TestListServersEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	servers, err := c.ListServers(context.Background())
+	if err != nil {
+		t.Fatalf("ListServers() error = %v", err)
+	}
+	if len(servers) != 0 {
+		t.Fatalf("len(servers) = %d, want 0", len(servers))
+	}
+}
+
+func TestListServersMapsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`invalid token`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("bad"))
+	_, err := c.ListServers(context.Background())
+	if err == nil {
+		t.Fatal("ListServers() error = nil, want error")
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *netcup.APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestListServersHandlesNullFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"id":2,"name":"srv2","disabled":true}]`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	servers, err := c.ListServers(context.Background())
+	if err != nil {
+		t.Fatalf("ListServers() error = %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("len(servers) = %d, want 1", len(servers))
+	}
+	if servers[0].Hostname != nil {
+		t.Errorf("Hostname = %v, want nil", servers[0].Hostname)
+	}
+	if servers[0].Template != nil {
+		t.Errorf("Template = %+v, want nil", servers[0].Template)
+	}
+	if !servers[0].Disabled {
+		t.Error("Disabled = false, want true")
+	}
+}
+
 func TestDefaultAPIEndpointIsAPIRoot(t *testing.T) {
 	// The health check lives at {root}/ping. The default must be the
 	// /scp-core/api root, not the versioned /v1 base — otherwise Ping hits an
