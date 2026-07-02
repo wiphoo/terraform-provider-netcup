@@ -1,0 +1,85 @@
+{
+  "id": 100001,
+  "name": "vps01",
+  "disabled": false,
+  "hostname": "example.host",
+  "nickname": null,
+  "template": {
+    "id": 1581,
+    "name": "VPS Lite 1 G12s"
+  },
+  "architecture": "AMD64",
+  "disksAvailableSpaceInMiB": 0,
+  "gpuDriverAvailable": false,
+  "ipv4Addresses": [
+    {
+      "id": 12345,
+      "ip": "192.0.2.10",
+      "netmask": "255.255.255.0",
+      "gateway": "192.0.2.1",
+      "broadcast": "192.0.2.255"
+    }
+  ],
+  "ipv6Addresses": [
+    {
+      "gateway": "fe80::1",
+      "id": 975348,
+      "networkPrefix": "2001:db8:2:8f7::",
+      "networkPrefixLength": 64
+    }
+  ],
+  "maxCpuCount": 2,
+  "rescueSystemActive": false,
+  "serverLiveInfo": {
+    "autostart": true,
+    "bootorder": ["HDD", "CDROM", "NETWORK"],
+    "cloudinitAttached": true,
+    "configChanged": false,
+    "coresPerSocket": 1,
+    "cpuCount": 2,
+    "cpuMaxCount": 2,
+    "currentServerMemoryInMiB": 4096,
+    "disks": [
+      {
+        "allocationInMiB": 2326,
+        "capacityInMiB": 81920,
+        "dev": "vda",
+        "driver": "virtio"
+      }
+    ],
+    "interfaces": [
+      {
+        "driver": "virtio",
+        "ipv4Addresses": [],
+        "ipv6LinkLocalAddresses": ["fe80::0200:5eff:fe00:5301"],
+        "ipv6NetworkPrefixes": ["2001:db8:2:8f7::/64"],
+        "mac": "00:00:5e:00:53:01",
+        "mtu": 1500,
+        "rxMonthlyInMiB": 2192,
+        "speedInMBits": 500,
+        "trafficThrottled": false,
+        "txMonthlyInMiB": 392,
+        "vlanId": null,
+        "vlanInterface": false
+      }
+    ],
+    "keyboardLayout": "en-us",
+    "latestQemu": true,
+    "machineType": "pc-i440fx-9.2",
+    "maxServerMemoryInMiB": 4096,
+    "nestedGuest": false,
+    "osOptimization": "LINUX",
+    "requiredStorageOptimization": "NO",
+    "sockets": 2,
+    "state": "RUNNING",
+    "template": "VPS Lite 1 G12s",
+    "uefi": true,
+    "uptimeInSeconds": 791
+  },
+  "site": {
+    "city": "Nuremberg",
+    "id": 1
+  },
+  "snapshotAllowed": true,
+  "snapshotCount": 0
+}
