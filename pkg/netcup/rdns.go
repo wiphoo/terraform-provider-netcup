@@ -36,11 +36,17 @@ func (c *Client) GetRDNS(ctx context.Context, ip string) (*RdnsEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid IP address %q: %w", ip, err)
 	}
+	if addr.Zone() != "" {
+		return nil, fmt.Errorf("invalid IP address %q: zone identifiers are not supported", ip)
+	}
 
+	// Unmap so an IPv4-in-IPv6 address (::ffff:a.b.c.d) is treated as IPv4 and
+	// canonicalized to its dotted-quad form, matching the ipv4 route.
+	addr = addr.Unmap()
 	canonical := addr.String()
 
 	family := "ipv6"
-	if addr.Is4() || addr.Is4In6() {
+	if addr.Is4() {
 		family = "ipv4"
 	}
 

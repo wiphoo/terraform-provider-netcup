@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"text/tabwriter"
 )
 
 func cmdRDNS(args []string) error {
@@ -40,24 +41,12 @@ Usage:
 func rdnsGet(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("rdns-get", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
-
-	// flag.Parse stops at the first non-flag argument, so parse iteratively to
-	// accept flags before or after the positional IP.
-	var positional []string
-	pending := args
-	for {
-		if err := fs.Parse(pending); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return nil
-			}
-			return err
+	positional, err := parsePositionalArgs(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
 		}
-		pending = fs.Args()
-		if len(pending) == 0 {
-			break
-		}
-		positional = append(positional, pending[0])
-		pending = pending[1:]
+		return err
 	}
 
 	if len(positional) == 0 {
@@ -89,7 +78,8 @@ func rdnsGet(args []string, out io.Writer) error {
 		hostname = "<none>"
 	}
 
-	fmt.Fprintf(out, "IP:\t%s\n", entry.IP)
-	fmt.Fprintf(out, "Hostname:\t%s\n", hostname)
-	return nil
+	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintf(tw, "IP:\t%s\n", entry.IP)
+	fmt.Fprintf(tw, "Hostname:\t%s\n", hostname)
+	return tw.Flush()
 }

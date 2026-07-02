@@ -98,24 +98,12 @@ func serverList(args []string, out io.Writer) error {
 func serverGet(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("server-get", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
-
-	// flag.Parse stops at the first non-flag argument, so parse iteratively to
-	// accept flags before or after the positional ID (e.g. `server get 7 --json`).
-	var positional []string
-	pending := args
-	for {
-		if err := fs.Parse(pending); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return nil
-			}
-			return err
+	positional, err := parsePositionalArgs(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
 		}
-		pending = fs.Args()
-		if len(pending) == 0 {
-			break
-		}
-		positional = append(positional, pending[0])
-		pending = pending[1:]
+		return err
 	}
 
 	if len(positional) == 0 {

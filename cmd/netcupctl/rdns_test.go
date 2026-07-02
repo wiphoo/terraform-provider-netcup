@@ -114,6 +114,41 @@ func TestRDNSGet_MissingIP(t *testing.T) {
 	}
 }
 
+func TestRDNSGet_TooManyArgs(t *testing.T) {
+	var buf bytes.Buffer
+	err := rdnsGet([]string{"203.0.113.10", "203.0.113.11"}, &buf)
+	if err == nil {
+		t.Fatal("rdnsGet() error = nil, want error for two IPs")
+	}
+	if !strings.Contains(err.Error(), "single IP address") {
+		t.Errorf("error should reject multiple IPs, got: %v", err)
+	}
+}
+
+func TestRDNSGet_TextOutputIsTabAligned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rdns":"server.example.com"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := rdnsGet([]string{"203.0.113.10"}, &buf); err != nil {
+		t.Fatalf("rdnsGet() error = %v", err)
+	}
+	out := buf.String()
+	// tabwriter flushes aligned columns using spaces; no raw tab should remain.
+	if strings.Contains(out, "\t") {
+		t.Errorf("output should be tab-aligned (no raw tabs), got: %q", out)
+	}
+	if !strings.Contains(out, "server.example.com") {
+		t.Errorf("output missing hostname: %q", out)
+	}
+}
+
 func TestRDNSGet_InvalidIP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("API should not be called for invalid IPs")

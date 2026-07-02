@@ -85,6 +85,45 @@ func TestGetRDNS_HostnameNull(t *testing.T) {
 	}
 }
 
+func TestGetRDNS_IPv4MappedIsUnmapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An IPv4-in-IPv6 address must route to the ipv4 endpoint with its
+		// dotted-quad form, not /v1/rdns/ipv4/::ffff:203.0.113.10.
+		if want := "/v1/rdns/ipv4/203.0.113.10"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rdns":"mapped.example.com"}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	entry, err := c.GetRDNS(context.Background(), "::ffff:203.0.113.10")
+	if err != nil {
+		t.Fatalf("GetRDNS() error = %v", err)
+	}
+	if entry.IP != "203.0.113.10" {
+		t.Errorf("IP = %q, want %q", entry.IP, "203.0.113.10")
+	}
+}
+
+func TestGetRDNS_ZoneRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("API should not be called for a zoned address")
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	_, err := c.GetRDNS(context.Background(), "fe80::1%eth0")
+	if err == nil {
+		t.Fatal("GetRDNS() error = nil, want error for zoned address")
+	}
+	if !strings.Contains(err.Error(), "zone") {
+		t.Errorf("error = %v, want mention of zone identifiers", err)
+	}
+}
+
 func TestGetRDNS_InvalidIP(t *testing.T) {
 	c := New(WithAccessToken("tok123"))
 	_, err := c.GetRDNS(context.Background(), "not-an-ip")
