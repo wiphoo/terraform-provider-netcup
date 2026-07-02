@@ -98,24 +98,36 @@ func serverList(args []string, out io.Writer) error {
 func serverGet(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("server-get", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
+
+	// flag.Parse stops at the first non-flag argument, so parse iteratively to
+	// accept flags before or after the positional ID (e.g. `server get 7 --json`).
+	var positional []string
+	pending := args
+	for {
+		if err := fs.Parse(pending); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
 		}
-		return err
+		pending = fs.Args()
+		if len(pending) == 0 {
+			break
+		}
+		positional = append(positional, pending[0])
+		pending = pending[1:]
 	}
 
-	rest := fs.Args()
-	if len(rest) == 0 {
+	if len(positional) == 0 {
 		usageServer(os.Stderr)
 		return fmt.Errorf("server get requires a server ID")
 	}
-	if len(rest) > 1 {
-		return fmt.Errorf("server get takes a single server ID, got %d arguments", len(rest))
+	if len(positional) > 1 {
+		return fmt.Errorf("server get takes a single server ID, got %d arguments", len(positional))
 	}
-	id, err := strconv.ParseInt(rest[0], 10, 32)
+	id, err := strconv.ParseInt(positional[0], 10, 32)
 	if err != nil {
-		return fmt.Errorf("invalid server ID %q: must be an integer", rest[0])
+		return fmt.Errorf("invalid server ID %q: must be an integer", positional[0])
 	}
 
 	client, err := clientWithToken()

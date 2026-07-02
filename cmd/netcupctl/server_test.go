@@ -169,13 +169,17 @@ func TestServerGet_JSONOutput(t *testing.T) {
 	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
 	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
 
-	var buf bytes.Buffer
-	if err := serverGet([]string{"--json", "7"}, &buf); err != nil {
-		t.Fatalf("serverGet() error = %v", err)
-	}
-	out := strings.TrimSpace(buf.String())
-	if !strings.HasPrefix(out, "{") || !strings.Contains(out, `"name": "srv7"`) {
-		t.Errorf("JSON output unexpected: %q", out)
+	// Flag placed both before and after the positional ID must work, since the
+	// documented form is `server get <id> [--json]`.
+	for _, args := range [][]string{{"--json", "7"}, {"7", "--json"}} {
+		var buf bytes.Buffer
+		if err := serverGet(args, &buf); err != nil {
+			t.Fatalf("serverGet(%v) error = %v", args, err)
+		}
+		out := strings.TrimSpace(buf.String())
+		if !strings.HasPrefix(out, "{") || !strings.Contains(out, `"name": "srv7"`) {
+			t.Errorf("serverGet(%v) JSON output unexpected: %q", args, out)
+		}
 	}
 }
 
