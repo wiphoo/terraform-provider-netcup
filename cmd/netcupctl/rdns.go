@@ -8,8 +8,21 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 )
+
+// rdnsHostnamesEqual reports whether two reverse-DNS hostnames are equivalent.
+// PTR values are FQDNs: DNS names are case-insensitive and the API may return a
+// canonicalized form with a trailing dot, so both are ignored (along with
+// surrounding whitespace) when confirming a read-back.
+func rdnsHostnamesEqual(a, b string) bool {
+	return normalizeRDNSHostname(a) == normalizeRDNSHostname(b)
+}
+
+func normalizeRDNSHostname(h string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+}
 
 func cmdRDNS(args []string) error {
 	if len(args) == 0 {
@@ -117,13 +130,21 @@ func rdnsSet(args []string, out io.Writer) error {
 		return err
 	}
 
-	// Read-back confirmation: fetch the entry and verify the hostname matches.
-	entry, err := client.GetRDNS(context.Background(), ip)
-	if err != nil {
-		return fmt.Errorf("rdns set succeeded but read-back failed: %w", err)
-	}
-	if entry.Hostname != set.Hostname {
-		return fmt.Errorf("rdns set succeeded but read-back mismatch: set %q, got %q", set.Hostname, entry.Hostname)
+	// Best-effort read-back confirmation. The mutation has already succeeded on
+	// the server, so a failed or mismatched read-back must not turn a completed
+	// set into a non-zero exit: netcup provisions PTRs asynchronously and may
+	// return the previous value (or null) on an immediate read, and it may
+	// normalize the stored hostname (ASCII case, trailing FQDN dot). Surface
+	// those as warnings and fall back to the value we set.
+	entry := set
+	readBack, err := client.GetRDNS(context.Background(), ip)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "warning: rdns set succeeded but read-back failed: %v\n", err)
+	case !rdnsHostnamesEqual(readBack.Hostname, set.Hostname):
+		fmt.Fprintf(os.Stderr, "warning: rdns set succeeded but read-back does not match yet: set %q, got %q (netcup may still be provisioning)\n", set.Hostname, readBack.Hostname)
+	default:
+		entry = readBack
 	}
 
 	if *jsonFlag {

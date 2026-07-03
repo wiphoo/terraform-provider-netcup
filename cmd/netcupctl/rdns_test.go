@@ -395,6 +395,9 @@ func TestRDNSSet_SetFails(t *testing.T) {
 }
 
 func TestRDNSSet_ReadBackFails(t *testing.T) {
+	// A failed read-back must not turn a completed set into a non-zero exit:
+	// the mutation already succeeded on the server. The command falls back to
+	// the value it set and warns on stderr.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -409,16 +412,18 @@ func TestRDNSSet_ReadBackFails(t *testing.T) {
 	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
 
 	var buf bytes.Buffer
-	err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf)
-	if err == nil {
-		t.Fatal("rdnsSet() error = nil, want read-back failure")
+	if err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf); err != nil {
+		t.Fatalf("rdnsSet() error = %v, want success despite read-back failure", err)
 	}
-	if !strings.Contains(err.Error(), "read-back failed") {
-		t.Errorf("error should mention read-back failure, got: %v", err)
+	out := buf.String()
+	if !strings.Contains(out, "203.0.113.10") || !strings.Contains(out, "server.example.com") {
+		t.Errorf("output should show the set value, got: %q", out)
 	}
 }
 
 func TestRDNSSet_ReadBackMismatch(t *testing.T) {
+	// A genuinely different read-back value warns but still succeeds, falling
+	// back to the value we set (netcup may still be provisioning).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -435,14 +440,58 @@ func TestRDNSSet_ReadBackMismatch(t *testing.T) {
 	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
 
 	var buf bytes.Buffer
-	err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf)
-	if err == nil {
-		t.Fatal("rdnsSet() error = nil, want mismatch error")
+	if err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf); err != nil {
+		t.Fatalf("rdnsSet() error = %v, want success despite read-back mismatch", err)
 	}
-	if !strings.Contains(err.Error(), "read-back mismatch") {
-		t.Errorf("error should mention read-back mismatch, got: %v", err)
+	out := buf.String()
+	if !strings.Contains(out, "server.example.com") {
+		t.Errorf("output should fall back to the set value, got: %q", out)
 	}
-	if !strings.Contains(err.Error(), "server.example.com") || !strings.Contains(err.Error(), "other.example.com") {
-		t.Errorf("error should name both hostnames, got: %v", err)
+}
+
+// TestRDNSSet_ReadBackNormalized covers the common case where the API stores a
+// PTR and echoes it back canonicalized (lowercased, trailing dot). This must
+// be treated as a match, not a spurious mismatch.
+func TestRDNSSet_ReadBackNormalized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			// Canonicalized: lowercased and with a trailing FQDN dot.
+			_, _ = w.Write([]byte(`{"rdns":"server.example.com."}`))
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := rdnsSet([]string{"203.0.113.10", "Server.Example.COM"}, &buf); err != nil {
+		t.Fatalf("rdnsSet() error = %v, want success for normalized read-back", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "server.example.com.") {
+		t.Errorf("output should show the read-back value, got: %q", out)
+	}
+}
+
+func TestRDNSHostnamesEqual(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"server.example.com", "server.example.com.", true},
+		{"Server.Example.COM", "server.example.com", true},
+		{"  server.example.com  ", "server.example.com.", true},
+		{"server.example.com", "other.example.com", false},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		if got := rdnsHostnamesEqual(c.a, c.b); got != c.want {
+			t.Errorf("rdnsHostnamesEqual(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
 	}
 }
