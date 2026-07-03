@@ -394,15 +394,26 @@ func TestRDNSSet_SetFails(t *testing.T) {
 	}
 }
 
+// fastRDNSConfirm shrinks the read-back retry delay so tests that exhaust the
+// retry window don't sleep for seconds. It restores the default afterward.
+func fastRDNSConfirm(t *testing.T) {
+	t.Helper()
+	old := rdnsConfirmDelay
+	rdnsConfirmDelay = 0
+	t.Cleanup(func() { rdnsConfirmDelay = old })
+}
+
 func TestRDNSSet_ReadBackFails(t *testing.T) {
-	// A failed read-back must not turn a completed set into a non-zero exit:
-	// the mutation already succeeded on the server. The command falls back to
-	// the value it set and warns on stderr.
+	// If read-back never succeeds, the set is not verifiably in effect, so the
+	// command must exit non-zero after exhausting its retries.
+	fastRDNSConfirm(t)
+	var gets int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
+			gets++
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message":"rdns entry not found"}`))
 		}
@@ -412,18 +423,22 @@ func TestRDNSSet_ReadBackFails(t *testing.T) {
 	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
 
 	var buf bytes.Buffer
-	if err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf); err != nil {
-		t.Fatalf("rdnsSet() error = %v, want success despite read-back failure", err)
+	err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf)
+	if err == nil {
+		t.Fatal("rdnsSet() error = nil, want error when read-back never confirms")
 	}
-	out := buf.String()
-	if !strings.Contains(out, "203.0.113.10") || !strings.Contains(out, "server.example.com") {
-		t.Errorf("output should show the set value, got: %q", out)
+	if !strings.Contains(err.Error(), "could not be confirmed") {
+		t.Errorf("error should mention confirmation failure, got: %v", err)
+	}
+	if gets != rdnsConfirmAttempts {
+		t.Errorf("read-back attempts = %d, want %d (should retry)", gets, rdnsConfirmAttempts)
 	}
 }
 
 func TestRDNSSet_ReadBackMismatch(t *testing.T) {
-	// A genuinely different read-back value warns but still succeeds, falling
-	// back to the value we set (netcup may still be provisioning).
+	// A persistently different read-back value means the requested PTR is not in
+	// effect, so the command exits non-zero after retrying.
+	fastRDNSConfirm(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -440,12 +455,54 @@ func TestRDNSSet_ReadBackMismatch(t *testing.T) {
 	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
 
 	var buf bytes.Buffer
-	if err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf); err != nil {
-		t.Fatalf("rdnsSet() error = %v, want success despite read-back mismatch", err)
+	err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf)
+	if err == nil {
+		t.Fatal("rdnsSet() error = nil, want mismatch error")
 	}
-	out := buf.String()
-	if !strings.Contains(out, "server.example.com") {
-		t.Errorf("output should fall back to the set value, got: %q", out)
+	if !strings.Contains(err.Error(), "did not match") {
+		t.Errorf("error should mention read-back mismatch, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "server.example.com") || !strings.Contains(err.Error(), "other.example.com") {
+		t.Errorf("error should name both hostnames, got: %v", err)
+	}
+}
+
+// TestRDNSSet_ReadBackEventuallyConsistent proves the retry loop absorbs
+// netcup's asynchronous provisioning: the first read-back returns the old
+// (null) value, a later one returns the requested hostname, and the command
+// succeeds.
+func TestRDNSSet_ReadBackEventuallyConsistent(t *testing.T) {
+	fastRDNSConfirm(t)
+	var gets int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			gets++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if gets < 3 {
+				// Not provisioned yet.
+				_, _ = w.Write([]byte(`{"rdns":null}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"rdns":"server.example.com"}`))
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := rdnsSet([]string{"203.0.113.10", "server.example.com"}, &buf); err != nil {
+		t.Fatalf("rdnsSet() error = %v, want success once read-back becomes consistent", err)
+	}
+	if gets != 3 {
+		t.Errorf("read-back attempts = %d, want 3 (stops once confirmed)", gets)
+	}
+	if out := buf.String(); !strings.Contains(out, "server.example.com") {
+		t.Errorf("output should show the confirmed value, got: %q", out)
 	}
 }
 

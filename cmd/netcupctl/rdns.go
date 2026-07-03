@@ -10,7 +10,47 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
+
+// rdnsConfirmAttempts and rdnsConfirmDelay bound the read-back confirmation
+// after a set. netcup applies PTR changes asynchronously, so confirmRDNS
+// re-reads across this window before giving up. They are package variables so
+// tests can shrink the delay.
+var (
+	rdnsConfirmAttempts = 5
+	rdnsConfirmDelay    = 1 * time.Second
+)
+
+// confirmRDNS re-reads the PTR for ip until it matches the value we set,
+// absorbing netcup's asynchronous provisioning delay. It returns the confirmed
+// entry on success, or an error if the requested PTR could not be confirmed
+// within the retry window (so an unverified set does not exit 0).
+func confirmRDNS(client *netcup.Client, ip string, set *netcup.RdnsEntry) (*netcup.RdnsEntry, error) {
+	var lastErr error
+	var lastHostname string
+	for attempt := 0; attempt < rdnsConfirmAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(rdnsConfirmDelay)
+		}
+		readBack, err := client.GetRDNS(context.Background(), ip)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if rdnsHostnamesEqual(readBack.Hostname, set.Hostname) {
+			return readBack, nil
+		}
+		lastErr = nil
+		lastHostname = readBack.Hostname
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("rdns set succeeded but could not be confirmed after %d attempts: %w", rdnsConfirmAttempts, lastErr)
+	}
+	return nil, fmt.Errorf("rdns set succeeded but read-back did not match after %d attempts: set %q, got %q", rdnsConfirmAttempts, set.Hostname, lastHostname)
+}
 
 // rdnsHostnamesEqual reports whether two reverse-DNS hostnames are equivalent.
 // PTR values are FQDNs: DNS names are case-insensitive and the API may return a
@@ -130,21 +170,16 @@ func rdnsSet(args []string, out io.Writer) error {
 		return err
 	}
 
-	// Best-effort read-back confirmation. The mutation has already succeeded on
-	// the server, so a failed or mismatched read-back must not turn a completed
-	// set into a non-zero exit: netcup provisions PTRs asynchronously and may
-	// return the previous value (or null) on an immediate read, and it may
-	// normalize the stored hostname (ASCII case, trailing FQDN dot). Surface
-	// those as warnings and fall back to the value we set.
-	entry := set
-	readBack, err := client.GetRDNS(context.Background(), ip)
-	switch {
-	case err != nil:
-		fmt.Fprintf(os.Stderr, "warning: rdns set succeeded but read-back failed: %v\n", err)
-	case !rdnsHostnamesEqual(readBack.Hostname, set.Hostname):
-		fmt.Fprintf(os.Stderr, "warning: rdns set succeeded but read-back does not match yet: set %q, got %q (netcup may still be provisioning)\n", set.Hostname, readBack.Hostname)
-	default:
-		entry = readBack
+	// Confirm the change actually landed before reporting success. netcup
+	// provisions PTRs asynchronously, so an immediate read may still return the
+	// previous value (or null); retry across a short window to absorb that.
+	// The stored hostname may also be canonicalized (ASCII case, trailing FQDN
+	// dot), so compare with rdnsHostnamesEqual. If confirmation never succeeds
+	// the requested PTR is not verifiably in effect, so return an error rather
+	// than a misleading exit code 0.
+	entry, err := confirmRDNS(client, ip, set)
+	if err != nil {
+		return err
 	}
 
 	if *jsonFlag {
