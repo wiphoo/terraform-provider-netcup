@@ -108,16 +108,20 @@ func (c *Client) OIDCEndpoint() string { return c.oidcEndpoint }
 // RefreshToken returns the configured refresh token, if any.
 func (c *Client) RefreshToken() string { return c.refreshToken }
 
-// newRequest builds a request against the REST API, attaching the Accept header
-// and a Bearer token when one is configured.
-func (c *Client) newRequest(ctx context.Context, method, path, accept string) (*http.Request, error) {
+// newRequest builds a request against the REST API, attaching the Accept
+// header, a Bearer token when one is configured, and a JSON Content-Type when
+// a body is supplied.
+func (c *Client) newRequest(ctx context.Context, method, path, accept string, body io.Reader) (*http.Request, error) {
 	url := strings.TrimRight(c.apiEndpoint, "/") + path
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
 	}
 	if accept != "" {
 		req.Header.Set("Accept", accept)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if c.accessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.accessToken)
@@ -128,7 +132,7 @@ func (c *Client) newRequest(ctx context.Context, method, path, accept string) (*
 // Ping verifies that the SCP REST API is reachable by calling GET /ping. It does
 // not require authentication, but the IP allowlist gate still applies.
 func (c *Client) Ping(ctx context.Context) error {
-	req, err := c.newRequest(ctx, http.MethodGet, "/ping", "text/plain")
+	req, err := c.newRequest(ctx, http.MethodGet, "/ping", "text/plain", nil)
 	if err != nil {
 		return err
 	}

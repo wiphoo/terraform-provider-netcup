@@ -442,7 +442,7 @@ func TestNewRequestDoesNotLeakRefreshToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	req, err := c.newRequest(context.Background(), http.MethodGet, "/ping", "text/plain")
+	req, err := c.newRequest(context.Background(), http.MethodGet, "/ping", "text/plain", nil)
 	if err != nil {
 		t.Fatalf("newRequest error = %v", err)
 	}

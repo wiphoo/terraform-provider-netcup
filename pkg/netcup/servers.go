@@ -80,7 +80,7 @@ type IPv6AddressMinimal struct {
 // GetServer calls GET /v1/servers/{id} and returns the server's detail. An
 // unknown ID surfaces as an *APIError with StatusCode 404.
 func (c *Client) GetServer(ctx context.Context, id int32) (*Server, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/servers/%d", id), "application/json")
+	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/servers/%d", id), "application/json", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (c *Client) GetServer(ctx context.Context, id int32) (*Server, error) {
 // ListServers calls GET /v1/servers and returns the account's servers. An empty
 // slice is a valid response (no error).
 func (c *Client) ListServers(ctx context.Context) ([]ServerListMinimal, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/v1/servers", "application/json")
+	req, err := c.newRequest(ctx, http.MethodGet, "/v1/servers", "application/json", nil)
 	if err != nil {
 		return nil, err
 	}
