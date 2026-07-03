@@ -148,6 +148,50 @@ and token-refresh logic is written and tested once.
 - Avoid destructive lifecycle features in early releases.
 - Do not use Terraform as a cloud-init, SSH, Ansible, or Kubernetes bootstrap tool.
 
+## Releasing
+
+`netcupctl` binaries are built and published automatically by
+[GoReleaser](https://goreleaser.com) via the `Release` GitHub Actions workflow
+(`.github/workflows/release.yml`). Configuration lives in `.goreleaser.yaml`.
+
+Cut a release by pushing a SemVer tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow then:
+
+- builds `netcupctl` for linux, macOS, and Windows (amd64 and arm64), embedding
+  the tag as the version via `-ldflags` into `internal/version` (visible in
+  `netcupctl version`);
+- packages `tar.gz` archives (`.zip` on Windows) plus a `checksums.txt`
+  (SHA-256); and
+- creates a GitHub Release with the archives, checksums, and signature attached.
+
+### Signing
+
+The `checksums.txt` file is signed with [cosign](https://docs.sigstore.dev/) in
+**keyless** mode, using the GitHub Actions OIDC identity — there is no private
+signing key to store or rotate. Each release includes `checksums.txt.sig`
+(signature) and `checksums.txt.pem` (signing certificate).
+
+Verify a downloaded release:
+
+```bash
+# 1. Verify the checksums file was signed by this repo's release workflow.
+cosign verify-blob \
+  --certificate checksums.txt.pem \
+  --signature checksums.txt.sig \
+  --certificate-identity-regexp '^https://github.com/wiphoo/terraform-provider-netcup/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  checksums.txt
+
+# 2. Verify your downloaded archive against the checksums.
+sha256sum --check --ignore-missing checksums.txt
+```
+
 ## Documentation
 
 - [Roadmap](docs/ROADMAP.md)
