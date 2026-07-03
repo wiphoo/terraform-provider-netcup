@@ -29,6 +29,8 @@ func run(args []string) error {
 		return cmdAuth(args[1:])
 	case "server":
 		return cmdServer(args[1:])
+	case "rdns":
+		return cmdRDNS(args[1:])
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -51,6 +53,7 @@ Commands:
   ping       Check that the SCP REST API is reachable
   auth       OAuth 2.0 device-authorization login and token refresh
   server     List and manage servers
+  rdns       Manage reverse DNS entries
   version    Print the netcupctl version
   help       Show this help
 `)
