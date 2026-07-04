@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/wiphoo/terraform-provider-netcup/discussions
     about: For questions and general discussion, please use GitHub Discussions.
   - name: Netcup SCP API issue
-    url: https://www.netcup.de/kontakt/
+    url: https://www.netcup.com/en/helpcenter/support
     about: For issues with the Netcup SCP API itself, contact Netcup support directly.
