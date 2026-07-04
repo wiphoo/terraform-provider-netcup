@@ -21,7 +21,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # gofmt never downloads modules; caching adds overhead with no benefit
 
       - name: Go format check
         run: |
@@ -33,6 +33,7 @@ jobs:
           fi
 
   test:
+    needs: [fmt]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -51,6 +52,7 @@ jobs:
         run: go test ./...
 
   lint:
+    needs: [fmt]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -65,4 +67,4 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          version: v2.12.2

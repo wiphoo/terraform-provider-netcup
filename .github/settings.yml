@@ -1,13 +1,19 @@
 # Repository settings as code (probot/settings).
 # Docs: https://github.com/apps/settings
 #
-# To enforce these rules, install the free "Settings" GitHub App on the repo
-# (https://github.com/apps/settings) and grant it Administration: Read & Write
-# permission. The app reconciles this file against the repository on every push
-# to the default branch. See CONTRIBUTING.md -> "Branch protection / merge rules".
-#
-# If you prefer not to install the app, apply the same rules manually under
-# Settings -> Branches -> Branch protection rules (documented in CONTRIBUTING.md).
+# ┌─ BOOTSTRAP REQUIRED ──────────────────────────────────────────────────────┐
+# │ This file is enforced ONLY when the free "Settings" GitHub App is         │
+# │ installed on the repo with Administration: Read & Write permission.       │
+# │ Until the app is installed, the branch-protection rules below             │
+# │ (no force-pushes, required CI, enforce_admins, linear history) are        │
+# │ UNENFORCED — main is unprotected.                                         │
+# │                                                                           │
+# │ Install: https://github.com/apps/settings                                 │
+# │ Then grant: Settings → GitHub Apps → Settings → Administration: R/W      │
+# │                                                                           │
+# │ Alternatively, apply the equivalent rules manually under                  │
+# │ Settings → Branches → Branch protection rules (see CONTRIBUTING.md).      │
+# └───────────────────────────────────────────────────────────────────────────┘
 
 repository:
   # Default branch is `main`.
