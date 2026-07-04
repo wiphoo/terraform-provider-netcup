@@ -93,9 +93,9 @@ branches:
       # with `main` before merging (no stale-green merges).
       required_status_checks:
         contexts:
-          - "CI / fmt"
-          - "CI / test"
-          - "CI / lint"
+          - "fmt"
+          - "test"
+          - "lint"
         strict: true
 
       required_pull_request_reviews:

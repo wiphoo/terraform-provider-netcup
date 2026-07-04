@@ -141,8 +141,8 @@ it **Administration: Read & Write** permission. The app reconciles
 The `main` branch is protected as follows:
 
 - Pull requests are required — no direct pushes to `main`.
-- Required status checks: `CI / fmt`, `CI / test`, `CI / lint`, each kept up to
-  date with `main` before merging (no stale-green merges).
+- Required status checks: `fmt`, `test`, `lint`, each kept up to date with
+  `main` before merging (no stale-green merges).
 - Squash merges only; merge-commit and rebase merges are disabled.
 - Linear history is required; the PR branch is deleted automatically after
   merge.
@@ -162,8 +162,8 @@ If you prefer not to install the Settings app, apply the equivalent rules in
 the GitHub UI under **Settings → Branches → Branch protection rules → main**:
 
 - Require a pull request before merging (0 approvals while solo).
-- Require status checks to pass before merging: `CI / fmt`, `CI / test`,
-  `CI / lint`; require branches to be up to date before merging.
+- Require status checks to pass before merging: `fmt`, `test`, `lint`;
+  require branches to be up to date before merging.
 - Require conversation resolution before merging.
 - Require linear history.
 - Do not allow force pushes; do not allow deletions.
