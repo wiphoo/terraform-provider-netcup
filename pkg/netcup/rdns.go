@@ -32,6 +32,31 @@ type rdnsSetRequest struct {
 	Rdns string `json:"rdns"`
 }
 
+// canonicalizeIP validates ip and returns its canonical form (RFC 5952 for
+// IPv6; IPv4-in-IPv6 addresses are unmapped to dotted-quad) along with the
+// address family ("ipv4" or "ipv6") used to route to the correct rDNS
+// endpoint. Zone identifiers are rejected since the SCP API has no use for
+// them.
+func canonicalizeIP(ip string) (canonical, family string, err error) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid IP address %q: %w", ip, err)
+	}
+	if addr.Zone() != "" {
+		return "", "", fmt.Errorf("invalid IP address %q: zone identifiers are not supported", ip)
+	}
+
+	// Unmap so an IPv4-in-IPv6 address (::ffff:a.b.c.d) is treated as IPv4 and
+	// canonicalized to its dotted-quad form, matching the ipv4 route.
+	addr = addr.Unmap()
+
+	family = "ipv6"
+	if addr.Is4() {
+		family = "ipv4"
+	}
+	return addr.String(), family, nil
+}
+
 // GetRDNS calls GET /v1/rdns/{ipv4|ipv6}/{ip} and returns the current reverse
 // DNS entry for the IP address.
 //
@@ -39,22 +64,9 @@ type rdnsSetRequest struct {
 // When no custom PTR is set the API returns {"rdns": null}; the returned
 // RdnsEntry has an empty Hostname (no error).
 func (c *Client) GetRDNS(ctx context.Context, ip string) (*RdnsEntry, error) {
-	addr, err := netip.ParseAddr(ip)
+	canonical, family, err := canonicalizeIP(ip)
 	if err != nil {
-		return nil, fmt.Errorf("invalid IP address %q: %w", ip, err)
-	}
-	if addr.Zone() != "" {
-		return nil, fmt.Errorf("invalid IP address %q: zone identifiers are not supported", ip)
-	}
-
-	// Unmap so an IPv4-in-IPv6 address (::ffff:a.b.c.d) is treated as IPv4 and
-	// canonicalized to its dotted-quad form, matching the ipv4 route.
-	addr = addr.Unmap()
-	canonical := addr.String()
-
-	family := "ipv6"
-	if addr.Is4() {
-		family = "ipv4"
+		return nil, err
 	}
 
 	path := fmt.Sprintf("/v1/rdns/%s/%s", family, canonical)
@@ -103,25 +115,14 @@ func (c *Client) GetRDNS(ctx context.Context, ip string) (*RdnsEntry, error) {
 // sent; it does not reflect a fresh read-back. Call GetRDNS to confirm the
 // value remotely.
 func (c *Client) SetRDNS(ctx context.Context, ip, hostname string) (*RdnsEntry, error) {
-	addr, err := netip.ParseAddr(ip)
+	canonical, family, err := canonicalizeIP(ip)
 	if err != nil {
-		return nil, fmt.Errorf("invalid IP address %q: %w", ip, err)
+		return nil, err
 	}
-	if addr.Zone() != "" {
-		return nil, fmt.Errorf("invalid IP address %q: zone identifiers are not supported", ip)
-	}
-
-	addr = addr.Unmap()
-	canonical := addr.String()
 
 	hostname = strings.TrimSpace(hostname)
 	if hostname == "" {
 		return nil, fmt.Errorf("hostname must not be empty")
-	}
-
-	family := "ipv6"
-	if addr.Is4() {
-		family = "ipv4"
 	}
 
 	encoded, err := json.Marshal(rdnsSetRequest{IP: canonical, Rdns: hostname})
@@ -151,4 +152,37 @@ func (c *Client) SetRDNS(ctx context.Context, ip, hostname string) (*RdnsEntry, 
 		IP:       canonical,
 		Hostname: hostname,
 	}, nil
+}
+
+// DeleteRDNS calls DELETE /v1/rdns/{ipv4|ipv6}/{ip} to remove the custom
+// reverse DNS entry (PTR record) for the given IP address. The address
+// reverts to its provider-default PTR.
+//
+// The IP is validated and canonicalized (RFC 5952 for IPv6) before the API
+// call. A 204 No Content response is success; any other status code surfaces
+// as an *APIError.
+func (c *Client) DeleteRDNS(ctx context.Context, ip string) error {
+	canonical, family, err := canonicalizeIP(ip)
+	if err != nil {
+		return err
+	}
+
+	path := fmt.Sprintf("/v1/rdns/%s/%s", family, canonical)
+	req, err := c.newRequest(ctx, http.MethodDelete, path, "application/json", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode/100 != 2 {
+		return newAPIError(resp)
+	}
+	// Drain any response body so the connection can be reused (keep-alive).
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
