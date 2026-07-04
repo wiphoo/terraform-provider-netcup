@@ -1,0 +1,80 @@
+# GoReleaser configuration for the netcupctl CLI.
+# Docs: https://goreleaser.com
+#
+# Releases are cut by pushing a SemVer tag (vX.Y.Z); the release workflow
+# (.github/workflows/release.yml) runs `goreleaser release`. The checksums file
+# is signed with cosign in keyless mode using the GitHub Actions OIDC identity,
+# so there is no signing key to manage. See the "Releasing" section in README.md.
+version: 2
+
+project_name: netcupctl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: netcupctl
+    main: ./cmd/netcupctl
+    binary: netcupctl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/wiphoo/terraform-provider-netcup/internal/version.Version={{ .Version }}
+
+archives:
+  - id: netcupctl
+    ids:
+      - netcupctl
+    name_template: >-
+      netcupctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    # Windows users expect a .zip.
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Keyless cosign signature over the checksums file. In GitHub Actions the OIDC
+# token is discovered automatically (permissions: id-token: write); locally the
+# release workflow is the only place signing runs. Emits <checksums>.sig and the
+# signing certificate <checksums>.pem alongside the release assets.
+signs:
+  - cmd: cosign
+    signature: ${artifact}.sig
+    certificate: ${artifact}.pem
+    args:
+      - sign-blob
+      - --yes
+      - --output-signature=${signature}
+      - --output-certificate=${certificate}
+      - ${artifact}
+    artifacts: checksum
+    output: true
+
+release:
+  draft: false
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
