@@ -368,6 +368,128 @@ func TestSetRDNS_APIError(t *testing.T) {
 	}
 }
 
+func TestDeleteRDNSSuccess_IPv4(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := http.MethodDelete; r.Method != got {
+			t.Errorf("method = %q, want %q", r.Method, got)
+		}
+		if want := "/v1/rdns/ipv4/203.0.113.10"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	if err := c.DeleteRDNS(context.Background(), "203.0.113.10"); err != nil {
+		t.Fatalf("DeleteRDNS() error = %v", err)
+	}
+}
+
+func TestDeleteRDNSSuccess_IPv6(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// IPv6 address should be canonicalized (RFC 5952) in the path.
+		if want := "/v1/rdns/ipv6/2a03:4000:6:b1d::1"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	// Use expanded/non-canonical form; the SDK must canonicalize it.
+	err := c.DeleteRDNS(context.Background(), "2A03:4000:0006:0B1D:0000:0000:0000:0001")
+	if err != nil {
+		t.Fatalf("DeleteRDNS() error = %v", err)
+	}
+}
+
+func TestDeleteRDNS_IPv4MappedIsUnmapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An IPv4-in-IPv6 address must route to the ipv4 endpoint with its
+		// dotted-quad form, not /v1/rdns/ipv4/::ffff:203.0.113.10.
+		if want := "/v1/rdns/ipv4/203.0.113.10"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	if err := c.DeleteRDNS(context.Background(), "::ffff:203.0.113.10"); err != nil {
+		t.Fatalf("DeleteRDNS() error = %v", err)
+	}
+}
+
+func TestDeleteRDNS_ZoneRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("API should not be called for a zoned address")
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	err := c.DeleteRDNS(context.Background(), "fe80::1%eth0")
+	if err == nil {
+		t.Fatal("DeleteRDNS() error = nil, want error for zoned address")
+	}
+	if !strings.Contains(err.Error(), "zone") {
+		t.Errorf("error = %v, want mention of zone identifiers", err)
+	}
+}
+
+func TestDeleteRDNS_InvalidIP(t *testing.T) {
+	c := New(WithAccessToken("tok123"))
+	err := c.DeleteRDNS(context.Background(), "not-an-ip")
+	if err == nil {
+		t.Fatal("DeleteRDNS() error = nil, want error for invalid IP")
+	}
+	if !strings.Contains(err.Error(), "invalid IP address") {
+		t.Errorf("error = %v, want mention of invalid IP address", err)
+	}
+}
+
+func TestDeleteRDNS_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"rdns entry not found"}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	err := c.DeleteRDNS(context.Background(), "203.0.113.10")
+	if err == nil {
+		t.Fatal("DeleteRDNS() error = nil, want error")
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *netcup.APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestDeleteRDNS_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"validation error"}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	err := c.DeleteRDNS(context.Background(), "203.0.113.10")
+	if err == nil {
+		t.Fatal("DeleteRDNS() error = nil, want error")
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *netcup.APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusUnprocessableEntity)
+	}
+}
+
 func TestSetRDNS_UnauthorizedHint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
