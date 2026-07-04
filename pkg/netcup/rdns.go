@@ -80,7 +80,7 @@ func (c *Client) GetRDNS(ctx context.Context, ip string) (*RdnsEntry, error) {
 	}
 
 	path := fmt.Sprintf("/v1/rdns/%s/%s", family, canonical)
-	req, err := c.newRequest(ctx, http.MethodGet, path, "application/json", nil)
+	req, err := c.newRequest(ctx, http.MethodGet, path, "application/json", nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (c *Client) SetRDNS(ctx context.Context, ip, hostname string) (*RdnsEntry, 
 	}
 
 	path := fmt.Sprintf("/v1/rdns/%s", family)
-	req, err := c.newRequest(ctx, http.MethodPost, path, "application/json", bytes.NewReader(encoded))
+	req, err := c.newRequest(ctx, http.MethodPost, path, "application/json", bytes.NewReader(encoded), true)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +178,7 @@ func (c *Client) DeleteRDNS(ctx context.Context, ip string) error {
 	}
 
 	path := fmt.Sprintf("/v1/rdns/%s/%s", family, canonical)
-	req, err := c.newRequest(ctx, http.MethodDelete, path, "application/json", nil)
+	req, err := c.newRequest(ctx, http.MethodDelete, path, "application/json", nil, true)
 	if err != nil {
 		return err
 	}

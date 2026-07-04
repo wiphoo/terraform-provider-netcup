@@ -125,9 +125,12 @@ func (c *Client) RefreshToken() string { return c.refreshToken }
 //
 // When a TokenSource is configured (WithTokenSource), it is consulted for the
 // Bearer token on every call; otherwise the static access token (WithAccessToken)
-// is used. A TokenSource error is returned to the caller rather than sending
-// the request unauthenticated.
-func (c *Client) newRequest(ctx context.Context, method, path, accept string, body io.Reader) (*http.Request, error) {
+// is used. When authRequired is true, a TokenSource error is returned to the
+// caller rather than sending the request unauthenticated; when false (for
+// endpoints that work without authentication, such as Ping), a TokenSource
+// error is ignored and the request is sent without a Bearer token instead of
+// failing outright.
+func (c *Client) newRequest(ctx context.Context, method, path, accept string, body io.Reader, authRequired bool) (*http.Request, error) {
 	url := strings.TrimRight(c.apiEndpoint, "/") + path
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
@@ -142,10 +145,14 @@ func (c *Client) newRequest(ctx context.Context, method, path, accept string, bo
 
 	token := c.accessToken
 	if c.tokenSource != nil {
-		token, err = c.tokenSource.Token(ctx)
+		t, err := c.tokenSource.Token(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("getting access token: %w", err)
+			if authRequired {
+				return nil, fmt.Errorf("getting access token: %w", err)
+			}
+			t = ""
 		}
+		token = t
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -154,9 +161,12 @@ func (c *Client) newRequest(ctx context.Context, method, path, accept string, bo
 }
 
 // Ping verifies that the SCP REST API is reachable by calling GET /ping. It does
-// not require authentication, but the IP allowlist gate still applies.
+// not require authentication, but the IP allowlist gate still applies. A
+// TokenSource error is not treated as fatal here (unlike authenticated
+// endpoints): Ping still probes connectivity even if the token can't be
+// refreshed.
 func (c *Client) Ping(ctx context.Context) error {
-	req, err := c.newRequest(ctx, http.MethodGet, "/ping", "text/plain", nil)
+	req, err := c.newRequest(ctx, http.MethodGet, "/ping", "text/plain", nil, false)
 	if err != nil {
 		return err
 	}
