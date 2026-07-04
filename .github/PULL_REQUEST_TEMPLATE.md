@@ -11,6 +11,7 @@ Closes #
 - [ ] Documentation
 - [ ] Refactor
 - [ ] Chore (CI, deps, tooling)
+- [ ] Breaking change (call out migration in the summary; bumps the major version)
 
 ## Changes
 
