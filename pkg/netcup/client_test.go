@@ -2,8 +2,10 @@ package netcup
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -162,6 +164,45 @@ func TestListServersHandlesNullFields(t *testing.T) {
 	}
 	if !servers[0].Disabled {
 		t.Error("Disabled = false, want true")
+	}
+}
+
+func TestPingUsesTokenSourceOverStaticToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("static-tok"), WithTokenSource(staticTokenSource("source-tok")))
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if want := "Bearer source-tok"; gotAuth != want {
+		t.Fatalf("Authorization = %q, want %q (TokenSource should take precedence)", gotAuth, want)
+	}
+}
+
+type erroringTokenSource struct{}
+
+func (erroringTokenSource) Token(_ context.Context) (string, error) {
+	return "", fmt.Errorf("token source unavailable")
+}
+
+func TestPingSurfacesTokenSourceError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("API should not be called when the token source errors")
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithTokenSource(erroringTokenSource{}))
+	err := c.Ping(context.Background())
+	if err == nil {
+		t.Fatal("Ping() error = nil, want error from token source")
+	}
+	if !strings.Contains(err.Error(), "token source unavailable") {
+		t.Errorf("error = %v, want to mention the token source failure", err)
 	}
 }
 

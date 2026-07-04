@@ -6,6 +6,7 @@ package netcup
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -34,6 +35,7 @@ type Client struct {
 	oidcEndpoint string
 	accessToken  string
 	refreshToken string
+	tokenSource  TokenSource
 	httpClient   *http.Client
 }
 
@@ -58,6 +60,15 @@ func WithAccessToken(token string) Option {
 // WithRefreshToken sets the refresh token used for transparent token refresh.
 func WithRefreshToken(token string) Option {
 	return func(c *Client) { c.refreshToken = token }
+}
+
+// WithTokenSource attaches a TokenSource that is consulted for the Bearer
+// token on every request, taking precedence over the static access token set
+// by WithAccessToken. Use this for long-running callers (such as the
+// Terraform provider) that need transparent refresh across a token's
+// lifetime; short-lived CLI invocations can keep using a static token.
+func WithTokenSource(ts TokenSource) Option {
+	return func(c *Client) { c.tokenSource = ts }
 }
 
 // WithHTTPClient sets a custom *http.Client (for timeouts, transports, tests).
@@ -111,6 +122,11 @@ func (c *Client) RefreshToken() string { return c.refreshToken }
 // newRequest builds a request against the REST API, attaching the Accept
 // header, a Bearer token when one is configured, and a JSON Content-Type when
 // a body is supplied.
+//
+// When a TokenSource is configured (WithTokenSource), it is consulted for the
+// Bearer token on every call; otherwise the static access token (WithAccessToken)
+// is used. A TokenSource error is returned to the caller rather than sending
+// the request unauthenticated.
 func (c *Client) newRequest(ctx context.Context, method, path, accept string, body io.Reader) (*http.Request, error) {
 	url := strings.TrimRight(c.apiEndpoint, "/") + path
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
@@ -123,8 +139,16 @@ func (c *Client) newRequest(ctx context.Context, method, path, accept string, bo
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.accessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.accessToken)
+
+	token := c.accessToken
+	if c.tokenSource != nil {
+		token, err = c.tokenSource.Token(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("getting access token: %w", err)
+		}
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	return req, nil
 }

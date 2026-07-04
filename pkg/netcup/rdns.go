@@ -9,6 +9,16 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"time"
+)
+
+// rdnsConfirmAttempts and rdnsConfirmDelay bound the read-back confirmation
+// performed by ConfirmRDNS. netcup applies PTR changes asynchronously, so
+// ConfirmRDNS re-reads across this window before giving up. They are package
+// variables so tests can shrink the delay.
+var (
+	rdnsConfirmAttempts = 5
+	rdnsConfirmDelay    = 1 * time.Second
 )
 
 // RdnsEntry is the response from the SCP reverse DNS endpoints.
@@ -185,4 +195,53 @@ func (c *Client) DeleteRDNS(ctx context.Context, ip string) error {
 	// Drain any response body so the connection can be reused (keep-alive).
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// ConfirmRDNS re-reads the PTR for ip until it matches expected.Hostname,
+// absorbing netcup's asynchronous PTR provisioning delay. It returns the
+// confirmed entry on success, or an error if the requested PTR could not be
+// confirmed within the retry window (so an unverified set is not reported as
+// successful).
+//
+// The wait between attempts honors ctx: if ctx is done before the next
+// attempt, ConfirmRDNS returns ctx.Err() immediately instead of blocking for
+// the full delay.
+func (c *Client) ConfirmRDNS(ctx context.Context, ip string, expected *RdnsEntry) (*RdnsEntry, error) {
+	var lastErr error
+	var lastHostname string
+	for attempt := 0; attempt < rdnsConfirmAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(rdnsConfirmDelay):
+			}
+		}
+		readBack, err := c.GetRDNS(ctx, ip)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if rdnsHostnamesEqual(readBack.Hostname, expected.Hostname) {
+			return readBack, nil
+		}
+		lastErr = nil
+		lastHostname = readBack.Hostname
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("rdns set succeeded but could not be confirmed after %d attempts: %w", rdnsConfirmAttempts, lastErr)
+	}
+	return nil, fmt.Errorf("rdns set succeeded but read-back did not match after %d attempts: set %q, got %q", rdnsConfirmAttempts, expected.Hostname, lastHostname)
+}
+
+// rdnsHostnamesEqual reports whether two reverse-DNS hostnames are equivalent.
+// PTR values are FQDNs: DNS names are case-insensitive and the API may return a
+// canonicalized form with a trailing dot, so both are ignored (along with
+// surrounding whitespace) when confirming a read-back.
+func rdnsHostnamesEqual(a, b string) bool {
+	return normalizeRDNSHostname(a) == normalizeRDNSHostname(b)
+}
+
+func normalizeRDNSHostname(h string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }

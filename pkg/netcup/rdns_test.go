@@ -7,7 +7,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// fastRDNSConfirm shrinks the read-back retry delay so tests that exhaust the
+// retry window don't sleep for seconds. It restores the default afterward.
+func fastRDNSConfirm(t *testing.T) {
+	t.Helper()
+	old := rdnsConfirmDelay
+	rdnsConfirmDelay = 0
+	t.Cleanup(func() { rdnsConfirmDelay = old })
+}
 
 func TestGetRDNSSuccess_IPv4(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -511,5 +521,191 @@ func TestSetRDNS_UnauthorizedHint(t *testing.T) {
 	}
 	if !strings.Contains(apiErr.Error(), "IP is allowed") {
 		t.Errorf("error = %v, want IP allowlist hint for 401", apiErr)
+	}
+}
+
+func TestConfirmRDNS_ImmediateMatch(t *testing.T) {
+	var gets int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rdns":"server.example.com"}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	entry, err := c.ConfirmRDNS(context.Background(), "203.0.113.10", &RdnsEntry{IP: "203.0.113.10", Hostname: "server.example.com"})
+	if err != nil {
+		t.Fatalf("ConfirmRDNS() error = %v", err)
+	}
+	if entry.Hostname != "server.example.com" {
+		t.Errorf("Hostname = %q, want %q", entry.Hostname, "server.example.com")
+	}
+	if gets != 1 {
+		t.Errorf("GET calls = %d, want 1 (no retry needed)", gets)
+	}
+}
+
+func TestConfirmRDNS_ReadBackFails(t *testing.T) {
+	// If read-back never succeeds, the set is not verifiably in effect, so
+	// ConfirmRDNS must return an error after exhausting its retries.
+	fastRDNSConfirm(t)
+	var gets int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"rdns entry not found"}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	_, err := c.ConfirmRDNS(context.Background(), "203.0.113.10", &RdnsEntry{IP: "203.0.113.10", Hostname: "server.example.com"})
+	if err == nil {
+		t.Fatal("ConfirmRDNS() error = nil, want error when read-back never confirms")
+	}
+	if !strings.Contains(err.Error(), "could not be confirmed") {
+		t.Errorf("error should mention confirmation failure, got: %v", err)
+	}
+	if gets != rdnsConfirmAttempts {
+		t.Errorf("read-back attempts = %d, want %d (should retry)", gets, rdnsConfirmAttempts)
+	}
+}
+
+func TestConfirmRDNS_ReadBackMismatch(t *testing.T) {
+	// A persistently different read-back value means the requested PTR is not
+	// in effect, so ConfirmRDNS returns an error after retrying.
+	fastRDNSConfirm(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rdns":"other.example.com"}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	_, err := c.ConfirmRDNS(context.Background(), "203.0.113.10", &RdnsEntry{IP: "203.0.113.10", Hostname: "server.example.com"})
+	if err == nil {
+		t.Fatal("ConfirmRDNS() error = nil, want mismatch error")
+	}
+	if !strings.Contains(err.Error(), "did not match") {
+		t.Errorf("error should mention read-back mismatch, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "server.example.com") || !strings.Contains(err.Error(), "other.example.com") {
+		t.Errorf("error should name both hostnames, got: %v", err)
+	}
+}
+
+// TestConfirmRDNS_ReadBackEventuallyConsistent proves the retry loop absorbs
+// netcup's asynchronous provisioning: the first read-back returns the old
+// (null) value, a later one returns the requested hostname, and ConfirmRDNS
+// succeeds.
+func TestConfirmRDNS_ReadBackEventuallyConsistent(t *testing.T) {
+	fastRDNSConfirm(t)
+	var gets int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if gets < 3 {
+			// Not provisioned yet.
+			_, _ = w.Write([]byte(`{"rdns":null}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"rdns":"server.example.com"}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	entry, err := c.ConfirmRDNS(context.Background(), "203.0.113.10", &RdnsEntry{IP: "203.0.113.10", Hostname: "server.example.com"})
+	if err != nil {
+		t.Fatalf("ConfirmRDNS() error = %v, want success once read-back becomes consistent", err)
+	}
+	if gets != 3 {
+		t.Errorf("read-back attempts = %d, want 3 (stops once confirmed)", gets)
+	}
+	if entry.Hostname != "server.example.com" {
+		t.Errorf("Hostname = %q, want confirmed value", entry.Hostname)
+	}
+}
+
+// TestConfirmRDNS_ReadBackNormalized covers the common case where the API
+// stores a PTR and echoes it back canonicalized (lowercased, trailing dot).
+// This must be treated as a match, not a spurious mismatch.
+func TestConfirmRDNS_ReadBackNormalized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Canonicalized: lowercased and with a trailing FQDN dot.
+		_, _ = w.Write([]byte(`{"rdns":"server.example.com."}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	entry, err := c.ConfirmRDNS(context.Background(), "203.0.113.10", &RdnsEntry{IP: "203.0.113.10", Hostname: "Server.Example.COM"})
+	if err != nil {
+		t.Fatalf("ConfirmRDNS() error = %v, want success for normalized read-back", err)
+	}
+	if entry.Hostname != "server.example.com." {
+		t.Errorf("Hostname = %q, want read-back value %q", entry.Hostname, "server.example.com.")
+	}
+}
+
+// TestConfirmRDNS_ContextCancellation proves that a canceled context stops the
+// retry loop promptly instead of blocking for the full rdnsConfirmDelay: the
+// server always returns a mismatch, forcing a retry wait, but the context is
+// canceled before that wait would elapse.
+func TestConfirmRDNS_ContextCancellation(t *testing.T) {
+	old := rdnsConfirmDelay
+	rdnsConfirmDelay = 1 * time.Hour
+	t.Cleanup(func() { rdnsConfirmDelay = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rdns":"other.example.com"}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = c.ConfirmRDNS(ctx, "203.0.113.10", &RdnsEntry{IP: "203.0.113.10", Hostname: "server.example.com"})
+		close(done)
+	}()
+
+	// Let the first attempt run, then cancel before the (1h) retry delay would
+	// ever elapse.
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ConfirmRDNS() did not return promptly after context cancellation")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("error = %v, want context canceled", err)
+	}
+}
+
+func TestRDNSHostnamesEqual(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"server.example.com", "server.example.com.", true},
+		{"Server.Example.COM", "server.example.com", true},
+		{"  server.example.com  ", "server.example.com.", true},
+		{"server.example.com", "other.example.com", false},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		if got := rdnsHostnamesEqual(c.a, c.b); got != c.want {
+			t.Errorf("rdnsHostnamesEqual(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
 	}
 }

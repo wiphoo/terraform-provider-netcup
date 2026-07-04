@@ -2,6 +2,10 @@ package netcup
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +35,39 @@ func NewTokenSource(client *Client, accessToken, refreshToken string, expiry tim
 		refreshToken: refreshToken,
 		expiry:       expiry,
 	}
+}
+
+// ParseAccessTokenExpiry extracts the "exp" claim from a JWT access token,
+// without verifying its signature (the SCP API is the party that verifies
+// the token; this is only used to seed a refresh schedule for TokenSource).
+//
+// It returns an error when token is not a well-formed JWT (wrong number of
+// dot-separated segments, invalid base64url payload, invalid JSON, or a
+// missing/zero "exp" claim). Callers should treat a parse error as "unknown
+// expiry" and fall back to a zero time.Time, which causes a refreshing
+// TokenSource to refresh on first use rather than hard-failing.
+func ParseAccessTokenExpiry(token string) (time.Time, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, fmt.Errorf("access token is not a JWT: expected 3 dot-separated segments, got %d", len(parts))
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("decoding JWT payload: %w", err)
+	}
+
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, fmt.Errorf("decoding JWT claims: %w", err)
+	}
+	if claims.Exp == 0 {
+		return time.Time{}, fmt.Errorf("JWT has no exp claim")
+	}
+
+	return time.Unix(claims.Exp, 0), nil
 }
 
 // staticTokenSource always returns the same token.
