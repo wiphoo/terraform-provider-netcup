@@ -1,0 +1,109 @@
+# Repository settings as code (probot/settings).
+# Docs: https://github.com/apps/settings
+#
+# To enforce these rules, install the free "Settings" GitHub App on the repo
+# (https://github.com/apps/settings) and grant it Administration: Read & Write
+# permission. The app reconciles this file against the repository on every push
+# to the default branch. See CONTRIBUTING.md -> "Branch protection / merge rules".
+#
+# If you prefer not to install the app, apply the same rules manually under
+# Settings -> Branches -> Branch protection rules (documented in CONTRIBUTING.md).
+
+repository:
+  # Default branch is `main`.
+  default_branch: main
+
+  # Squash merges only, for a clean conventional-commit history. Other merge
+  # methods are disabled so a linear history is enforced.
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: false
+
+  # Auto-delete the PR's branch after a successful merge.
+  delete_branch_on_merge: true
+
+  # Security advisories + Dependabot security fixes.
+  enable_vulnerability_alerts: true
+  enable_automated_security_fixes: true
+
+  # Project surface area.
+  has_issues: true
+  has_projects: false
+  has_wiki: false
+  has_discussions: true
+
+# Label set kept in sync with CONTRIBUTING.md -> "Labels".
+labels:
+  - name: type/bug
+    color: d73a4a
+    description: Something is broken
+  - name: type/feature
+    color: a2eeef
+    description: New capability
+  - name: type/chore
+    color: fef2c0
+    description: Non-functional maintenance (CI, deps, docs)
+  - name: type/documentation
+    color: 0075ca
+    description: Docs-only change
+  - name: type/refactor
+    color: 1d76db
+    description: Code restructuring without behavior change
+  - name: area/sdk
+    color: c5def5
+    description: pkg/netcup/ SDK
+  - name: area/cli
+    color: c5def5
+    description: cmd/netcupctl/ CLI
+  - name: area/provider
+    color: c5def5
+    description: Terraform provider
+  - name: area/ci
+    color: c5def5
+    description: CI / build / release automation
+  - name: priority/high
+    color: b60205
+    description: Blocks a milestone
+  - name: priority/medium
+    color: fbca04
+    description: Important but not blocking
+  - name: priority/low
+    color: 0e8a16
+    description: Nice to have
+  - name: needs-decision
+    color: fbca04
+    description: Requires a human decision before work can proceed
+  - name: ready
+    color: 0e8a16
+    description: Ready to be picked up
+  - name: dependencies
+    color: 0366d6
+    description: Dependency updates (Dependabot)
+
+branches:
+  - name: main
+    protection:
+      # Require CI to pass before merge, and require branches to be up to date
+      # with `main` before merging (no stale-green merges).
+      required_status_checks:
+        contexts:
+          - "CI / fmt"
+          - "CI / test"
+          - "CI / lint"
+        strict: true
+
+      required_pull_request_reviews:
+        # SOLO-MAINTAINER NOTE:
+        # count is 0 so the single maintainer can merge their own PRs once CI
+        # is green, while direct pushes to `main`, force-pushes, and branch
+        # deletion stay blocked. Bump to 1 (and set require_code_owner_reviews:
+        # true) once there are additional maintainers / code owners.
+        required_approving_review_count: 0
+        require_code_owner_reviews: false
+        dismiss_stale_reviews: true
+
+      enforce_admins: true
+      required_linear_history: true
+      allow_force_pushes: false
+      allow_deletions: false
+      restrictions: null

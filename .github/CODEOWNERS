@@ -1,0 +1,31 @@
+# CODEOWNERS — automatic review requests for pull requests.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# The last matching pattern wins. Reviewers are requested based on the files
+# changed in a PR. Entries are GitHub usernames (with @) or team names
+# (@org/team).
+
+# Default owner for anything not matched below.
+* @wiphoo
+
+# SDK
+/pkg/netcup/ @wiphoo
+
+# CLI
+/cmd/netcupctl/ @wiphoo
+
+# Provider + internal packages
+/internal/ @wiphoo
+
+# CI, release automation, and repository settings
+/.github/ @wiphoo
+
+# Documentation
+/docs/ @wiphoo
+
+# Go module + tooling manifests
+/go.mod @wiphoo
+/go.sum @wiphoo
+/.golangci.yml @wiphoo
+/.goreleaser.yaml @wiphoo
+/Makefile @wiphoo

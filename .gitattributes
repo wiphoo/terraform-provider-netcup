@@ -1,0 +1,27 @@
+# Normalize line endings and mark binary files.
+# Docs: https://git-scm.com/docs/gitattributes
+
+# Default: auto-detect text, normalize to LF in the index and on checkout.
+* text=auto eol=lf
+
+# Explicit text/LF overrides for cross-platform consistency.
+*.go     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.hcl    text eol=lf
+*.tf     text eol=lf
+*.sh     text eol=lf
+Makefile text eol=lf
+
+# Binary files — never normalize or diff.
+*.exe  binary
+*.zip  binary
+*.gz   binary
+*.tar  binary
+*.tgz  binary
+*.test binary
+
+# GitHub Linguist: classify .tf as HCL in language stats.
+*.tf linguist-language=HCL

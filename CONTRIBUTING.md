@@ -11,6 +11,7 @@ started — from setting up a dev environment to opening a pull request.
 - [Running checks](#running-checks)
 - [Branch and commit conventions](#branch-and-commit-conventions)
 - [Pull request process](#pull-request-process)
+- [Branch protection / merge rules](#branch-protection--merge-rules)
 - [Architecture overview](#architecture-overview)
 - [Release process](#release-process)
 - [Labels](#labels)
@@ -114,13 +115,61 @@ refactors or reformats bundled with feature work.
 1. Fork the repo and create a branch from `main`.
 2. Make your changes, add or update tests, update docs.
 3. Ensure all checks pass locally.
-4. Open a PR against `main`. Fill in the PR template.
+4. Open a PR against `main`. Fill in the PR template. Code owners listed in
+   [`.github/CODEOWNERS`](.github/CODEOWNERS) are auto-requested for review
+   based on the files you change.
 5. A maintainer will review. Address feedback; the reviewer resolves threads
    when satisfied.
-6. Once approved and CI is green, the maintainer merges.
+6. Once approved and CI is green, the maintainer **squash-merges** the PR (see
+   [Branch protection / merge rules](#branch-protection--merge-rules)). The PR
+   branch is deleted automatically after merge.
 
 We do not require a CLA, but by submitting a PR you agree that your
 contribution is licensed under the project's [MPL-2.0 license](LICENSE).
+
+---
+
+## Branch protection / merge rules
+
+Repository and branch-protection settings are stored as code in
+`.github/settings.yml` (using the [probot/settings][settings-app] schema) and
+reviewed like any other change. To enforce them, install the free **Settings**
+GitHub App from <https://github.com/apps/settings> on this repository and grant
+it **Administration: Read & Write** permission. The app reconciles
+`.github/settings.yml` against the repository on every push to `main`.
+
+The `main` branch is protected as follows:
+
+- Pull requests are required — no direct pushes to `main`.
+- Required status checks: `CI / fmt`, `CI / test`, `CI / lint`, each kept up to
+  date with `main` before merging (no stale-green merges).
+- Squash merges only; merge-commit and rebase merges are disabled.
+- Linear history is required; the PR branch is deleted automatically after
+  merge.
+- Force-pushes and branch deletions are disabled (enforced for admins too).
+
+Code owners are declared in [`.github/CODEOWNERS`](.github/CODEOWNERS). GitHub
+automatically requests a review from the owner of any path a PR touches. While
+the project has a single maintainer, required approvals are set to `0` so the
+maintainer can merge their own PRs once CI is green. Bump
+`required_approving_review_count` to `1` (and set
+`require_code_owner_reviews: true`) in `.github/settings.yml` once there are
+additional maintainers.
+
+### Applying the rules manually
+
+If you prefer not to install the Settings app, apply the equivalent rules in
+the GitHub UI under **Settings → Branches → Branch protection rules → main**:
+
+- Require a pull request before merging (0 approvals while solo).
+- Require status checks to pass before merging: `CI / fmt`, `CI / test`,
+  `CI / lint`; require branches to be up to date before merging.
+- Require conversation resolution before merging.
+- Require linear history.
+- Do not allow force pushes; do not allow deletions.
+- Include administrators.
+
+[settings-app]: https://github.com/apps/settings
 
 ---
 
@@ -168,6 +217,8 @@ Versioning follows [Semantic Versioning](https://semver.org).
 
 ## Labels
 
+Labels are defined in `.github/settings.yml` and kept in sync with this table.
+
 | Label | Meaning |
 | --- | --- |
 | `type/bug` | Something is broken |
@@ -184,3 +235,4 @@ Versioning follows [Semantic Versioning](https://semver.org).
 | `priority/low` | Nice to have |
 | `needs-decision` | Requires a human decision before work can proceed |
 | `ready` | Ready to be picked up |
+| `dependencies` | Dependency updates (Dependabot) |
