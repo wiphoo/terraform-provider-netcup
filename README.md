@@ -153,9 +153,9 @@ to store or rotate. Each release includes `checksums.txt.sig` and
 
 ```bash
 # 1. Verify the checksums file was signed by this repo's release workflow.
+#    checksums.txt.bundle contains the signature and signing certificate.
 cosign verify-blob \
-  --certificate checksums.txt.pem \
-  --signature checksums.txt.sig \
+  --bundle checksums.txt.bundle \
   --certificate-identity-regexp '^https://github.com/wiphoo/terraform-provider-netcup/\.github/workflows/release\.yml@refs/tags/' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   checksums.txt

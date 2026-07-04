@@ -49,17 +49,18 @@ checksum:
 
 # Keyless cosign signature over the checksums file. In GitHub Actions the OIDC
 # token is discovered automatically (permissions: id-token: write); locally the
-# release workflow is the only place signing runs. Emits <checksums>.sig and the
-# signing certificate <checksums>.pem alongside the release assets.
+# release workflow is the only place signing runs.
+#
+# cosign 3.x (installed by cosign-installer v4+) uses --bundle instead of the
+# deprecated --output-signature / --output-certificate flags. The bundle is a
+# single JSON file that contains both the signature and the signing certificate.
 signs:
   - cmd: cosign
-    signature: ${artifact}.sig
-    certificate: ${artifact}.pem
+    signature: ${artifact}.bundle
     args:
       - sign-blob
       - --yes
-      - --output-signature=${signature}
-      - --output-certificate=${certificate}
+      - --bundle=${signature}
       - ${artifact}
     artifacts: checksum
     output: true
