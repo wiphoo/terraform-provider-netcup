@@ -1,8 +1,8 @@
 ---
 name: Feature request
-about: Propose a new provider feature
+about: Propose a new feature for netcupctl or the Terraform provider
 title: "feat: "
-labels: type/enhancement
+labels: type/feature
 ---
 
 ## Problem
@@ -11,23 +11,39 @@ What problem should this feature solve?
 
 ## Proposal
 
-Describe the proposed Terraform resource, data source, or behavior.
-
-## Example Configuration
+Describe the proposed behavior. For a Terraform resource or data source, include
+an example configuration:
 
 ```hcl
 
 ```
 
-## Risk Level
+For a `netcupctl` command, show the intended usage:
 
-- [ ] Safe/read-only
+```bash
+netcupctl ...
+```
+
+## Component
+
+- [ ] `netcupctl` CLI
+- [ ] Terraform provider (resource / data source)
+- [ ] SDK (`pkg/netcup`)
+- [ ] CI / release automation
+
+## Risk level
+
+- [ ] Safe / read-only
 - [ ] Low-risk write
-- [ ] Operational risk
-- [ ] Destructive risk
+- [ ] Operational risk (e.g. restarts a server)
+- [ ] Destructive risk (e.g. wipes a disk, deletes a resource)
 
-## Acceptance Criteria
+## Acceptance criteria
 
 - [ ]
 - [ ]
 - [ ]
+
+## Additional context
+
+Add any relevant context, SCP API documentation links, or prior art here.

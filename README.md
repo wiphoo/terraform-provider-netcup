@@ -1,109 +1,99 @@
 # Terraform Provider for Netcup
 
-A modern, open-source Terraform provider for Netcup infrastructure.
+[![CI](https://github.com/wiphoo/terraform-provider-netcup/actions/workflows/ci.yml/badge.svg)](https://github.com/wiphoo/terraform-provider-netcup/actions/workflows/ci.yml)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/wiphoo/terraform-provider-netcup.svg)](https://pkg.go.dev/github.com/wiphoo/terraform-provider-netcup)
 
-This project aims to provide a clean Terraform interface for Netcup services, starting with SCP (Server Control Panel) features and expanding later to CCP/DNS and other Netcup APIs.
+A modern, open-source Terraform provider and CLI for [Netcup](https://www.netcup.de/)
+infrastructure. It targets the SCP (Server Control Panel) REST API first, with CCP/DNS
+and other Netcup APIs planned in later releases.
 
 ## Status
 
-Early planning / bootstrap stage.
+**v0.1.0 — netcupctl CLI foundation is complete.**
 
-The first target release is `v0.1.0`.
+The `netcupctl` CLI, shared Go SDK, CI, and release automation are shipped.
+The next milestone (v0.2.0) adds the Terraform provider on top of the same SDK.
 
-## Build Order
+See the [Roadmap](docs/ROADMAP.md) for the full release plan.
 
-The `netcupctl` CLI is the first deliverable, not an optional add-on. Building the
-CLI first lets us exercise the shared SDK and the device-authorization login flow
-against the real SCP API before any Terraform resource is written. The Terraform
-provider is then built on the same proven SDK.
+## Quick start — netcupctl
 
-1. Shared Go SDK foundation (HTTP client, OIDC device flow, token refresh)
-2. `netcupctl` CLI (device login, token refresh, server list, rDNS inspection)
-3. Terraform provider (data sources and `netcup_rdns` resource) on top of the SDK
+Download the latest `netcupctl` binary from the
+[Releases page](https://github.com/wiphoo/terraform-provider-netcup/releases),
+or build from source:
 
-## Release Plan
+```bash
+go install github.com/wiphoo/terraform-provider-netcup/cmd/netcupctl@latest
+```
 
-Each capability area ships the `netcupctl` CLI first, then the Terraform provider
-in the following minor release (see [Roadmap](docs/ROADMAP.md)).
+Log in with the OAuth 2.0 device-authorization flow (opens a browser
+verification URL):
 
-### v0.1.0 — netcupctl foundation (CLI)
+```bash
+netcupctl auth login
+```
 
-- Shared Go SDK foundation (`pkg/netcup`)
-- SCP OAuth 2.0 device-authorization login
-- Refresh-token support and environment variable configuration
-- `netcupctl` CLI: `auth login`, `auth refresh`, `server list`, `server get`, `rdns get`, `rdns set`
-- Unit tests
-- GitHub Actions CI (test + lint)
-- `netcupctl` release automation
+List your servers (smoke-tests both authentication gates):
 
-### v0.2.0 — Terraform provider foundation
+```bash
+netcupctl server list
+netcupctl server get <id>
+```
 
-- Provider configuration (pre-issued tokens, environment variables)
-- `netcup_servers` data source
-- `netcup_server` data source
-- `netcup_rdns` resource
-- Import support for reverse DNS
-- Examples and `terraform validate` in CI
-- Acceptance test foundation
-- Provider release + Terraform Registry publication
+Manage reverse DNS:
 
-## Authentication Model
+```bash
+netcupctl rdns get <ip>
+netcupctl rdns set <ip> <hostname>
+```
+
+Print the version:
+
+```bash
+netcupctl version
+```
+
+### Headless / scripted use
+
+Skip the browser flow by supplying pre-issued tokens:
+
+```bash
+export NETCUP_ACCESS_TOKEN="..."
+export NETCUP_REFRESH_TOKEN="..."
+netcupctl server list
+```
+
+## Authentication model
 
 The Netcup SCP REST API is an OAuth 2.0 / OIDC API backed by Keycloak. There is no
 traditional client ID / client secret flow — clients authenticate against the public
 `scp` client using the **device authorization flow** and then call the REST API with
 a short-lived Bearer access token.
 
-There are two independent gates:
+There are two independent authentication gates:
 
 1. **IP allowlist** — your client IP (or CIDR) must be allowed in the SCP REST API
    settings before any token-based call succeeds.
 2. **Device authorization** — browser approval grants tokens to the `scp` client
    without putting your account password in a script.
 
-Base URLs:
+Environment variables:
 
 ```bash
-export NETCUP_SCP_BASE_URL="https://www.servercontrolpanel.de"
-# API root: health check at /ping, versioned resources under /v1
-export NETCUP_API_ENDPOINT="${NETCUP_SCP_BASE_URL}/scp-core/api"
-export NETCUP_OIDC_ENDPOINT="${NETCUP_SCP_BASE_URL}/realms/scp/protocol/openid-connect"
-```
-
-Login flow (handled by `netcupctl auth login`):
-
-1. `POST {OIDC}/auth/device` with `client_id=scp` and `scope=offline_access openid`
-   to obtain a `device_code` and a `verification_uri_complete`.
-2. Approve the device in the browser.
-3. `POST {OIDC}/token` with
-   `grant_type=urn:ietf:params:oauth:grant-type:device_code` to exchange the
-   device code for an `access_token` (short-lived, ~300s) and a `refresh_token`.
-4. Renew on demand: `POST {OIDC}/token` with `grant_type=refresh_token`.
-
-The interactive device-login flow lives only in `netcupctl`. The Terraform provider
-does not initiate browser approval during `terraform apply` (apply is non-interactive);
-it consumes pre-issued tokens and refreshes them non-interactively:
-
-```bash
-export NETCUP_ACCESS_TOKEN="..."
-export NETCUP_REFRESH_TOKEN="..."
-```
-
-Planned provider configuration:
-
-```hcl
-provider "netcup" {
-  # Pre-issued tokens (e.g. minted by `netcupctl auth login`).
-  access_token  = var.netcup_access_token
-  refresh_token = var.netcup_refresh_token
-}
+export NETCUP_API_ENDPOINT="https://www.servercontrolpanel.de/scp-core/api"
+export NETCUP_OIDC_ENDPOINT="https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect"
+export NETCUP_ACCESS_TOKEN="..."    # pre-issued; optional when using auth login
+export NETCUP_REFRESH_TOKEN="..."   # pre-issued; optional when using auth login
 ```
 
 Treat the refresh token like a password: it can mint new access tokens without
-another browser approval. The provider should avoid writing tokens to Terraform
-state unless unavoidable, and should never log them.
+another browser approval. Never log or commit tokens.
 
-## Example
+## Terraform provider (v0.2.0 — coming next)
+
+The Terraform provider is built on the same Go SDK as `netcupctl` and is planned
+for v0.2.0. Planned configuration:
 
 ```hcl
 terraform {
@@ -114,7 +104,11 @@ terraform {
   }
 }
 
-provider "netcup" {}
+provider "netcup" {
+  # Pre-issued tokens (minted by `netcupctl auth login`).
+  access_token  = var.netcup_access_token
+  refresh_token = var.netcup_refresh_token
+}
 
 data "netcup_servers" "all" {}
 
@@ -124,26 +118,10 @@ resource "netcup_rdns" "server" {
 }
 ```
 
-## CLI: `netcupctl`
+## Design principles
 
-Netcup does not provide an official general-purpose CLI for SCP automation, so this
-project ships one. `netcupctl` is the first thing built and the reference consumer of
-the shared SDK:
-
-- `netcupctl auth login` — OAuth 2.0 device-authorization login (prints the
-  verification URL, polls for approval, stores the resulting tokens)
-- `netcupctl auth refresh` — refresh the access token from a refresh token
-- `netcupctl server list` — list servers (smoke test for both auth gates)
-- Reverse DNS inspection
-- API debugging during provider development
-
-The CLI reuses the same internal SDK as the Terraform provider, so the device-flow
-and token-refresh logic is written and tested once.
-
-## Design Principles
-
-- Keep Terraform resource names clean and provider-oriented.
-- Hide SCP/CCP implementation details behind provider services.
+- Keep the public Terraform interface simple and stable.
+- Hide SCP/CCP implementation details behind stable resource abstractions.
 - Build a reusable SDK layer before provider resources become complex.
 - Avoid destructive lifecycle features in early releases.
 - Do not use Terraform as a cloud-init, SSH, Ansible, or Kubernetes bootstrap tool.
@@ -161,23 +139,17 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow then:
+The workflow builds `netcupctl` for linux, macOS, and Windows (amd64 and arm64),
+embeds the tag as the version (visible in `netcupctl version`), produces
+`tar.gz` / `.zip` archives and a SHA-256 `checksums.txt`, and creates a GitHub
+Release with all assets attached.
 
-- builds `netcupctl` for linux, macOS, and Windows (amd64 and arm64), embedding
-  the tag as the version via `-ldflags` into `internal/version` (visible in
-  `netcupctl version`);
-- packages `tar.gz` archives (`.zip` on Windows) plus a `checksums.txt`
-  (SHA-256); and
-- creates a GitHub Release with the archives, checksums, and signature attached.
-
-### Signing
+### Verifying a release
 
 The `checksums.txt` file is signed with [cosign](https://docs.sigstore.dev/) in
-**keyless** mode, using the GitHub Actions OIDC identity — there is no private
-signing key to store or rotate. Each release includes `checksums.txt.sig`
-(signature) and `checksums.txt.pem` (signing certificate).
-
-Verify a downloaded release:
+**keyless** mode using the GitHub Actions OIDC identity — no private signing key
+to store or rotate. Each release includes `checksums.txt.sig` and
+`checksums.txt.pem`.
 
 ```bash
 # 1. Verify the checksums file was signed by this repo's release workflow.
@@ -192,12 +164,21 @@ cosign verify-blob \
 sha256sum --check --ignore-missing checksums.txt
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, conventions,
+and PR process.
+
+Please report security vulnerabilities privately — see [SECURITY.md](SECURITY.md).
+
 ## Documentation
 
 - [Roadmap](docs/ROADMAP.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [MVP Specification](docs/MVP.md)
-- [Contributing](docs/CONTRIBUTING.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## License
 
