@@ -1,0 +1,188 @@
+package provider
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-framework/provider"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
+)
+
+// configureRequest builds a provider.ConfigureRequest from the given schema
+// attribute values, driving Configure the same way Terraform would after
+// parsing an HCL provider block. A nil value means the attribute was omitted
+// from the config (null).
+func configureRequest(t *testing.T, schemaResp provider.SchemaResponse, values map[string]any) provider.ConfigureRequest {
+	t.Helper()
+	ctx := context.Background()
+	objType := schemaResp.Schema.Type().TerraformType(ctx)
+
+	raw := map[string]tftypes.Value{}
+	for name := range schemaResp.Schema.Attributes {
+		v, ok := values[name]
+		if !ok || v == nil {
+			raw[name] = tftypes.NewValue(tftypes.String, nil)
+			continue
+		}
+		raw[name] = tftypes.NewValue(tftypes.String, v)
+	}
+
+	return provider.ConfigureRequest{
+		Config: tfsdk.Config{
+			Raw:    tftypes.NewValue(objType, raw),
+			Schema: schemaResp.Schema,
+		},
+	}
+}
+
+func newTestSchema(t *testing.T) provider.SchemaResponse {
+	t.Helper()
+	p := &netcupProvider{version: "test"}
+	var resp provider.SchemaResponse
+	p.Schema(context.Background(), provider.SchemaRequest{}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Schema() diagnostics = %v", resp.Diagnostics)
+	}
+	return resp
+}
+
+func TestConfigure_UsesConfigAccessToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	schemaResp := newTestSchema(t)
+	req := configureRequest(t, schemaResp, map[string]any{
+		"access_token": "test-token",
+		"api_endpoint": srv.URL,
+	})
+
+	p := &netcupProvider{version: "test"}
+	var resp provider.ConfigureResponse
+	p.Configure(context.Background(), req, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Configure() diagnostics = %v", resp.Diagnostics)
+	}
+
+	client, ok := resp.ResourceData.(*netcup.Client)
+	if !ok {
+		t.Fatalf("ResourceData type = %T, want *netcup.Client", resp.ResourceData)
+	}
+	if resp.DataSourceData != resp.ResourceData {
+		t.Error("DataSourceData and ResourceData should be the same client")
+	}
+
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if want := "Bearer test-token"; gotAuth != want {
+		t.Errorf("Authorization = %q, want %q", gotAuth, want)
+	}
+}
+
+func TestConfigure_FallsBackToEnv(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("NETCUP_ACCESS_TOKEN", "env-token")
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+
+	schemaResp := newTestSchema(t)
+	// Empty provider block: every attribute is null, so env vars must apply.
+	req := configureRequest(t, schemaResp, nil)
+
+	p := &netcupProvider{version: "test"}
+	var resp provider.ConfigureResponse
+	p.Configure(context.Background(), req, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Configure() diagnostics = %v", resp.Diagnostics)
+	}
+
+	client, ok := resp.ResourceData.(*netcup.Client)
+	if !ok {
+		t.Fatalf("ResourceData type = %T, want *netcup.Client", resp.ResourceData)
+	}
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if want := "Bearer env-token"; gotAuth != want {
+		t.Errorf("Authorization = %q, want %q (env var fallback)", gotAuth, want)
+	}
+}
+
+func TestConfigure_ConfigWinsOverEnv(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("NETCUP_ACCESS_TOKEN", "env-token")
+
+	schemaResp := newTestSchema(t)
+	req := configureRequest(t, schemaResp, map[string]any{
+		"access_token": "config-token",
+		"api_endpoint": srv.URL,
+	})
+
+	p := &netcupProvider{version: "test"}
+	var resp provider.ConfigureResponse
+	p.Configure(context.Background(), req, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Configure() diagnostics = %v", resp.Diagnostics)
+	}
+
+	client := resp.ResourceData.(*netcup.Client)
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if want := "Bearer config-token"; gotAuth != want {
+		t.Errorf("Authorization = %q, want %q (explicit config should win over env)", gotAuth, want)
+	}
+}
+
+func TestConfigure_MalformedAccessTokenFallsBackToZeroExpiry(t *testing.T) {
+	// A non-JWT access token can't be parsed for an "exp" claim.
+	// ParseAccessTokenExpiry returning an error must not fail Configure or
+	// panic; the provider falls back to a zero expiry.
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	schemaResp := newTestSchema(t)
+	req := configureRequest(t, schemaResp, map[string]any{
+		"access_token": "not-a-jwt",
+		"api_endpoint": srv.URL,
+	})
+
+	p := &netcupProvider{version: "test"}
+	var resp provider.ConfigureResponse
+	p.Configure(context.Background(), req, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Configure() diagnostics = %v, want no error for a malformed (non-JWT) access token", resp.Diagnostics)
+	}
+
+	client := resp.ResourceData.(*netcup.Client)
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if want := "Bearer not-a-jwt"; gotAuth != want {
+		t.Errorf("Authorization = %q, want %q", gotAuth, want)
+	}
+}
