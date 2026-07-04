@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible problem
+about: Report a reproducible problem in netcupctl or the Terraform provider
 title: "bug: "
 labels: type/bug
 ---
@@ -9,17 +9,31 @@ labels: type/bug
 
 What happened?
 
-## Expected Behavior
+## Expected behavior
 
 What did you expect to happen?
 
-## Reproduction Steps
+## Reproduction steps
 
 1.
 2.
 3.
 
-## Terraform Configuration
+## Component
+
+- [ ] `netcupctl` CLI
+- [ ] Terraform provider
+- [ ] SDK (`pkg/netcup`)
+
+## Configuration
+
+For **netcupctl** bugs, include the command you ran (redact tokens):
+
+```bash
+netcupctl ...
+```
+
+For **Terraform provider** bugs, include your configuration:
 
 ```hcl
 
@@ -27,10 +41,16 @@ What did you expect to happen?
 
 ## Environment
 
-- Provider version:
-- Terraform version:
-- Operating system:
+- `netcupctl`/provider version:
+- Go version (if building from source):
+- Terraform version (provider bugs):
+- Operating system and architecture:
 
-## Additional Context
+## Error output
 
-Add logs or notes here. Do not include credentials or sensitive values.
+Paste any error messages or logs here. **Do not include tokens, credentials, or
+other sensitive values.**
+
+## Additional context
+
+Add any other context here.
