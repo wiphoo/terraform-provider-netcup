@@ -172,9 +172,9 @@ func resolveConfigString(config types.String, envVar, fallback string) string {
 }
 
 func (p *netcupProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	// No data sources are registered yet; netcup_servers and netcup_server
-	// land in #27/#28.
-	return nil
+	return []func() datasource.DataSource{
+		NewServersDataSource,
+	}
 }
 
 func (p *netcupProvider) Resources(_ context.Context) []func() resource.Resource {
