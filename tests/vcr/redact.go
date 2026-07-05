@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"regexp"
@@ -351,4 +352,28 @@ func redactURL(rawURL string) string {
 		fake = fakeIPv6(ip)
 	}
 	return prefix + fake + suffix
+}
+
+// matchInteraction is the cassette.Matcher installed via rec.SetMatcher in
+// recorder.go, replacing go-vcr's DefaultMatcher (exact method+URL string
+// equality). redactURL rewrites the IP embedded in an rDNS request URL
+// before the cassette is saved, so a replay-mode caller that constructs its
+// request from the real IP (e.g. a maintainer's shell still exporting
+// NETCUP_TEST_IP from a prior `make acc-record`, or a future test that
+// simply hardcodes the real test IP) would otherwise never match the
+// committed, already-redacted cassette entry. The exact-match check runs
+// first, so this is a no-op for every URL redaction doesn't touch (i.e.
+// almost all of them) and for a caller that already uses the redacted fake
+// IP; only on a mismatch does it fall back to comparing the *redacted*
+// incoming URL against the cassette — redactURL is a deterministic, pure
+// function of the real IP, so it reproduces exactly the fake value the
+// cassette recorded.
+func matchInteraction(r *http.Request, i cassette.Request) bool {
+	if r.Method != i.Method {
+		return false
+	}
+	if r.URL.String() == i.URL {
+		return true
+	}
+	return redactURL(r.URL.String()) == i.URL
 }

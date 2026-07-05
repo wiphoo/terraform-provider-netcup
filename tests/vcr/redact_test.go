@@ -3,10 +3,13 @@ package vcr
 import (
 	"encoding/json"
 	"net"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/dnaeon/go-vcr/cassette"
 )
 
 func TestFakeIPv4Deterministic(t *testing.T) {
@@ -338,5 +341,49 @@ func TestRedactURLNonRdnsUnchanged(t *testing.T) {
 	url := "https://www.servercontrolpanel.de/scp-core/api/v1/servers/882863"
 	if got := redactURL(url); got != url {
 		t.Errorf("redactURL(%q) = %q, want unchanged", url, got)
+	}
+}
+
+// TestMatchInteraction covers the cassette.Matcher installed via
+// rec.SetMatcher in recorder.go (replacing go-vcr's DefaultMatcher's exact
+// method+URL string equality): a replay-mode request built from the real IP
+// must still match a cassette entry whose URL was redacted (fake IP) at
+// save time.
+func TestMatchInteraction(t *testing.T) {
+	const realIP = "192.0.2.50"
+	fakeURL := "https://example.com/v1/rdns/ipv4/" + fakeIPv4(realIP)
+	stored := cassette.Request{Method: "GET", URL: fakeURL}
+
+	realReq := httptest.NewRequest("GET", "https://example.com/v1/rdns/ipv4/"+realIP, nil)
+	if !matchInteraction(realReq, stored) {
+		t.Errorf("matchInteraction did not match a real-IP request against its redacted cassette entry")
+	}
+
+	fakeReq := httptest.NewRequest("GET", fakeURL, nil)
+	if !matchInteraction(fakeReq, stored) {
+		t.Errorf("matchInteraction did not match an already-redacted request (exact-match fast path)")
+	}
+
+	otherReq := httptest.NewRequest("GET", "https://example.com/v1/rdns/ipv4/192.0.2.99", nil)
+	if matchInteraction(otherReq, stored) {
+		t.Errorf("matchInteraction matched an unrelated IP's request")
+	}
+
+	wrongMethod := httptest.NewRequest("DELETE", "https://example.com/v1/rdns/ipv4/"+realIP, nil)
+	if matchInteraction(wrongMethod, stored) {
+		t.Errorf("matchInteraction matched despite a different HTTP method")
+	}
+}
+
+func TestMatchInteractionNonRdnsExactOnly(t *testing.T) {
+	stored := cassette.Request{Method: "GET", URL: "https://example.com/v1/servers/882863"}
+	req := httptest.NewRequest("GET", "https://example.com/v1/servers/882863", nil)
+	if !matchInteraction(req, stored) {
+		t.Errorf("matchInteraction did not match an identical non-rDNS URL")
+	}
+
+	other := httptest.NewRequest("GET", "https://example.com/v1/servers/999999", nil)
+	if matchInteraction(other, stored) {
+		t.Errorf("matchInteraction matched a different server id")
 	}
 }

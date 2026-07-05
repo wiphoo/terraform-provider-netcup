@@ -52,6 +52,13 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 		t.Fatal(err)
 	}
 
+	// Replace go-vcr's default exact-URL matcher: redactInteraction rewrites
+	// the IP embedded in an rDNS request URL before the cassette is saved, so
+	// a replay-mode caller building its request from the real IP would
+	// otherwise never match the committed, already-redacted entry. See
+	// matchInteraction's doc comment (redact.go).
+	rec.SetMatcher(matchInteraction)
+
 	t.Cleanup(func() {
 		// In record mode this is what actually persists the regenerated
 		// cassette; a discarded error here would let make acc-record report
