@@ -179,6 +179,20 @@ possible values).
 > account whose server **`name`**s embed secrets/identity — redaction only
 > covers the fields in the table above.
 
+> **rDNS replay contract.** Unlike a redacted **IP** — which `GetRDNS`
+> re-derives from the *request* (so `matchInteraction` lets a replay call use
+> the real IP) — a redacted **PTR hostname** round-trips through the *response*
+> body: `GetRDNS` returns the cassette's `rdns` value, and that value must stay
+> redacted because a real PTR (e.g. `mail.customer.example`) is exactly the PII
+> this scrubbing exists to remove. Consequently a `SetRDNS` → `ConfirmRDNS`
+> **replay** test must drive the flow with the committed (fake)
+> `host-<hash>.example.com` hostname, not the original real one: `SetRDNS`
+> echoes the caller's input, `ConfirmRDNS` compares it against the redacted
+> read-back, and the two only agree when the caller already uses the fake
+> value. (Live `make acc-record` is unaffected — redaction is save-time only,
+> so every live round trip sees the real response before the cassette is
+> rewritten.)
+
 `TestCassettesAreScrubbed` (`tests/vcr/scrub_test.go`) is an independent guard
 that scans every committed cassette (bodies, headers, and URLs) and fails on
 any IP outside the documentation ranges above, a non-scrubbed `Authorization`

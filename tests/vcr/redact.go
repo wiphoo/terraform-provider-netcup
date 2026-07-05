@@ -160,7 +160,21 @@ var ipLikeKeys = map[string]bool{
 }
 
 // hostnameLikeKeys are JSON object keys holding a hostname/nickname/PTR
-// value.
+// value. "rdns" appears on both the SetRDNS request body and the GetRDNS
+// response body, and both are redacted — a real PTR is PII.
+//
+// Unlike a redacted IP, which GetRDNS re-derives from the request (so
+// matchInteraction lets a replay caller use the real IP), a redacted PTR
+// round-trips through the response body: GetRDNS returns the cassette's rdns
+// value, and no request-side matcher can change a returned value. That value
+// therefore stays redacted, and a SetRDNS->ConfirmRDNS *replay* test must
+// drive the flow with the committed fake host-<hash>.example.com value, not
+// the original real hostname — SetRDNS echoes the caller's input and
+// ConfirmRDNS compares it against the redacted read-back, so the two only
+// agree when the caller already uses the fake value. Live make acc-record is
+// unaffected (redaction is save-time only; see redactInteraction /
+// AddSaveFilter in recorder.go). Documented under CONTRIBUTING.md's
+// "Redaction" section ("rDNS replay contract").
 var hostnameLikeKeys = map[string]bool{
 	"hostname": true, "nickname": true, "rdns": true,
 }
