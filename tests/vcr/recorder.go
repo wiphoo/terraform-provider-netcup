@@ -5,12 +5,21 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/dnaeon/go-vcr/cassette"
 	"github.com/dnaeon/go-vcr/recorder"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
+
+// clientTimeout mirrors netcup.New's own default HTTP client timeout
+// (pkg/netcup/client.go's unexported defaultTimeout, so it can't be imported
+// directly). NewClient must set this explicitly: WithHTTPClient below
+// replaces netcup.New's default *http.Client (which carries this timeout)
+// entirely, and an http.Client with a zero Timeout can hang on a stalled
+// live SCP call in record mode until go test's own (much longer) timeout.
+const clientTimeout = 30 * time.Second
 
 // NewClient constructs a *netcup.Client wired to a go-vcr recorder for the
 // named cassette (relative to testdata/cassettes/). When VCR_RECORD=1 the
@@ -75,7 +84,7 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 		// change the request URL and break DefaultMatcher's method+URL match
 		// against whatever endpoint the cassette was actually recorded from.
 		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
-		netcup.WithHTTPClient(&http.Client{Transport: rec}),
+		netcup.WithHTTPClient(&http.Client{Transport: rec, Timeout: clientTimeout}),
 		netcup.WithAccessToken(token),
 	)
 }
