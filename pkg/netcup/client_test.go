@@ -2,8 +2,10 @@ package netcup
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -162,6 +164,72 @@ func TestListServersHandlesNullFields(t *testing.T) {
 	}
 	if !servers[0].Disabled {
 		t.Error("Disabled = false, want true")
+	}
+}
+
+func TestPingUsesTokenSourceOverStaticToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("static-tok"), WithTokenSource(staticTokenSource("source-tok")))
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if want := "Bearer source-tok"; gotAuth != want {
+		t.Fatalf("Authorization = %q, want %q (TokenSource should take precedence)", gotAuth, want)
+	}
+}
+
+type erroringTokenSource struct{}
+
+func (erroringTokenSource) Token(_ context.Context) (string, error) {
+	return "", fmt.Errorf("token source unavailable")
+}
+
+// TestPingIgnoresTokenSourceError proves that Ping (documented as not
+// requiring authentication) still probes connectivity even when the
+// TokenSource can't produce a token: it must not fail with a token-refresh
+// error, and it must send the request without a Bearer header instead of
+// aborting outright.
+func TestPingIgnoresTokenSourceError(t *testing.T) {
+	var gotAuth string
+	var authHeaderSet bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, authHeaderSet = r.Header["Authorization"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithTokenSource(erroringTokenSource{}))
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v, want no error (Ping should tolerate a token source failure)", err)
+	}
+	if authHeaderSet {
+		t.Errorf("Authorization header = %q, want no header when the token source errors", gotAuth)
+	}
+}
+
+// TestGetRDNSSurfacesTokenSourceError proves that authenticated endpoints
+// (unlike Ping) still fail cleanly when the TokenSource errors, rather than
+// silently sending an unauthenticated request.
+func TestGetRDNSSurfacesTokenSourceError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("API should not be called when the token source errors for an authenticated endpoint")
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithTokenSource(erroringTokenSource{}))
+	_, err := c.GetRDNS(context.Background(), "203.0.113.10")
+	if err == nil {
+		t.Fatal("GetRDNS() error = nil, want error from token source")
+	}
+	if !strings.Contains(err.Error(), "token source unavailable") {
+		t.Errorf("error = %v, want to mention the token source failure", err)
 	}
 }
 
