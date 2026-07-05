@@ -1,0 +1,16 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    headers: {}
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/100001
+    method: GET
+  response:
+    body: |-
+      {"id":100001,"name":"vps01","hostname":"host-a1b2c3d4.example.com","nickname":"host-e5f6a7b8.example.com","disabled":false,"template":{"id":42,"name":"VPS Lite 1 G12s"},"serverLiveInfo":{"state":"RUNNING"},"architecture":"AMD64","site":{"id":1,"city":"Nuremberg"},"ipv4Addresses":[{"id":1,"ip":"203.0.113.42","netmask":"255.255.255.0","gateway":"203.0.113.1","broadcast":"203.0.113.255"}],"ipv6Addresses":[{"id":2,"networkPrefix":"2001:db8:cafe:1::","networkPrefixLength":64,"gateway":"2001:db8:cafe::1"}]}
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
