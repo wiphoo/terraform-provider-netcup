@@ -60,6 +60,9 @@ func (r *rdnsResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			"hostname": schema.StringAttribute{
 				Required:    true,
 				Description: "The fully qualified domain name for the reverse DNS (PTR) entry.",
+				PlanModifiers: []planmodifier.String{
+					trimHostnameModifier{},
+				},
 				Validators: []validator.String{
 					nonEmptyHostnameValidator{},
 				},
@@ -123,7 +126,7 @@ func (r *rdnsResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 	_, err = r.client.SetRDNS(ctx, canonical, hostname)
 	if err != nil {
-		diag, _ := apiErrorToDiag(err, false)
+		diag, _ := apiErrorToDiag(err, true)
 		resp.Diagnostics.Append(diag)
 		return
 	}
@@ -186,7 +189,7 @@ func (r *rdnsResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	state = rdnsResourceModel{
 		IPAddress: types.StringValue(entry.IP),
-		Hostname:  types.StringValue(entry.Hostname),
+		Hostname:  types.StringValue(normalizeRDNSHostname(entry.Hostname)),
 		ID:        types.StringValue(entry.IP),
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -223,7 +226,7 @@ func (r *rdnsResource) Update(ctx context.Context, req resource.UpdateRequest, r
 
 	_, err = r.client.SetRDNS(ctx, canonical, hostname)
 	if err != nil {
-		diag, _ := apiErrorToDiag(err, false)
+		diag, _ := apiErrorToDiag(err, true)
 		resp.Diagnostics.Append(diag)
 		return
 	}
@@ -265,7 +268,10 @@ func (r *rdnsResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 	err := r.client.DeleteRDNS(ctx, state.ID.ValueString())
 	if err != nil {
-		diag, _ := apiErrorToDiag(err, false)
+		diag, gone := apiErrorToDiag(err, false)
+		if gone {
+			return
+		}
 		resp.Diagnostics.Append(diag)
 		return
 	}
@@ -354,4 +360,33 @@ func (v nonEmptyHostnameValidator) ValidateString(_ context.Context, req validat
 			"Hostname must not be empty.",
 		)
 	}
+}
+
+type trimHostnameModifier struct{}
+
+func (m trimHostnameModifier) Description(_ context.Context) string {
+	return "Trims surrounding whitespace from the hostname."
+}
+
+func (m trimHostnameModifier) MarkdownDescription(_ context.Context) string {
+	return "Trims surrounding whitespace from the hostname to prevent inconsistent results after apply."
+}
+
+func (m trimHostnameModifier) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+
+	trimmed := strings.TrimSpace(req.ConfigValue.ValueString())
+	if trimmed != req.ConfigValue.ValueString() {
+		resp.PlanValue = types.StringValue(trimmed)
+	}
+}
+
+// normalizeRDNSHostname lowers and strips the trailing dot from a PTR
+// read-back, matching the SDK's unexported normalizeRDNSHostname
+// (pkg/netcup/rdns.go:245-247). The SDK's GetRDNS already trims whitespace
+// before returning the hostname, so only case and trailing-dot differ.
+func normalizeRDNSHostname(h string) string {
+	return strings.ToLower(strings.TrimSuffix(h, "."))
 }
