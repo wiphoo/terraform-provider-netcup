@@ -174,6 +174,7 @@ func resolveConfigString(config types.String, envVar, fallback string) string {
 func (p *netcupProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewServersDataSource,
+		NewServerDataSource,
 	}
 }
 
