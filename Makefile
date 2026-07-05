@@ -27,9 +27,11 @@ generate:
 # TF_ACC=1 and valid credentials (NETCUP_ACCESS_TOKEN). Before sub-issue #42
 # (32-D) lands there are no _acc_test.go files, so this is a no-op.
 acc:
-	@find . -name '*_acc_test.go' -not -path './vendor/*' | grep -q . \
-		|| (echo "No acceptance tests found yet — see issue #42 (32-D)."; exit 0)
-	TF_ACC=1 go test ./...
+	@if find . -name '*_acc_test.go' -not -path './vendor/*' | grep -q .; then \
+		TF_ACC=1 go test ./...; \
+	else \
+		echo "No acceptance tests found yet — see issue #42 (32-D)."; \
+	fi
 
 # acc-record regenerates all go-vcr cassettes from live SCP. Requires
 # NETCUP_ACCESS_TOKEN, NETCUP_TEST_SERVER_ID (for servers), and
