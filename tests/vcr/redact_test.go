@@ -101,6 +101,21 @@ func TestFakeHostnameDistinctInputs(t *testing.T) {
 	}
 }
 
+// TestFakeHostnameCanonicalizesEquivalentPTRs covers a SetRDNS request PTR
+// like "Foo.Example" and a later GetRDNS response PTR like "foo.example." —
+// which pkg/netcup/rdns.go's rdnsHostnamesEqual (used by ConfirmRDNS)
+// treats as the same value. Without normalizing before hashing, these would
+// map to two different fake hostnames, breaking a replayed set/read-back
+// comparison even though the live recording succeeded.
+func TestFakeHostnameCanonicalizesEquivalentPTRs(t *testing.T) {
+	set := fakeHostname("Foo.Example")
+	readBack := fakeHostname("foo.example.")
+	if set != readBack {
+		t.Errorf("fakeHostname(%q) = %q, fakeHostname(%q) = %q; want equal (SDK treats these PTRs as equivalent)",
+			"Foo.Example", set, "foo.example.", readBack)
+	}
+}
+
 func TestFakeHostnamePreservesEmpty(t *testing.T) {
 	if got := fakeHostname(""); got != "" {
 		t.Errorf("fakeHostname(\"\") = %q, want \"\" (no PTR / no nickname is meaningful state)", got)

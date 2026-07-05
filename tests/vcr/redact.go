@@ -92,13 +92,29 @@ func fakeIPv6(real string) string {
 // fakeHostname deterministically maps a real hostname/nickname/PTR value
 // into a synthetic FQDN under fakeHostnameDomain. An empty string (no
 // nickname set / no custom PTR) is meaningful state, not PII, and is passed
-// through unchanged.
+// through unchanged. The input is DNS-normalized before hashing (see
+// normalizeHostnameForHash) so that equivalent PTR forms map to the same
+// fake value.
 func fakeHostname(real string) string {
 	if real == "" {
 		return real
 	}
-	h := hashBytes("hostname:" + real)
+	h := hashBytes("hostname:" + normalizeHostnameForHash(real))
 	return fmt.Sprintf("host-%x.%s", h[:4], fakeHostnameDomain)
+}
+
+// normalizeHostnameForHash mirrors pkg/netcup/rdns.go's
+// normalizeRDNSHostname (case-insensitive, trailing-dot-insensitive DNS name
+// comparison, used by ConfirmRDNS's rdnsHostnamesEqual to decide whether a
+// read-back PTR matches what was set) — it can't be imported directly since
+// that function is unexported in a different package, so it's replicated
+// here. Without this, a SetRDNS request PTR like "Foo.Example" and a later
+// GetRDNS response PTR like "foo.example." — which the SDK itself treats as
+// equal — would hash to two different fake hostnames, silently breaking a
+// replayed set/read-back comparison even though the live recording
+// succeeded.
+func normalizeHostnameForHash(h string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }
 
 // isIPv4Netmask reports whether ip is a syntactically valid subnet mask (a
