@@ -2,6 +2,7 @@ package vcr
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/dnaeon/go-vcr/recorder"
@@ -10,6 +11,17 @@ import (
 )
 
 func TestRecorderReplay(t *testing.T) {
+	// This is a self-test of the replay path against a hand-authored fixture,
+	// not a real SCP response — it has nothing to (re)record and no live
+	// endpoint to hit. Running it under VCR_RECORD=1 would require live
+	// credentials just to overwrite testdata/cassettes/TestRecorderReplay.yaml
+	// with a real recording, silently replacing the minimal fixture that
+	// future re-recordings of the real cassettes (#41/#43) don't expect to
+	// change.
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("self-test fixture; not part of make acc-record")
+	}
+
 	client := NewClient(t, "TestRecorderReplay")
 	if err := client.Ping(context.Background()); err != nil {
 		t.Fatalf("Ping() error = %v, want nil", err)

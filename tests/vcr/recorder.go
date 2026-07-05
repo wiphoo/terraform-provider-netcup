@@ -61,6 +61,11 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 	}
 
 	return netcup.New(
+		// Pinned explicitly rather than left to default resolution: netcup.New
+		// falls back to the NETCUP_API_ENDPOINT env var when set, which would
+		// change the request URL and break DefaultMatcher's method+URL match
+		// against whatever endpoint the cassette was actually recorded from.
+		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
 		netcup.WithHTTPClient(&http.Client{Transport: rec}),
 		netcup.WithAccessToken(token),
 	)
