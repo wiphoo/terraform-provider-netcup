@@ -1,0 +1,16 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    headers: {}
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/999999999
+    method: GET
+  response:
+    body: |-
+      {"message":"server not found"}
+    headers:
+      Content-Type:
+      - application/json
+    status: 404 Not Found
+    code: 404

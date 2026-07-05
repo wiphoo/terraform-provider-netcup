@@ -45,4 +45,8 @@ acc-record:
 		echo "make acc-record requires NETCUP_ACCESS_TOKEN (see CONTRIBUTING.md)."; \
 		exit 1; \
 	fi
+	@if [ -z "$$NETCUP_TEST_SERVER_ID" ]; then \
+		echo "make acc-record requires NETCUP_TEST_SERVER_ID (see CONTRIBUTING.md)."; \
+		exit 1; \
+	fi
 	VCR_RECORD=1 go test ./tests/vcr/...
