@@ -114,7 +114,9 @@ func (d *serversDataSource) Read(ctx context.Context, _ datasource.ReadRequest, 
 		return
 	}
 
-	var state serversDataSourceModel
+	state := serversDataSourceModel{
+		Servers: []serverMinimalModel{},
+	}
 	for _, s := range servers {
 		model := serverMinimalModel{
 			ID:       types.StringValue(strconv.FormatInt(int64(s.ID), 10)),
