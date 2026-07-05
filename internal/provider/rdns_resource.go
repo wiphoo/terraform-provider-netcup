@@ -365,11 +365,11 @@ func (v nonEmptyHostnameValidator) ValidateString(_ context.Context, req validat
 type trimHostnameModifier struct{}
 
 func (m trimHostnameModifier) Description(_ context.Context) string {
-	return "Trims surrounding whitespace from the hostname."
+	return "Normalizes the hostname: trims whitespace, lowercases, and strips trailing dot."
 }
 
 func (m trimHostnameModifier) MarkdownDescription(_ context.Context) string {
-	return "Trims surrounding whitespace from the hostname to prevent inconsistent results after apply."
+	return "Normalizes the hostname (trim whitespace, lowercase, strip trailing dot) at plan time so the planned value and the normalized read-back from refresh always agree."
 }
 
 func (m trimHostnameModifier) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
@@ -377,10 +377,7 @@ func (m trimHostnameModifier) PlanModifyString(_ context.Context, req planmodifi
 		return
 	}
 
-	trimmed := strings.TrimSpace(req.ConfigValue.ValueString())
-	if trimmed != req.ConfigValue.ValueString() {
-		resp.PlanValue = types.StringValue(trimmed)
-	}
+	resp.PlanValue = types.StringValue(normalizeRDNSHostname(req.ConfigValue.ValueString()))
 }
 
 // normalizeRDNSHostname lowers and strips the trailing dot from a PTR
