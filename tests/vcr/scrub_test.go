@@ -2,17 +2,20 @@ package vcr
 
 import (
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/dnaeon/go-vcr/cassette"
+	"gopkg.in/yaml.v2"
 )
 
 // jwtShapePattern matches an "eyJ..." base64url segment followed by two more
 // dot-separated segments — the shape of a JWT (header.payload.signature),
-// regardless of where it appears (Authorization header, OIDC response body).
+// regardless of where it appears in a body.
 var jwtShapePattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}`)
 
 // ipv4LikePattern and ipv6LikePattern are deliberately loose: candidates are
@@ -28,10 +31,8 @@ var (
 // value, e.g. `"userId":10001` or `"userId": 10001`.
 var userIDFieldPattern = regexp.MustCompile(`"userId"\s*:\s*(-?[0-9]+)`)
 
-// authorizationHeaderLinePattern matches an "Authorization:" YAML header
-// entry — the AddFilter hook in recorder.go deletes this key entirely, so a
-// properly scrubbed cassette should never contain this pattern at all.
-var authorizationHeaderLinePattern = regexp.MustCompile(`(?i)^\s*Authorization:`)
+// tokenFieldJSONPattern matches a JSON access_token/refresh_token field.
+var tokenFieldJSONPattern = regexp.MustCompile(`"(access_token|refresh_token)"\s*:\s*"([^"]*)"`)
 
 var (
 	_, fakeIPv4CIDR, _ = net.ParseCIDR("203.0.113.0/24")
@@ -39,12 +40,16 @@ var (
 )
 
 // TestCassettesAreScrubbed is an independent guard: it scans every committed
-// cassette's raw bytes for anything that looks like it slipped through
-// unredacted. It deliberately doesn't share code with the redaction hook
-// (redact.go) it's checking — it re-derives "is this OK" from first
-// principles (RFC 5737/3849 ranges, JWT shape, the synthetic userId
-// constant) rather than asserting the hook's own output, so a bug in the
-// hook's key list can't also blind this test. Runs in PR CI: no
+// cassette for anything that looks like it slipped through unredacted. It
+// deliberately doesn't share code with the redaction hook (redact.go) it's
+// checking — no shared JSON-walking logic, no calling the hook to compute an
+// "expected" value to diff against — it re-derives "is this OK" from first
+// principles (RFC 5737/3849 ranges, JWT shape, the synthetic userId/token
+// placeholder constants) instead. It does parse the cassette with the same
+// go-vcr cassette.Cassette struct the recorder itself uses, so it inspects
+// exactly the fields go-vcr actually persists (e.g. Request.Form, a second,
+// independent copy of form-encoded fields alongside Request.Body) rather
+// than guessing at the on-disk YAML shape via regex. Runs in PR CI: no
 // credentials, no network, no dependency on VCR_RECORD.
 func TestCassettesAreScrubbed(t *testing.T) {
 	matches, err := filepath.Glob("testdata/cassettes/*.yaml")
@@ -62,29 +67,57 @@ func TestCassettesAreScrubbed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", path, err)
 			}
-			text := string(data)
 
-			checkNoAuthorizationHeader(t, text)
-			checkNoJWTShape(t, text)
-			checkIPv4sInRange(t, text)
-			checkIPv6sInRange(t, text)
-			checkUserIDsAreSynthetic(t, text)
+			var c cassette.Cassette
+			if err := yaml.Unmarshal(data, &c); err != nil {
+				t.Fatalf("parse cassette YAML: %v", err)
+			}
+
+			for _, ia := range c.Interactions {
+				checkNoAuthorizationHeader(t, ia)
+				checkFormValuesAreSynthetic(t, ia)
+				for _, body := range []string{ia.Request.Body, ia.Response.Body} {
+					checkNoJWTShape(t, body)
+					checkIPv4sInRange(t, body)
+					checkIPv6sInRange(t, body)
+					checkUserIDsAreSynthetic(t, body)
+					checkTokenFieldsAreSynthetic(t, body)
+				}
+				checkIPv4sInRange(t, ia.URL)
+				checkIPv6sInRange(t, ia.URL)
+			}
 		})
 	}
 }
 
-func checkNoAuthorizationHeader(t *testing.T, text string) {
+func checkNoAuthorizationHeader(t *testing.T, ia *cassette.Interaction) {
 	t.Helper()
-	for _, line := range strings.Split(text, "\n") {
-		if authorizationHeaderLinePattern.MatchString(line) {
-			t.Errorf("unscrubbed Authorization header: %q", strings.TrimSpace(line))
+	if _, ok := ia.Request.Headers["Authorization"]; ok {
+		t.Errorf("unscrubbed Authorization header on request to %s", ia.URL)
+	}
+}
+
+// checkFormValuesAreSynthetic covers cassette.Interaction.Request.Form —
+// go-vcr's recorder parses every request with http.Request.ParseForm and
+// stores the result here, a second, independent copy of any form-encoded
+// token alongside Request.Body's serialized string.
+func checkFormValuesAreSynthetic(t *testing.T, ia *cassette.Interaction) {
+	t.Helper()
+	for k, values := range ia.Form {
+		if !tokenLikeKeys[k] {
+			continue
+		}
+		for _, v := range values {
+			if v != "" && v != redactedTokenPlaceholder {
+				t.Errorf("found a non-synthetic %s in request.form: %q", k, truncate(v, 20))
+			}
 		}
 	}
 }
 
-func checkNoJWTShape(t *testing.T, text string) {
+func checkNoJWTShape(t *testing.T, body string) {
 	t.Helper()
-	for _, m := range jwtShapePattern.FindAllString(text, -1) {
+	for _, m := range jwtShapePattern.FindAllString(body, -1) {
 		t.Errorf("found a JWT-shaped string (Bearer eyJ...): %q", truncate(m, 40))
 	}
 }
@@ -118,15 +151,43 @@ func checkIPv6sInRange(t *testing.T, text string) {
 	}
 }
 
-func checkUserIDsAreSynthetic(t *testing.T, text string) {
+func checkUserIDsAreSynthetic(t *testing.T, body string) {
 	t.Helper()
-	for _, m := range userIDFieldPattern.FindAllStringSubmatch(text, -1) {
+	for _, m := range userIDFieldPattern.FindAllStringSubmatch(body, -1) {
 		n, err := strconv.Atoi(m[1])
 		if err != nil {
 			continue
 		}
 		if n != fakeUserIDValue {
 			t.Errorf("found a non-synthetic userId: %s (want %d)", m[0], fakeUserIDValue)
+		}
+	}
+}
+
+// checkTokenFieldsAreSynthetic catches an access_token/refresh_token leak
+// directly in a body string — needed alongside checkFormValuesAreSynthetic
+// (which only sees Request.Form) because: (a) OIDC responses carry the
+// token in a JSON Response.Body, not a form, and (b) a real token isn't
+// necessarily JWT-shaped, so checkNoJWTShape alone can't be relied on to
+// catch an opaque one.
+func checkTokenFieldsAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range tokenFieldJSONPattern.FindAllStringSubmatch(body, -1) {
+		key, val := m[1], m[2]
+		if val != "" && val != redactedTokenPlaceholder {
+			t.Errorf("found a non-synthetic %s in JSON body: %q", key, truncate(val, 20))
+		}
+	}
+	if values, err := url.ParseQuery(body); err == nil {
+		for k, vs := range values {
+			if !tokenLikeKeys[k] {
+				continue
+			}
+			for _, v := range vs {
+				if v != "" && v != redactedTokenPlaceholder {
+					t.Errorf("found a non-synthetic %s in form body: %q", k, truncate(v, 20))
+				}
+			}
 		}
 	}
 }

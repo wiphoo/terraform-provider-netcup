@@ -296,12 +296,21 @@ func redactFormBody(body string) string {
 	if err != nil {
 		return body
 	}
+	redactFormValues(values)
+	return values.Encode()
+}
+
+// redactFormValues rewrites tokenLikeKeys values in place. go-vcr's recorder
+// parses every request with http.Request.ParseForm and stores the result as
+// cassette.Interaction.Request.Form — a second, independent copy of any
+// form-encoded token alongside Request.Body's serialized string — so this
+// must be applied to both, not just the body.
+func redactFormValues(values url.Values) {
 	for k := range values {
 		if tokenLikeKeys[k] {
 			values.Set(k, redactedTokenPlaceholder)
 		}
 	}
-	return values.Encode()
 }
 
 // rdnsURLPattern matches the rDNS endpoints' URL path, which embeds the

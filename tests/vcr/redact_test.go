@@ -304,6 +304,25 @@ func TestRedactRequestBodyForm(t *testing.T) {
 	}
 }
 
+// TestRedactFormValues covers cassette.Interaction.Request.Form, go-vcr's
+// second, independent copy of a form-encoded request's fields (parsed via
+// http.Request.ParseForm, stored separately from the serialized Body
+// string) — see the AddFilter call in recorder.go, which must redact both.
+func TestRedactFormValues(t *testing.T) {
+	values := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {"opaque-real-refresh-token"},
+		"client_id":     {"scp"},
+	}
+	redactFormValues(values)
+	if values.Get("refresh_token") != redactedTokenPlaceholder {
+		t.Errorf("refresh_token = %q, want %q", values.Get("refresh_token"), redactedTokenPlaceholder)
+	}
+	if values.Get("client_id") != "scp" {
+		t.Errorf("client_id should be preserved as-is, got %q", values.Get("client_id"))
+	}
+}
+
 func TestRedactURLRdns(t *testing.T) {
 	got := redactURL("https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.99")
 	if got == "https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.99" {

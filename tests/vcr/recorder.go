@@ -72,6 +72,7 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 		delete(i.Request.Headers, "Authorization")
 		i.URL = redactURL(i.URL)
 		i.Request.Body = redactRequestBody(i.Request.Headers.Get("Content-Type"), i.Request.Body)
+		redactFormValues(i.Form)
 		i.Response.Body = redactResponseBody(i.Response.Body)
 		return nil
 	})
