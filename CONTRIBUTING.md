@@ -9,6 +9,7 @@ started — from setting up a dev environment to opening a pull request.
 - [What can I contribute?](#what-can-i-contribute)
 - [Development setup](#development-setup)
 - [Running checks](#running-checks)
+- [Acceptance tests](#acceptance-tests)
 - [Branch and commit conventions](#branch-and-commit-conventions)
 - [Pull request process](#pull-request-process)
 - [Branch protection / merge rules](#branch-protection--merge-rules)
@@ -75,6 +76,8 @@ For Terraform provider development you will also need the
 | Vet | `go vet ./...` |
 | Format | `gofmt -l .` |
 | Lint | `golangci-lint run` (requires [golangci-lint](https://golangci-lint.run/usage/install/)) |
+| Acceptance tests (release gate) | `make acc` (requires `TF_ACC=1`) |
+| Regenerate go-vcr cassettes | `make acc-record` (requires `VCR_RECORD=1`, see below) |
 
 All checks must pass before a PR can be merged.
 
@@ -85,6 +88,68 @@ publishing are skipped):
 goreleaser check
 goreleaser release --snapshot --clean --skip=sign,publish
 ```
+
+---
+
+## Acceptance tests
+
+The v0.2.0 provider uses a **two-tier acceptance test strategy** to work around
+the SCP API's IP-allowlist gate (which makes hosted-runner testing impractical).
+
+### Tier 1 — go-vcr replay (PR CI)
+
+Files: `tests/vcr/*_vcr_test.go`
+
+Plain Go tests that replay pre-recorded SCP responses using
+[go-vcr](https://github.com/dnaeon/go-vcr). They run in every `go test ./...`
+invocation with **no credentials and no network access**. Cassettes are stored
+in `tests/vcr/testdata/cassettes/`; `Authorization` headers are scrubbed before
+committing.
+
+### Tier 2 — live acceptance tests (release gate)
+
+Files: `internal/provider/*_acc_test.go`
+
+Standard Terraform provider acceptance tests guarded by `TF_ACC=1`:
+`os.Getenv("TF_ACC") == "" { t.Skip() }`. They hit the live SCP API and
+require:
+- `TF_ACC=1`
+- `NETCUP_ACCESS_TOKEN` (fresh token from `netcupctl auth login`)
+- The calling IP must be allowlisted in the SCP REST API settings
+- `NETCUP_TEST_SERVER_ID` (for `TestAccServerDataSource`)
+
+Run with:
+
+```bash
+make acc
+```
+
+> **Note:** Before sub-issue #42 (32-D) lands, no `*_acc_test.go` files exist
+> yet, so `make acc` is a no-op.
+
+### Re-recording cassettes
+
+When the SCP API shapes change, or before a release, regenerate cassettes from
+live SCP:
+
+```bash
+export NETCUP_ACCESS_TOKEN=$(netcupctl auth token --raw)
+export NETCUP_TEST_SERVER_ID=<your-server-id>
+export NETCUP_TEST_IP=<an-ip-on-that-server>
+make acc-record
+```
+
+The recorder helper (`tests/vcr/recorder.go`) reads `VCR_RECORD=1` (set by the
+make target) and proxies requests to live SCP, writing the interactions to
+`tests/vcr/testdata/cassettes/`. The recorded cassettes are committed and
+replayed in PR CI. **SetRDNS and DeleteRDNS mutate the test IP's PTR during
+recording** — the test IP is set, read, deleted, and read back as null in a
+single recording pass.
+
+Re-record when:
+- SCP API response shapes change
+- Before cutting a v0.2.x release
+- Adding new SDK methods to the go-vcr test suite (sub-issues B/C)
 
 ---
 
