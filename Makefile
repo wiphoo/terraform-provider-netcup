@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: build compile test lint fmt generate
+.PHONY: build compile test lint fmt generate acc acc-record
 
 # build produces the runnable netcupctl binary under bin/.
 build:
@@ -22,3 +22,17 @@ fmt:
 
 generate:
 	go generate ./...
+
+# acc runs live acceptance tests against the SCP API. It requires
+# TF_ACC=1 and valid credentials (NETCUP_ACCESS_TOKEN). Before sub-issue #42
+# (32-D) lands there are no _acc_test.go files, so this is a no-op.
+acc:
+	@find . -name '*_acc_test.go' -not -path './vendor/*' | grep -q . \
+		|| (echo "No acceptance tests found yet — see issue #42 (32-D)."; exit 0)
+	TF_ACC=1 go test ./...
+
+# acc-record regenerates all go-vcr cassettes from live SCP. Requires
+# NETCUP_ACCESS_TOKEN, NETCUP_TEST_SERVER_ID (for servers), and
+# NETCUP_TEST_IP (for rDNS).
+acc-record:
+	VCR_RECORD=1 go test ./tests/vcr/...
