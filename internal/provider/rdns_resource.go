@@ -48,6 +48,7 @@ func (r *rdnsResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		Attributes: map[string]schema.Attribute{
 			"ip_address": schema.StringAttribute{
 				Required:    true,
+				Computed:    true,
 				Description: "The IP address for the reverse DNS entry. Forces replacement if changed.",
 				PlanModifiers: []planmodifier.String{
 					canonicalizeIPModifier{},
@@ -59,6 +60,7 @@ func (r *rdnsResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			},
 			"hostname": schema.StringAttribute{
 				Required:    true,
+				Computed:    true,
 				Description: "The fully qualified domain name for the reverse DNS (PTR) entry.",
 				PlanModifiers: []planmodifier.String{
 					trimHostnameModifier{},
