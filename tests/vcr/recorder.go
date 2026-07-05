@@ -24,8 +24,9 @@ const clientTimeout = 30 * time.Second
 // NewClient constructs a *netcup.Client wired to a go-vcr recorder for the
 // named cassette (relative to testdata/cassettes/). When VCR_RECORD=1 the
 // recorder proxies to live SCP and records the interactions; otherwise it
-// replays the cassette. Authorization request headers are scrubbed before the
-// cassette is written (record mode only — replay mode is read-only).
+// replays the cassette. PII is scrubbed before the cassette is written
+// (record mode only — replay mode is read-only): see redact.go for what gets
+// substituted and CONTRIBUTING.md's "Redaction" section for the full table.
 //
 // The cassette name should match the test function name, e.g. "TestListServers".
 func NewClient(t *testing.T, cassetteName string) *netcup.Client {
@@ -63,10 +64,15 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 		}
 	})
 
-	// Scrub auth headers before the cassette is written. The filter runs only
-	// in record mode; replay mode is read-only.
+	// Scrub PII before the cassette is written: the Authorization header, plus
+	// body/URL fields (IPs, hostnames, nicknames, PTRs, userId, OIDC tokens) —
+	// see redact.go. The filter runs only in record mode; replay mode is
+	// read-only.
 	rec.AddFilter(func(i *cassette.Interaction) error {
 		delete(i.Request.Headers, "Authorization")
+		i.URL = redactURL(i.URL)
+		i.Request.Body = redactRequestBody(i.Request.Headers.Get("Content-Type"), i.Request.Body)
+		i.Response.Body = redactResponseBody(i.Response.Body)
 		return nil
 	})
 

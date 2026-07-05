@@ -103,8 +103,9 @@ Files: `tests/vcr/*_vcr_test.go`
 Plain Go tests that replay pre-recorded SCP responses using
 [go-vcr](https://github.com/dnaeon/go-vcr). They run in every `go test ./...`
 invocation with **no credentials and no network access**. Cassettes are stored
-in `tests/vcr/testdata/cassettes/`; `Authorization` headers are scrubbed before
-committing.
+in `tests/vcr/testdata/cassettes/`; PII (headers, body fields, and IPs in
+URLs) is scrubbed before committing — see [Redaction](#redaction--what-gets-scrubbed)
+below.
 
 ### Tier 2 — live acceptance tests (release gate)
 
@@ -150,6 +151,40 @@ Re-record when:
 - SCP API response shapes change
 - Before cutting a v0.2.x release
 - Adding new SDK methods to the go-vcr test suite (sub-issues B/C)
+
+### Redaction — what gets scrubbed
+
+The recorder's `AddFilter` hook (`tests/vcr/recorder.go`) substitutes sensitive
+fields with **deterministic, synthetic-but-valid** values before a cassette is
+written — never deletes them, since a missing `hostname`/`ip` would break the
+SDK decode/replay round-trip. The same real value always maps to the same
+fake value (hash-based, no shared state), so re-recording the same account
+yields identical cassettes.
+
+| Field | Fake value |
+|-------|-----------|
+| `Authorization` header (request) | deleted entirely |
+| `access_token` / `refresh_token` (JSON or form OIDC bodies) | fixed placeholder |
+| `ipv4Addresses[].ip` / `.gateway` / `.broadcast`, and any `ip` in a request URL (e.g. the rDNS endpoints) | mapped into **RFC 5737** `203.0.113.0/24` |
+| `ipv6Addresses[].networkPrefix` / `.gateway` | mapped into **RFC 3849** `2001:db8::/32` |
+| `hostname`, `nickname`, RDNS **PTR** (request and response — `SetRDNS` sends the PTR in the request body) | `host-<hash>.example.com` |
+| `userId` | fixed synthetic value (`10001`), regardless of the real value |
+
+**Preserved as-is:** `id` (server id — the natural cassette handle), `name`,
+`template.id`/`.name`, `site.id`/`.city`, `disabled`, `state`, `architecture`,
+`netmask` (structurally IPv4-shaped but not identifying — there are only 33
+possible values).
+
+> The recorder (maintainer) is still responsible for not recording against an
+> account whose server **`name`**s embed secrets/identity — redaction only
+> covers the fields in the table above.
+
+`TestCassettesAreScrubbed` (`tests/vcr/scrub_test.go`) is an independent guard
+that scans every committed cassette (bodies, headers, and URLs) and fails on
+any IP outside the documentation ranges above, a non-scrubbed `Authorization`
+header, a JWT (`Bearer eyJ…`) shape, or a `userId` outside the synthetic
+value. It runs in PR CI alongside the rest of `go test ./...`, with no
+credentials or network access.
 
 ---
 
