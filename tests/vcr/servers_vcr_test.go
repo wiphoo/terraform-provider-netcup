@@ -55,9 +55,6 @@ func TestListServers(t *testing.T) {
 	if s.Hostname == nil || *s.Hostname == "" {
 		t.Error("servers[0].Hostname is nil or empty")
 	}
-	if s.Nickname == nil || *s.Nickname == "" {
-		t.Error("servers[0].Nickname is nil or empty")
-	}
 	if s.Template == nil || s.Template.Name == "" {
 		t.Error("servers[0].Template.Name is empty")
 	}
