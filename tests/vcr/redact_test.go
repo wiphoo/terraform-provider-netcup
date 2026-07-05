@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -211,6 +212,65 @@ func TestRedactJSONBodyServerFields(t *testing.T) {
 	}
 	if v6["gateway"] == "fe80::1" {
 		t.Errorf("ipv6 gateway was not redacted")
+	}
+}
+
+// TestRedactJSONBodyServerLiveInfoInterfaces covers serverLiveInfo.interfaces[]
+// (see pkg/netcup/testdata/server_detail.json), which isn't modeled by any Go
+// struct (ServerInfo only decodes "state") but still carries real IPv6
+// addresses in the raw response: a plain array (ipv6LinkLocalAddresses) and
+// an array of CIDR strings (ipv6NetworkPrefixes).
+func TestRedactJSONBodyServerLiveInfoInterfaces(t *testing.T) {
+	body := `{
+		"serverLiveInfo": {
+			"state": "RUNNING",
+			"interfaces": [
+				{
+					"mac": "a6:4e:8c:f6:07:45",
+					"ipv4Addresses": [],
+					"ipv6LinkLocalAddresses": ["fe80::a44e:8cff:fef6:0745"],
+					"ipv6NetworkPrefixes": ["2a03:4000:2:8f7::/64"]
+				}
+			]
+		}
+	}`
+
+	out, ok := redactJSONBody(body)
+	if !ok {
+		t.Fatalf("redactJSONBody: not recognized as JSON")
+	}
+
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("redacted output is not valid JSON: %v\n%s", err, out)
+	}
+
+	iface := got["serverLiveInfo"].(map[string]interface{})["interfaces"].([]interface{})[0].(map[string]interface{})
+
+	if iface["mac"] != "a6:4e:8c:f6:07:45" {
+		t.Errorf("mac should be preserved as-is (not in scope for this issue), got %v", iface["mac"])
+	}
+
+	linkLocal := iface["ipv6LinkLocalAddresses"].([]interface{})
+	if linkLocal[0] == "fe80::a44e:8cff:fef6:0745" {
+		t.Errorf("ipv6LinkLocalAddresses[0] was not redacted: %v", linkLocal[0])
+	}
+	fake := linkLocal[0].(string)
+	if _, err := netip.ParseAddr(fake); err != nil {
+		t.Errorf("ipv6LinkLocalAddresses[0] = %q is not a valid IP", fake)
+	}
+
+	prefixes := iface["ipv6NetworkPrefixes"].([]interface{})
+	prefix := prefixes[0].(string)
+	if strings.HasPrefix(prefix, "2a03:4000:2:8f7::") {
+		t.Errorf("ipv6NetworkPrefixes[0] was not redacted: %v", prefix)
+	}
+	if !strings.HasSuffix(prefix, "/64") {
+		t.Errorf("ipv6NetworkPrefixes[0] = %q, want the /64 suffix preserved", prefix)
+	}
+	addr, _, _ := strings.Cut(prefix, "/")
+	if _, err := netip.ParseAddr(addr); err != nil {
+		t.Errorf("ipv6NetworkPrefixes[0] address part = %q is not a valid IP", addr)
 	}
 }
 

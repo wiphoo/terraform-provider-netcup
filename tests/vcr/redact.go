@@ -110,12 +110,20 @@ func isIPv4Netmask(ip net.IP) bool {
 	return v == mask
 }
 
-// ipLikeKeys are JSON object keys holding an IPv4 or IPv6 address string,
-// rewritten wherever they appear regardless of nesting depth. The address
-// family is detected from the value itself (net.ParseIP), not the key name,
-// since "gateway" is reused by both ipv4Addresses[] and ipv6Addresses[].
+// ipLikeKeys are JSON object keys holding an IPv4 or IPv6 address, rewritten
+// wherever they appear regardless of nesting depth. The address family is
+// detected from the value itself (net.ParseIP), not the key name, since
+// "gateway" is reused by both ipv4Addresses[] and ipv6Addresses[]. A value
+// can be a bare address string, a CIDR string (address + "/" + prefix
+// length, e.g. serverLiveInfo.interfaces[].ipv6NetworkPrefixes), or an array
+// of either — serverLiveInfo.interfaces[] (not modeled by any Go struct;
+// ServerInfo only decodes "state") carries real addresses in exactly this
+// shape, so the key list has to cover it even though it's absent from the
+// substitution table's Server-level field names.
 var ipLikeKeys = map[string]bool{
 	"ip": true, "gateway": true, "broadcast": true, "networkPrefix": true,
+	"ipv4Addresses": true, "ipv6Addresses": true,
+	"ipv6LinkLocalAddresses": true, "ipv6NetworkPrefixes": true,
 }
 
 // hostnameLikeKeys are JSON object keys holding a hostname/nickname/PTR
@@ -206,11 +214,7 @@ func redactValue(v interface{}) interface{} {
 func redactField(key string, val interface{}) interface{} {
 	switch {
 	case ipLikeKeys[key]:
-		s, ok := val.(string)
-		if !ok || s == "" {
-			return val
-		}
-		return redactIPString(s)
+		return redactIPValue(val)
 	case hostnameLikeKeys[key]:
 		s, ok := val.(string)
 		if !ok || s == "" {
@@ -228,6 +232,45 @@ func redactField(key string, val interface{}) interface{} {
 	default:
 		return val
 	}
+}
+
+// redactIPValue redacts an ipLikeKeys value, which can be a bare address
+// string, a CIDR string, or an array of either. Array elements that aren't
+// strings (e.g. Server.IPv4Addresses[]'s {id, ip, netmask, ...} objects,
+// which reuse the "ipv4Addresses" key name) are left as-is: they were
+// already redacted by their own inner keys during the recursive walk.
+func redactIPValue(val interface{}) interface{} {
+	switch v := val.(type) {
+	case string:
+		if v == "" {
+			return val
+		}
+		return redactIPOrCIDRString(v)
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, elem := range v {
+			if s, ok := elem.(string); ok && s != "" {
+				out[i] = redactIPOrCIDRString(s)
+			} else {
+				out[i] = elem
+			}
+		}
+		return out
+	default:
+		return val
+	}
+}
+
+// redactIPOrCIDRString redacts the address portion of s, which may be a
+// bare address ("2a03:4000:2:8f7::") or a CIDR ("2a03:4000:2:8f7::/64") —
+// serverLiveInfo.interfaces[].ipv6NetworkPrefixes uses the latter shape. The
+// prefix length suffix, if present, is preserved unchanged: it's a subnet
+// size, not an identifying value.
+func redactIPOrCIDRString(s string) string {
+	if addr, prefixLen, found := strings.Cut(s, "/"); found {
+		return redactIPString(addr) + "/" + prefixLen
+	}
+	return redactIPString(s)
 }
 
 // redactIPString maps a real IPv4 or IPv6 address string into its
