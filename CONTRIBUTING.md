@@ -154,7 +154,7 @@ Re-record when:
 
 ### Redaction — what gets scrubbed
 
-The recorder's `AddFilter` hook (`tests/vcr/recorder.go`) substitutes sensitive
+The recorder's `AddSaveFilter` hook (`tests/vcr/recorder.go`) substitutes sensitive
 fields with **deterministic, synthetic-but-valid** values before a cassette is
 written — never deletes them, since a missing `hostname`/`ip` would break the
 SDK decode/replay round-trip. The same real value always maps to the same

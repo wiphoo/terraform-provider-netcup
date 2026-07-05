@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dnaeon/go-vcr/cassette"
 	"github.com/dnaeon/go-vcr/recorder"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
@@ -66,16 +65,18 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 
 	// Scrub PII before the cassette is written: the Authorization header, plus
 	// body/URL fields (IPs, hostnames, nicknames, PTRs, userId, OIDC tokens) —
-	// see redact.go. The filter runs only in record mode; replay mode is
-	// read-only.
-	rec.AddFilter(func(i *cassette.Interaction) error {
-		delete(i.Request.Headers, "Authorization")
-		i.URL = redactURL(i.URL)
-		i.Request.Body = redactRequestBody(i.Request.Headers.Get("Content-Type"), i.Request.Body)
-		redactFormValues(i.Form)
-		i.Response.Body = redactResponseBody(i.Response.Body)
-		return nil
-	})
+	// see redact.go. Registered as a *save* filter (AddSaveFilter), not a
+	// regular one (AddFilter): go-vcr's RoundTrip builds the *http.Response it
+	// hands back to the code under test from the same *cassette.Interaction a
+	// regular AddFilter mutates, before that response is returned — so a
+	// regular filter would make record-mode tests observe the fake redacted
+	// IP/hostname instead of the real live SCP response (breaking, e.g., a
+	// test that reads a server's real IP and then calls the rDNS endpoint
+	// with it). AddSaveFilter runs later, in Stop()/Save(), strictly after
+	// every live round trip in this recording session has already returned
+	// its real response to the caller, so only the persisted cassette is
+	// rewritten. Replay mode never calls Save(), so this never runs there.
+	rec.AddSaveFilter(redactInteraction)
 
 	token := "vcr-replay-fake-token"
 	if mode == recorder.ModeRecording {

@@ -10,7 +10,23 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/dnaeon/go-vcr/cassette"
 )
+
+// redactInteraction is the save-time filter registered via
+// rec.AddSaveFilter in recorder.go (not rec.AddFilter — see the comment at
+// that call site for why the distinction matters). It scrubs the
+// Authorization header, plus body/URL/form fields (IPs, hostnames,
+// nicknames, PTRs, userId, OIDC tokens), on both request and response.
+func redactInteraction(i *cassette.Interaction) error {
+	delete(i.Request.Headers, "Authorization")
+	i.URL = redactURL(i.URL)
+	i.Request.Body = redactRequestBody(i.Request.Headers.Get("Content-Type"), i.Request.Body)
+	redactFormValues(i.Form)
+	i.Response.Body = redactResponseBody(i.Response.Body)
+	return nil
+}
 
 // fakeUserIDValue is the single synthetic userId every real userId is
 // rewritten to, regardless of the real value. Unlike IPs/hostnames (which
