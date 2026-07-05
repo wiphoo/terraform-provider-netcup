@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/provider"
@@ -16,7 +17,8 @@ import (
 // configureRequest builds a provider.ConfigureRequest from the given schema
 // attribute values, driving Configure the same way Terraform would after
 // parsing an HCL provider block. A nil value means the attribute was omitted
-// from the config (null).
+// from the config (null); tftypes.UnknownValue means the value won't be known
+// until apply (e.g. it's derived from another resource in the same run).
 func configureRequest(t *testing.T, schemaResp provider.SchemaResponse, values map[string]any) provider.ConfigureRequest {
 	t.Helper()
 	ctx := context.Background()
@@ -25,11 +27,14 @@ func configureRequest(t *testing.T, schemaResp provider.SchemaResponse, values m
 	raw := map[string]tftypes.Value{}
 	for name := range schemaResp.Schema.Attributes {
 		v, ok := values[name]
-		if !ok || v == nil {
+		switch {
+		case !ok || v == nil:
 			raw[name] = tftypes.NewValue(tftypes.String, nil)
-			continue
+		case v == tftypes.UnknownValue:
+			raw[name] = tftypes.NewValue(tftypes.String, tftypes.UnknownValue)
+		default:
+			raw[name] = tftypes.NewValue(tftypes.String, v)
 		}
-		raw[name] = tftypes.NewValue(tftypes.String, v)
 	}
 
 	return provider.ConfigureRequest{
@@ -184,5 +189,56 @@ func TestConfigure_MalformedAccessTokenFallsBackToZeroExpiry(t *testing.T) {
 	}
 	if want := "Bearer not-a-jwt"; gotAuth != want {
 		t.Errorf("Authorization = %q, want %q", gotAuth, want)
+	}
+}
+
+// TestConfigure_UnknownAccessTokenErrorsInsteadOfClobberingEnv proves that an
+// unknown config value (e.g. access_token derived from a resource not yet
+// applied) surfaces a clear diagnostic instead of silently resolving to ""
+// and overriding the env var fallback with an empty token.
+func TestConfigure_UnknownAccessTokenErrorsInsteadOfClobberingEnv(t *testing.T) {
+	t.Setenv("NETCUP_ACCESS_TOKEN", "env-token")
+
+	schemaResp := newTestSchema(t)
+	req := configureRequest(t, schemaResp, map[string]any{
+		"access_token": tftypes.UnknownValue,
+	})
+
+	p := &netcupProvider{version: "test"}
+	var resp provider.ConfigureResponse
+	p.Configure(context.Background(), req, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Configure() diagnostics has no error, want an error for an unknown access_token")
+	}
+	if resp.ResourceData != nil {
+		t.Errorf("ResourceData = %v, want nil when Configure errors", resp.ResourceData)
+	}
+
+	found := false
+	for _, d := range resp.Diagnostics.Errors() {
+		if strings.Contains(d.Summary(), "access_token") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("diagnostics = %v, want an error mentioning access_token", resp.Diagnostics)
+	}
+}
+
+// TestConfigure_UnknownEndpointErrors covers the same unknown-value guard for
+// a non-token attribute, proving all four schema attributes are checked.
+func TestConfigure_UnknownEndpointErrors(t *testing.T) {
+	schemaResp := newTestSchema(t)
+	req := configureRequest(t, schemaResp, map[string]any{
+		"api_endpoint": tftypes.UnknownValue,
+	})
+
+	p := &netcupProvider{version: "test"}
+	var resp provider.ConfigureResponse
+	p.Configure(context.Background(), req, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Configure() diagnostics has no error, want an error for an unknown api_endpoint")
 	}
 }

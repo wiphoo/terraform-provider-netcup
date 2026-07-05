@@ -6,10 +6,13 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -82,31 +85,24 @@ func (p *netcupProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		return
 	}
 
-	apiEndpoint := netcup.DefaultAPIEndpoint
-	if v := os.Getenv("NETCUP_API_ENDPOINT"); v != "" {
-		apiEndpoint = v
-	}
-	if !config.APIEndpoint.IsNull() {
-		apiEndpoint = config.APIEndpoint.ValueString()
-	}
-
-	oidcEndpoint := netcup.DefaultOIDCEndpoint
-	if v := os.Getenv("NETCUP_OIDC_ENDPOINT"); v != "" {
-		oidcEndpoint = v
-	}
-	if !config.OIDCEndpoint.IsNull() {
-		oidcEndpoint = config.OIDCEndpoint.ValueString()
+	// An unknown value (e.g. `access_token = aws_secretsmanager_secret_version.x.secret_string`
+	// during plan, before that resource has been applied) is not null, so
+	// ValueString() would silently return "" for it below rather than the
+	// intended value, clobbering the env var/default fallback. Reject unknown
+	// values up front, checking every attribute before returning so a
+	// practitioner sees all of them at once rather than one apply at a time.
+	requireKnown(&resp.Diagnostics, "access_token", "NETCUP_ACCESS_TOKEN", config.AccessToken)
+	requireKnown(&resp.Diagnostics, "refresh_token", "NETCUP_REFRESH_TOKEN", config.RefreshToken)
+	requireKnown(&resp.Diagnostics, "api_endpoint", "NETCUP_API_ENDPOINT", config.APIEndpoint)
+	requireKnown(&resp.Diagnostics, "oidc_endpoint", "NETCUP_OIDC_ENDPOINT", config.OIDCEndpoint)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
-	accessToken := os.Getenv("NETCUP_ACCESS_TOKEN")
-	if !config.AccessToken.IsNull() {
-		accessToken = config.AccessToken.ValueString()
-	}
-
-	refreshToken := os.Getenv("NETCUP_REFRESH_TOKEN")
-	if !config.RefreshToken.IsNull() {
-		refreshToken = config.RefreshToken.ValueString()
-	}
+	apiEndpoint := resolveConfigString(config.APIEndpoint, "NETCUP_API_ENDPOINT", netcup.DefaultAPIEndpoint)
+	oidcEndpoint := resolveConfigString(config.OIDCEndpoint, "NETCUP_OIDC_ENDPOINT", netcup.DefaultOIDCEndpoint)
+	accessToken := resolveConfigString(config.AccessToken, "NETCUP_ACCESS_TOKEN", "")
+	refreshToken := resolveConfigString(config.RefreshToken, "NETCUP_REFRESH_TOKEN", "")
 
 	endpointOpts := []netcup.Option{
 		netcup.WithAPIEndpoint(apiEndpoint),
@@ -138,6 +134,41 @@ func (p *netcupProvider) Configure(ctx context.Context, req provider.ConfigureRe
 
 	resp.DataSourceData = client
 	resp.ResourceData = client
+}
+
+// requireKnown appends an attribute error to diags if config is unknown,
+// since Configure has no way to resolve config > env precedence for a value
+// that Terraform hasn't determined yet (see the Configure comment above).
+func requireKnown(diags *diag.Diagnostics, attr, envVar string, config types.String) {
+	if !config.IsUnknown() {
+		return
+	}
+	diags.AddAttributeError(
+		path.Root(attr),
+		fmt.Sprintf("Unknown netcup provider %s", attr),
+		fmt.Sprintf(
+			"The provider cannot be configured because the %q value is not known until after apply "+
+				"(for example, it comes from a resource created in this run). "+
+				"Set it directly in the provider configuration, or via the %s environment variable, "+
+				"instead of deriving it from a value that isn't known during plan.",
+			attr, envVar,
+		),
+	)
+}
+
+// resolveConfigString applies the standard config > env var > fallback
+// precedence for a single provider schema attribute. Callers must reject
+// unknown values first (via requireKnown): ValueString() returns "" for an
+// unknown value, which would otherwise silently override envVar/fallback.
+func resolveConfigString(config types.String, envVar, fallback string) string {
+	value := fallback
+	if v := os.Getenv(envVar); v != "" {
+		value = v
+	}
+	if !config.IsNull() {
+		value = config.ValueString()
+	}
+	return value
 }
 
 func (p *netcupProvider) DataSources(_ context.Context) []func() datasource.DataSource {
