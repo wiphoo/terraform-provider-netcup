@@ -1,0 +1,15 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    headers: {}
+    url: https://www.servercontrolpanel.de/scp-core/api/ping
+    method: GET
+  response:
+    body: "OK"
+    headers:
+      Content-Type:
+      - text/plain
+    status: 200 OK
+    code: 200
