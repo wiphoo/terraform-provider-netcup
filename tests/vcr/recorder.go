@@ -43,7 +43,16 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 		t.Fatal(err)
 	}
 
-	t.Cleanup(func() { _ = rec.Stop() })
+	t.Cleanup(func() {
+		// In record mode this is what actually persists the regenerated
+		// cassette; a discarded error here would let make acc-record report
+		// success after live API calls while silently leaving the cassette
+		// file stale or missing (e.g. a read-only checkout or permission
+		// error). In replay mode Stop is a no-op that always returns nil.
+		if err := rec.Stop(); err != nil {
+			t.Errorf("go-vcr: saving cassette %q: %v", cassetteName, err)
+		}
+	})
 
 	// Scrub auth headers before the cassette is written. The filter runs only
 	// in record mode; replay mode is read-only.
