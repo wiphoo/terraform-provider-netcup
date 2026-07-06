@@ -1,0 +1,15 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    headers: {}
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.10
+    method: GET
+  response:
+    body: '{"rdns":"host-a1b2c3d4.example.com"}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200

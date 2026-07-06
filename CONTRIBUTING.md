@@ -98,7 +98,7 @@ the SCP API's IP-allowlist gate (which makes hosted-runner testing impractical).
 
 ### Tier 1 — go-vcr replay (PR CI)
 
-Files: `tests/vcr/*_vcr_test.go`
+Files: `tests/vcr/*_vcr_test.go` and `internal/provider/*_vcr_test.go`
 
 Plain Go tests that replay pre-recorded SCP responses using
 [go-vcr](https://github.com/dnaeon/go-vcr). They run in every `go test ./...`
@@ -118,15 +118,13 @@ require:
 - `NETCUP_ACCESS_TOKEN` (fresh token from `netcupctl auth login`)
 - The calling IP must be allowlisted in the SCP REST API settings
 - `NETCUP_TEST_SERVER_ID` (for `TestAccServerDataSource`)
+- `NETCUP_TEST_IP` (for `TestAccRDNSResource`)
 
 Run with:
 
 ```bash
 make acc
 ```
-
-> **Note:** Before sub-issue #42 (32-D) lands, no `*_acc_test.go` files exist
-> yet, so `make acc` is a no-op.
 
 ### Re-recording cassettes
 

@@ -1,0 +1,16 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    headers: {}
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/789
+    method: GET
+  response:
+    body: |-
+      {"id":789,"name":"minimal","hostname":null,"nickname":null,"disabled":false,"template":null,"serverLiveInfo":null,"ipv4Addresses":[],"ipv6Addresses":[],"architecture":null,"site":null}
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200

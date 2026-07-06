@@ -24,14 +24,14 @@ generate:
 	go generate ./...
 
 # acc runs live acceptance tests against the SCP API. It requires
-# TF_ACC=1 and valid credentials (NETCUP_ACCESS_TOKEN). Before sub-issue #42
-# (32-D) lands there are no _acc_test.go files, so this is a no-op.
+# TF_ACC=1, NETCUP_ACCESS_TOKEN, NETCUP_TEST_SERVER_ID (for server data
+# source), and NETCUP_TEST_IP (for rDNS resource).
 acc:
-	@if find . -name '*_acc_test.go' -not -path './vendor/*' | grep -q .; then \
-		TF_ACC=1 go test ./...; \
-	else \
-		echo "No acceptance tests found yet — see issue #42 (32-D)."; \
+	@if [ -z "$$NETCUP_ACCESS_TOKEN" ]; then \
+		echo "make acc requires NETCUP_ACCESS_TOKEN (see CONTRIBUTING.md)."; \
+		exit 1; \
 	fi
+	TF_ACC=1 go test ./...
 
 # acc-record regenerates all go-vcr cassettes from live SCP. Requires
 # NETCUP_ACCESS_TOKEN, NETCUP_TEST_SERVER_ID (for servers), and
