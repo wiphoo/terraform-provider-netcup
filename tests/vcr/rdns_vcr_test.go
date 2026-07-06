@@ -8,8 +8,6 @@ import (
 
 const testRDNSIP = "203.0.113.10"
 
-const testNoPTRIP = "203.0.113.20"
-
 const testRDNSHostname = "host-a1b2c3d4.example.com"
 
 func rdnsIPForTest(t *testing.T) string {
@@ -24,6 +22,8 @@ func rdnsIPForTest(t *testing.T) string {
 	return testRDNSIP
 }
 
+// TestSetRDNS records POST /v1/rdns/ipv4. In record mode it calls SetRDNS
+// with NETCUP_TEST_IP so the cassette captures a real SCP response.
 func TestSetRDNS(t *testing.T) {
 	client := NewClient(t, "TestSetRDNS")
 	ip := rdnsIPForTest(t)
@@ -42,9 +42,20 @@ func TestSetRDNS(t *testing.T) {
 	}
 }
 
+// TestGetRDNS records GET /v1/rdns/ipv4/{ip}. In record mode it first sets
+// the PTR on NETCUP_TEST_IP so the read-back has a value to return.
 func TestGetRDNS(t *testing.T) {
 	client := NewClient(t, "TestGetRDNS")
-	entry, err := client.GetRDNS(context.Background(), testRDNSIP)
+	ip := rdnsIPForTest(t)
+
+	if os.Getenv("VCR_RECORD") == "1" {
+		_, err := client.SetRDNS(context.Background(), ip, testRDNSHostname)
+		if err != nil {
+			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
+		}
+	}
+
+	entry, err := client.GetRDNS(context.Background(), ip)
 	if err != nil {
 		t.Fatalf("GetRDNS() error = %v", err)
 	}
@@ -59,9 +70,17 @@ func TestGetRDNS(t *testing.T) {
 	}
 }
 
+// TestGetRDNS_NoPTR records GET /v1/rdns/ipv4/{ip} returning null. In record
+// mode it first deletes any PTR on NETCUP_TEST_IP so the read-back is empty.
 func TestGetRDNS_NoPTR(t *testing.T) {
 	client := NewClient(t, "TestGetRDNS_NoPTR")
-	entry, err := client.GetRDNS(context.Background(), testNoPTRIP)
+	ip := rdnsIPForTest(t)
+
+	if os.Getenv("VCR_RECORD") == "1" {
+		_ = client.DeleteRDNS(context.Background(), ip)
+	}
+
+	entry, err := client.GetRDNS(context.Background(), ip)
 	if err != nil {
 		t.Fatalf("GetRDNS() error = %v", err)
 	}
@@ -73,9 +92,20 @@ func TestGetRDNS_NoPTR(t *testing.T) {
 	}
 }
 
+// TestDeleteRDNS records DELETE /v1/rdns/ipv4/{ip}. In record mode it first
+// sets a PTR on NETCUP_TEST_IP so there is something to delete.
 func TestDeleteRDNS(t *testing.T) {
 	client := NewClient(t, "TestDeleteRDNS")
-	err := client.DeleteRDNS(context.Background(), testRDNSIP)
+	ip := rdnsIPForTest(t)
+
+	if os.Getenv("VCR_RECORD") == "1" {
+		_, err := client.SetRDNS(context.Background(), ip, testRDNSHostname)
+		if err != nil {
+			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
+		}
+	}
+
+	err := client.DeleteRDNS(context.Background(), ip)
 	if err != nil {
 		t.Fatalf("DeleteRDNS() error = %v", err)
 	}

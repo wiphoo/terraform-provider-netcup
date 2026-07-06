@@ -31,6 +31,14 @@ acc:
 		echo "make acc requires NETCUP_ACCESS_TOKEN (see CONTRIBUTING.md)."; \
 		exit 1; \
 	fi
+	@if [ -z "$$NETCUP_TEST_SERVER_ID" ]; then \
+		echo "make acc requires NETCUP_TEST_SERVER_ID (see CONTRIBUTING.md)."; \
+		exit 1; \
+	fi
+	@if [ -z "$$NETCUP_TEST_IP" ]; then \
+		echo "make acc requires NETCUP_TEST_IP (see CONTRIBUTING.md)."; \
+		exit 1; \
+	fi
 	TF_ACC=1 go test ./...
 
 # acc-record regenerates all go-vcr cassettes from live SCP. Requires
