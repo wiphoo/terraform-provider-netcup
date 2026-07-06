@@ -179,6 +179,7 @@ func (p *netcupProvider) DataSources(_ context.Context) []func() datasource.Data
 }
 
 func (p *netcupProvider) Resources(_ context.Context) []func() resource.Resource {
-	// No resources are registered yet; netcup_rdns lands in #29.
-	return nil
+	return []func() resource.Resource{
+		NewRDNSResource,
+	}
 }
