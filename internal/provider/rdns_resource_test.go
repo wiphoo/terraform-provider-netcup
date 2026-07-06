@@ -441,6 +441,7 @@ func TestRDNSResource_CanonicalHostnameValidator(t *testing.T) {
 		hasDiag bool
 	}{
 		{"server.example.com", false},
+		{"Server.Example.COM.", true},
 		{"  host.example.com  ", true},
 		{"", true},
 		{"   ", true},

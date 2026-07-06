@@ -348,20 +348,23 @@ func (v canonicalHostnameValidator) ValidateString(_ context.Context, req valida
 		return
 	}
 
-	if req.ConfigValue.ValueString() != strings.TrimSpace(req.ConfigValue.ValueString()) {
-		resp.Diagnostics.AddAttributeError(
-			req.Path,
-			"Invalid hostname",
-			"Hostname must not have leading or trailing whitespace.",
-		)
-		return
-	}
+	input := req.ConfigValue.ValueString()
 
-	if req.ConfigValue.ValueString() == "" {
+	if input == "" {
 		resp.Diagnostics.AddAttributeError(
 			req.Path,
 			"Invalid hostname",
 			"Hostname must not be empty.",
+		)
+		return
+	}
+
+	normalized := normalizeRDNSHostname(input)
+	if input != normalized {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Non-canonical hostname",
+			fmt.Sprintf("Hostname must be in canonical form: use %q instead of %q.", normalized, input),
 		)
 	}
 }
