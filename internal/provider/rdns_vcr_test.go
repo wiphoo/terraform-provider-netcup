@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -90,6 +91,11 @@ func TestRDNSResource_VCRReadNoPTR(t *testing.T) {
 	r, schemaResp := configureRDNSResource(t, client)
 
 	ip := vcrRDNSIPForTest(t)
+
+	if os.Getenv("VCR_RECORD") == "1" {
+		_ = client.DeleteRDNS(context.Background(), ip)
+	}
+
 	state := resourceState(schemaResp, map[string]tftypes.Value{
 		"id":         tftypes.NewValue(tftypes.String, ip),
 		"ip_address": tftypes.NewValue(tftypes.String, ip),

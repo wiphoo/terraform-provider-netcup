@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"testing"
 
@@ -54,6 +55,9 @@ func TestServerDataSource(t *testing.T) {
 }
 
 func TestServerDataSource_VCRNullableFields(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("nullable-fields cassette is a hand-authored fixture, not a live recording")
+	}
 	client := newVCRClient(t, "TestServerDataSource_VCRNullableFields")
 	ctx := context.Background()
 	ds, schemaResp := configureServerDataSource(t, client)
