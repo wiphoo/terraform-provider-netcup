@@ -48,25 +48,19 @@ func (r *rdnsResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		Attributes: map[string]schema.Attribute{
 			"ip_address": schema.StringAttribute{
 				Required:    true,
-				Computed:    true,
 				Description: "The IP address for the reverse DNS entry. Forces replacement if changed.",
 				PlanModifiers: []planmodifier.String{
-					canonicalizeIPModifier{},
 					stringplanmodifier.RequiresReplace(),
 				},
 				Validators: []validator.String{
-					validIPValidator{},
+					canonicalIPValidator{},
 				},
 			},
 			"hostname": schema.StringAttribute{
 				Required:    true,
-				Computed:    true,
 				Description: "The fully qualified domain name for the reverse DNS (PTR) entry.",
-				PlanModifiers: []planmodifier.String{
-					trimHostnameModifier{},
-				},
 				Validators: []validator.String{
-					nonEmptyHostnameValidator{},
+					canonicalHostnameValidator{},
 				},
 			},
 			"id": schema.StringAttribute{
@@ -295,67 +289,75 @@ func (r *rdnsResource) canonicalizeIP(ip string) (string, error) {
 	return addr.String(), nil
 }
 
-type canonicalizeIPModifier struct{}
+// canonicalIPValidator rejects IPs that are not in canonical (RFC 5952) form.
+// The SDK requires canonical IPs for API calls, so enforcing this up front
+// prevents silent normalization surprises and inconsistent plan/apply results.
+type canonicalIPValidator struct{}
 
-func (m canonicalizeIPModifier) Description(_ context.Context) string {
-	return "Canonicalizes the IP address to RFC 5952 form."
+func (v canonicalIPValidator) Description(_ context.Context) string {
+	return "Requires the IP address to be in canonical RFC 5952 form."
 }
 
-func (m canonicalizeIPModifier) MarkdownDescription(_ context.Context) string {
-	return "Canonicalizes the IP address to RFC 5952 form (IPv6 compression, IPv4-in-IPv6 unmapping)."
+func (v canonicalIPValidator) MarkdownDescription(_ context.Context) string {
+	return "Requires the IP address to be in canonical RFC 5952 form (lowercase, compressed IPv6, no IPv4-in-IPv6 mapping)."
 }
 
-func (m canonicalizeIPModifier) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+func (v canonicalIPValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
 		return
 	}
 
 	addr, err := netip.ParseAddr(req.ConfigValue.ValueString())
 	if err != nil {
-		return
-	}
-	addr = addr.Unmap()
-	resp.PlanValue = types.StringValue(addr.String())
-}
-
-type validIPValidator struct{}
-
-func (v validIPValidator) Description(_ context.Context) string {
-	return "Validates that the value is a valid IP address."
-}
-
-func (v validIPValidator) MarkdownDescription(_ context.Context) string {
-	return "Validates that the value is a valid IPv4 or IPv6 address."
-}
-
-func (v validIPValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
-	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
-		return
-	}
-	if _, err := netip.ParseAddr(req.ConfigValue.ValueString()); err != nil {
 		resp.Diagnostics.AddAttributeError(
 			req.Path,
 			"Invalid IP address",
 			fmt.Sprintf("Cannot parse %q as a valid IP address.", req.ConfigValue.ValueString()),
 		)
+		return
+	}
+
+	addr = addr.Unmap()
+	canonical := addr.String()
+
+	if req.ConfigValue.ValueString() != canonical {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Non-canonical IP address",
+			fmt.Sprintf("IP address %q must be written in canonical form: use %q instead.", req.ConfigValue.ValueString(), canonical),
+		)
 	}
 }
 
-type nonEmptyHostnameValidator struct{}
+// canonicalHostnameValidator rejects hostnames with leading/trailing whitespace
+// or that are empty after trimming. The SDK strips whitespace internally, so
+// enforcing this up front prevents the planned value from differing from what
+// gets sent to the API.
+type canonicalHostnameValidator struct{}
 
-func (v nonEmptyHostnameValidator) Description(_ context.Context) string {
-	return "Validates that the hostname is non-empty after trimming whitespace."
+func (v canonicalHostnameValidator) Description(_ context.Context) string {
+	return "Requires the hostname to be non-empty with no leading or trailing whitespace."
 }
 
-func (v nonEmptyHostnameValidator) MarkdownDescription(_ context.Context) string {
-	return "Validates that the hostname is non-empty after trimming whitespace."
+func (v canonicalHostnameValidator) MarkdownDescription(_ context.Context) string {
+	return "Requires the hostname to be non-empty with no leading or trailing whitespace."
 }
 
-func (v nonEmptyHostnameValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+func (v canonicalHostnameValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
 		return
 	}
-	if strings.TrimSpace(req.ConfigValue.ValueString()) == "" {
+
+	if req.ConfigValue.ValueString() != strings.TrimSpace(req.ConfigValue.ValueString()) {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid hostname",
+			"Hostname must not have leading or trailing whitespace.",
+		)
+		return
+	}
+
+	if req.ConfigValue.ValueString() == "" {
 		resp.Diagnostics.AddAttributeError(
 			req.Path,
 			"Invalid hostname",
@@ -364,28 +366,10 @@ func (v nonEmptyHostnameValidator) ValidateString(_ context.Context, req validat
 	}
 }
 
-type trimHostnameModifier struct{}
-
-func (m trimHostnameModifier) Description(_ context.Context) string {
-	return "Normalizes the hostname: trims whitespace, lowercases, and strips trailing dot."
-}
-
-func (m trimHostnameModifier) MarkdownDescription(_ context.Context) string {
-	return "Normalizes the hostname (trim whitespace, lowercase, strip trailing dot) at plan time so the planned value and the normalized read-back from refresh always agree."
-}
-
-func (m trimHostnameModifier) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
-	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
-		return
-	}
-
-	resp.PlanValue = types.StringValue(normalizeRDNSHostname(req.ConfigValue.ValueString()))
-}
-
 // normalizeRDNSHostname lowers and strips the trailing dot from a PTR
 // read-back, matching the SDK's unexported normalizeRDNSHostname
 // (pkg/netcup/rdns.go:245-247). The SDK's GetRDNS already trims whitespace
 // before returning the hostname, so only case and trailing-dot differ.
 func normalizeRDNSHostname(h string) string {
-	return strings.ToLower(strings.TrimSuffix(h, "."))
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }

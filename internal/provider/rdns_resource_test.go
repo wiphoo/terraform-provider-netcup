@@ -10,7 +10,6 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -403,34 +402,8 @@ func TestRDNSResource_Update(t *testing.T) {
 	}
 }
 
-func TestRDNSResource_CanonicalizeIPModifier(t *testing.T) {
-	m := canonicalizeIPModifier{}
-
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"1.2.3.4", "1.2.3.4"},
-		{"::ffff:1.2.3.4", "1.2.3.4"},
-		{"2A03:4000:0006:0B1D:0000:0000:0000:0001", "2a03:4000:6:b1d::1"},
-		{"2a03:4000:6:b1d::1", "2a03:4000:6:b1d::1"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			var resp planmodifier.StringResponse
-			m.PlanModifyString(context.Background(), planmodifier.StringRequest{
-				ConfigValue: types.StringValue(tt.input),
-			}, &resp)
-			if resp.PlanValue.ValueString() != tt.expected {
-				t.Errorf("got %q, want %q", resp.PlanValue.ValueString(), tt.expected)
-			}
-		})
-	}
-}
-
-func TestRDNSResource_ValidIPValidator(t *testing.T) {
-	v := validIPValidator{}
+func TestRDNSResource_CanonicalIPValidator(t *testing.T) {
+	v := canonicalIPValidator{}
 
 	tests := []struct {
 		input   string
@@ -438,7 +411,8 @@ func TestRDNSResource_ValidIPValidator(t *testing.T) {
 	}{
 		{"1.2.3.4", false},
 		{"2a03:4000:6:b1d::1", false},
-		{"::ffff:1.2.3.4", false},
+		{"::ffff:1.2.3.4", true},
+		{"2A03:4000:0006:0B1D:0000:0000:0000:0001", true},
 		{"not-an-ip", true},
 		{"", true},
 	}
@@ -459,15 +433,15 @@ func TestRDNSResource_ValidIPValidator(t *testing.T) {
 	}
 }
 
-func TestRDNSResource_NonEmptyHostnameValidator(t *testing.T) {
-	v := nonEmptyHostnameValidator{}
+func TestRDNSResource_CanonicalHostnameValidator(t *testing.T) {
+	v := canonicalHostnameValidator{}
 
 	tests := []struct {
 		input   string
 		hasDiag bool
 	}{
 		{"server.example.com", false},
-		{"  host.example.com  ", false},
+		{"  host.example.com  ", true},
 		{"", true},
 		{"   ", true},
 	}
