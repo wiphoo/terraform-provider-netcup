@@ -17,6 +17,11 @@ func newVCRClient(t *testing.T, cassetteName string) *netcup.Client {
 	return vcr.NewClient(t, cassetteName)
 }
 
+// vcrServerIDForTest returns the server ID for provider-tier VCR tests.
+// In record mode it reads NETCUP_TEST_SERVER_ID; in replay mode it returns
+// the constant 882863, which is the server ID embedded in the hand-authored
+// TestServerDataSource.yaml cassette. Update this default after re-recording
+// make acc-record with a different server ID.
 func vcrServerIDForTest(t *testing.T) int32 {
 	t.Helper()
 	if os.Getenv("VCR_RECORD") == "1" {
@@ -33,6 +38,11 @@ func vcrServerIDForTest(t *testing.T) int32 {
 	return 882863
 }
 
+// vcrRDNSIPForTest returns the rDNS IP for provider-tier VCR tests.
+// In record mode it reads NETCUP_TEST_IP; in replay mode it returns
+// "203.0.113.10", matching the redacted IP range used in the hand-authored
+// rDNS cassettes. Update this default if the redacted IP changes after
+// re-recording (the deterministic redactor may assign a different value).
 func vcrRDNSIPForTest(t *testing.T) string {
 	t.Helper()
 	if os.Getenv("VCR_RECORD") == "1" {
