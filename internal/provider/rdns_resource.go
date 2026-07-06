@@ -106,8 +106,8 @@ func (r *rdnsResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	ip := strings.TrimSpace(plan.IPAddress.ValueString())
-	hostname := strings.TrimSpace(plan.Hostname.ValueString())
+	ip := plan.IPAddress.ValueString()
+	hostname := plan.Hostname.ValueString()
 
 	canonical, err := r.canonicalizeIP(ip)
 	if err != nil {
@@ -115,8 +115,25 @@ func (r *rdnsResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
+	if canonical != ip {
+		resp.Diagnostics.AddError(
+			"Non-canonical IP address",
+			fmt.Sprintf("IP address %q must be written in canonical form: use %q instead.", ip, canonical),
+		)
+		return
+	}
+
 	if hostname == "" {
 		resp.Diagnostics.AddError("Invalid hostname", "Hostname must not be empty.")
+		return
+	}
+
+	normalizedHostname := normalizeRDNSHostname(hostname)
+	if hostname != normalizedHostname {
+		resp.Diagnostics.AddError(
+			"Non-canonical hostname",
+			fmt.Sprintf("Hostname must be in canonical form: use %q instead of %q.", normalizedHostname, hostname),
+		)
 		return
 	}
 
@@ -206,8 +223,8 @@ func (r *rdnsResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	ip := strings.TrimSpace(plan.IPAddress.ValueString())
-	hostname := strings.TrimSpace(plan.Hostname.ValueString())
+	ip := plan.IPAddress.ValueString()
+	hostname := plan.Hostname.ValueString()
 
 	canonical, err := r.canonicalizeIP(ip)
 	if err != nil {
@@ -215,8 +232,25 @@ func (r *rdnsResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
+	if canonical != ip {
+		resp.Diagnostics.AddError(
+			"Non-canonical IP address",
+			fmt.Sprintf("IP address %q must be written in canonical form: use %q instead.", ip, canonical),
+		)
+		return
+	}
+
 	if hostname == "" {
 		resp.Diagnostics.AddError("Invalid hostname", "Hostname must not be empty.")
+		return
+	}
+
+	normalizedHostname := normalizeRDNSHostname(hostname)
+	if hostname != normalizedHostname {
+		resp.Diagnostics.AddError(
+			"Non-canonical hostname",
+			fmt.Sprintf("Hostname must be in canonical form: use %q instead of %q.", normalizedHostname, hostname),
+		)
 		return
 	}
 
