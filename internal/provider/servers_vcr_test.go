@@ -10,16 +10,7 @@ import (
 func TestServersDataSource(t *testing.T) {
 	client := newVCRClient(t, "TestServersDataSource")
 	ctx := context.Background()
-	ds := NewServersDataSource().(datasource.DataSourceWithConfigure)
-
-	var configResp datasource.ConfigureResponse
-	ds.Configure(ctx, datasource.ConfigureRequest{ProviderData: client}, &configResp)
-	if configResp.Diagnostics.HasError() {
-		t.Fatalf("Configure() unexpected diagnostics: %v", configResp.Diagnostics.Errors())
-	}
-
-	var schemaResp datasource.SchemaResponse
-	ds.Schema(ctx, datasource.SchemaRequest{}, &schemaResp)
+	ds, schemaResp := configureServersDataSource(t, client)
 
 	var resp datasource.ReadResponse
 	resp.State.Schema = schemaResp.Schema

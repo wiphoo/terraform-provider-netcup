@@ -4,7 +4,7 @@ interactions:
 - request:
     body: ""
     headers: {}
-    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.20
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.10
     method: GET
   response:
     body: '{"rdns":null}'

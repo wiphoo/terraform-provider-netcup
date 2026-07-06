@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -11,19 +12,11 @@ import (
 func TestServerDataSource(t *testing.T) {
 	client := newVCRClient(t, "TestServerDataSource")
 	ctx := context.Background()
-	ds := NewServerDataSource().(datasource.DataSourceWithConfigure)
+	ds, schemaResp := configureServerDataSource(t, client)
 
-	var configResp datasource.ConfigureResponse
-	ds.Configure(ctx, datasource.ConfigureRequest{ProviderData: client}, &configResp)
-	if configResp.Diagnostics.HasError() {
-		t.Fatalf("Configure() unexpected diagnostics: %v", configResp.Diagnostics.Errors())
-	}
-
-	var schemaResp datasource.SchemaResponse
-	ds.Schema(ctx, datasource.SchemaRequest{}, &schemaResp)
-
+	serverID := strconv.FormatInt(int64(vcrServerIDForTest(t)), 10)
 	req := readRequest(t, schemaResp, map[string]tftypes.Value{
-		"id": tftypes.NewValue(tftypes.String, "882863"),
+		"id": tftypes.NewValue(tftypes.String, serverID),
 	})
 
 	var resp datasource.ReadResponse
@@ -40,8 +33,8 @@ func TestServerDataSource(t *testing.T) {
 		t.Fatalf("State.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
 
-	if state.ID.ValueString() != "882863" {
-		t.Errorf("ID = %q, want 882863", state.ID.ValueString())
+	if state.ID.ValueString() != serverID {
+		t.Errorf("ID = %q, want %s", state.ID.ValueString(), serverID)
 	}
 	if state.Hostname.ValueString() == "" {
 		t.Error("Hostname is empty")
@@ -63,16 +56,7 @@ func TestServerDataSource(t *testing.T) {
 func TestServerDataSource_VCRNullableFields(t *testing.T) {
 	client := newVCRClient(t, "TestServerDataSource_VCRNullableFields")
 	ctx := context.Background()
-	ds := NewServerDataSource().(datasource.DataSourceWithConfigure)
-
-	var configResp datasource.ConfigureResponse
-	ds.Configure(ctx, datasource.ConfigureRequest{ProviderData: client}, &configResp)
-	if configResp.Diagnostics.HasError() {
-		t.Fatalf("Configure() unexpected diagnostics: %v", configResp.Diagnostics.Errors())
-	}
-
-	var schemaResp datasource.SchemaResponse
-	ds.Schema(ctx, datasource.SchemaRequest{}, &schemaResp)
+	ds, schemaResp := configureServerDataSource(t, client)
 
 	req := readRequest(t, schemaResp, map[string]tftypes.Value{
 		"id": tftypes.NewValue(tftypes.String, "789"),

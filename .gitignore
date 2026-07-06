@@ -32,3 +32,5 @@ terraform.rc
 # Local tooling artifacts (ruflo / agent DBs)
 ruvector.db
 *.db
+*.rvf
+*.rvf.lock

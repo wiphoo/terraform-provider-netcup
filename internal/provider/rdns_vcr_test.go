@@ -9,14 +9,22 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
+// TestRDNSResource_VCRCreate replays a hand-authored cassette with exactly one
+// POST (SetRDNS) followed by one GET (ConfirmRDNS read-back) whose response
+// matches the requested hostname on the first attempt. The corresponding SDK
+// package-level var rdnsConfirmDelay is not zeroed here (it is unexported), so
+// if the cassette is re-authored with a non-matching first GET the provider's
+// ConfirmRDNS will fail after 5 real-second-spaced retries — keep the GET
+// response in the cassette aligned with the plan hostname.
 func TestRDNSResource_VCRCreate(t *testing.T) {
 	client := newVCRClient(t, "TestRDNSResource_VCRCreate")
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
+	ip := vcrRDNSIPForTest(t)
 	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"ip_address": tftypes.NewValue(tftypes.String, "203.0.113.10"),
-		"hostname":   tftypes.NewValue(tftypes.String, "host-a1b2c3d4.example.com"),
+		"ip_address": tftypes.NewValue(tftypes.String, ip),
+		"hostname":   tftypes.NewValue(tftypes.String, vcrTestRDNSHostname),
 	})
 
 	var resp resource.CreateResponse
@@ -32,8 +40,8 @@ func TestRDNSResource_VCRCreate(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("State.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
-	if state.IPAddress.ValueString() != "203.0.113.10" {
-		t.Errorf("IPAddress = %q, want 203.0.113.10", state.IPAddress.ValueString())
+	if state.IPAddress.ValueString() != ip {
+		t.Errorf("IPAddress = %q, want %s", state.IPAddress.ValueString(), ip)
 	}
 	if state.Hostname.ValueString() == "" {
 		t.Error("Hostname is empty")
@@ -48,10 +56,11 @@ func TestRDNSResource_VCRRead(t *testing.T) {
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
+	ip := vcrRDNSIPForTest(t)
 	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":         tftypes.NewValue(tftypes.String, "203.0.113.10"),
-		"ip_address": tftypes.NewValue(tftypes.String, "203.0.113.10"),
-		"hostname":   tftypes.NewValue(tftypes.String, "host-a1b2c3d4.example.com"),
+		"id":         tftypes.NewValue(tftypes.String, ip),
+		"ip_address": tftypes.NewValue(tftypes.String, ip),
+		"hostname":   tftypes.NewValue(tftypes.String, vcrTestRDNSHostname),
 	})
 
 	var resp resource.ReadResponse
@@ -80,9 +89,10 @@ func TestRDNSResource_VCRReadNoPTR(t *testing.T) {
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
+	ip := vcrRDNSIPForTest(t)
 	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":         tftypes.NewValue(tftypes.String, "203.0.113.20"),
-		"ip_address": tftypes.NewValue(tftypes.String, "203.0.113.20"),
+		"id":         tftypes.NewValue(tftypes.String, ip),
+		"ip_address": tftypes.NewValue(tftypes.String, ip),
 		"hostname":   tftypes.NewValue(tftypes.String, ""),
 	})
 
@@ -104,9 +114,10 @@ func TestRDNSResource_VCRRead404(t *testing.T) {
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
+	ip := "203.0.113.99"
 	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":         tftypes.NewValue(tftypes.String, "203.0.113.99"),
-		"ip_address": tftypes.NewValue(tftypes.String, "203.0.113.99"),
+		"id":         tftypes.NewValue(tftypes.String, ip),
+		"ip_address": tftypes.NewValue(tftypes.String, ip),
 		"hostname":   tftypes.NewValue(tftypes.String, "host-a1b2c3d4.example.com"),
 	})
 
@@ -128,10 +139,11 @@ func TestRDNSResource_VCRDelete(t *testing.T) {
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
+	ip := vcrRDNSIPForTest(t)
 	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":         tftypes.NewValue(tftypes.String, "203.0.113.10"),
-		"ip_address": tftypes.NewValue(tftypes.String, "203.0.113.10"),
-		"hostname":   tftypes.NewValue(tftypes.String, "host-a1b2c3d4.example.com"),
+		"id":         tftypes.NewValue(tftypes.String, ip),
+		"ip_address": tftypes.NewValue(tftypes.String, ip),
+		"hostname":   tftypes.NewValue(tftypes.String, vcrTestRDNSHostname),
 	})
 
 	var resp resource.DeleteResponse
