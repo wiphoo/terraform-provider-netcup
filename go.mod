@@ -6,7 +6,7 @@ require (
 	github.com/dnaeon/go-vcr v1.2.0
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-go v0.31.0
-	github.com/hashicorp/terraform-plugin-testing v1.16.0
+	github.com/hashicorp/terraform-plugin-testing v1.12.0
 	gopkg.in/yaml.v2 v2.2.8
 )
 
