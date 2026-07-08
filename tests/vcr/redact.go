@@ -45,6 +45,8 @@ const redactedTokenPlaceholder = "vcr-redacted-token"
 // rewritten under.
 const fakeHostnameDomain = "example.com"
 
+var fakeHostnamePattern = regexp.MustCompile("^host-[0-9a-f]{8}\\." + regexp.QuoteMeta(fakeHostnameDomain) + "$")
+
 // fakeIPv4Prefix is RFC 5737's TEST-NET-3 (203.0.113.0/24).
 var fakeIPv4Prefix = [3]byte{203, 0, 113}
 
@@ -99,7 +101,11 @@ func fakeHostname(real string) string {
 	if real == "" {
 		return real
 	}
-	h := hashBytes("hostname:" + normalizeHostnameForHash(real))
+	normalized := normalizeHostnameForHash(real)
+	if fakeHostnamePattern.MatchString(normalized) {
+		return normalized
+	}
+	h := hashBytes("hostname:" + normalized)
 	return fmt.Sprintf("host-%x.%s", h[:4], fakeHostnameDomain)
 }
 

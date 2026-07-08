@@ -116,6 +116,15 @@ func TestFakeHostnameCanonicalizesEquivalentPTRs(t *testing.T) {
 	}
 }
 
+func TestFakeHostnamePreservesAlreadyRedactedHostnames(t *testing.T) {
+	const redacted = "host-a1b2c3d4.example.com"
+	for _, input := range []string{redacted, "HOST-A1B2C3D4.EXAMPLE.COM", redacted + "."} {
+		if got := fakeHostname(input); got != redacted {
+			t.Errorf("fakeHostname(%q) = %q, want %q", input, got, redacted)
+		}
+	}
+}
+
 func TestFakeHostnamePreservesEmpty(t *testing.T) {
 	if got := fakeHostname(""); got != "" {
 		t.Errorf("fakeHostname(\"\") = %q, want \"\" (no PTR / no nickname is meaningful state)", got)
