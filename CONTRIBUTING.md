@@ -42,7 +42,7 @@ direction before you invest time writing code.
 
 ## Development setup
 
-**Prerequisites:** Go 1.24+ · Git
+**Prerequisites:** Go 1.25+ · Git
 
 ```bash
 git clone https://github.com/wiphoo/terraform-provider-netcup.git
