@@ -32,8 +32,8 @@ func TestRDNSResource_VCRCreate(t *testing.T) {
 	resp.State = tfsdk.State{Schema: schemaResp.Schema}
 	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
 
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	if len(resp.Diagnostics) != 0 {
+		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics)
 	}
 
 	var state rdnsResourceModel
