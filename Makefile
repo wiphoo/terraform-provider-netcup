@@ -39,7 +39,7 @@ acc:
 		echo "make acc requires NETCUP_TEST_IP (see CONTRIBUTING.md)."; \
 		exit 1; \
 	fi
-	TF_ACC=1 go test ./...
+	TF_ACC=1 go test -count=1 ./...
 
 # acc-record regenerates all go-vcr cassettes from live SCP — both the
 # SDK-level cassettes (tests/vcr/testdata/cassettes/) and the provider-tier
