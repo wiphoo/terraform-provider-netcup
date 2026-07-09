@@ -51,6 +51,34 @@ func TestFakeIPv4NonIP(t *testing.T) {
 	}
 }
 
+func TestRDNSIPFromInteractionUsesRedactedURL(t *testing.T) {
+	ia := &cassette.Interaction{
+		Request: cassette.Request{URL: "https://example.com/v1/rdns/ipv4/203.0.113.77"},
+	}
+
+	ip, ok := rdnsIPFromInteraction(ia)
+	if !ok {
+		t.Fatal("rdnsIPFromInteraction did not find IP")
+	}
+	if ip != "203.0.113.77" {
+		t.Errorf("rdnsIPFromInteraction() = %q, want 203.0.113.77", ip)
+	}
+}
+
+func TestRDNSIPFromInteractionFallsBackToRequestBody(t *testing.T) {
+	ia := &cassette.Interaction{
+		Request: cassette.Request{Body: `{"ip":"203.0.113.88","rdns":"host-a1b2c3d4.example.com"}`},
+	}
+
+	ip, ok := rdnsIPFromInteraction(ia)
+	if !ok {
+		t.Fatal("rdnsIPFromInteraction did not find IP")
+	}
+	if ip != "203.0.113.88" {
+		t.Errorf("rdnsIPFromInteraction() = %q, want 203.0.113.88", ip)
+	}
+}
+
 func TestFakeIPv6Deterministic(t *testing.T) {
 	a := fakeIPv6("2a03:4000:2:8f7::")
 	b := fakeIPv6("2a03:4000:2:8f7::")

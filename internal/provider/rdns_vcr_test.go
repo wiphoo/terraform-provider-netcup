@@ -18,11 +18,12 @@ import (
 // ConfirmRDNS will fail after 5 real-second-spaced retries — keep the GET
 // response in the cassette aligned with the plan hostname.
 func TestRDNSResource_VCRCreate(t *testing.T) {
-	client := newVCRClient(t, "TestRDNSResource_VCRCreate")
+	const cassetteName = "TestRDNSResource_VCRCreate"
+	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
-	ip := vcrRDNSIPForTest(t)
+	ip := vcrRDNSIPForTest(t, cassetteName)
 	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
 		"ip_address": tftypes.NewValue(tftypes.String, ip),
 		"hostname":   tftypes.NewValue(tftypes.String, vcrTestRDNSHostname),
@@ -53,11 +54,12 @@ func TestRDNSResource_VCRCreate(t *testing.T) {
 }
 
 func TestRDNSResource_VCRRead(t *testing.T) {
-	client := newVCRClient(t, "TestRDNSResource_VCRRead")
+	const cassetteName = "TestRDNSResource_VCRRead"
+	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
-	ip := vcrRDNSIPForTest(t)
+	ip := vcrRDNSIPForTest(t, cassetteName)
 	state := resourceState(schemaResp, map[string]tftypes.Value{
 		"id":         tftypes.NewValue(tftypes.String, ip),
 		"ip_address": tftypes.NewValue(tftypes.String, ip),
@@ -86,11 +88,12 @@ func TestRDNSResource_VCRRead(t *testing.T) {
 }
 
 func TestRDNSResource_VCRReadNoPTR(t *testing.T) {
-	client := newVCRClient(t, "TestRDNSResource_VCRReadNoPTR")
+	const cassetteName = "TestRDNSResource_VCRReadNoPTR"
+	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
-	ip := vcrRDNSIPForTest(t)
+	ip := vcrRDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
 		_ = client.DeleteRDNS(context.Background(), ip)
@@ -141,11 +144,12 @@ func TestRDNSResource_VCRRead404(t *testing.T) {
 }
 
 func TestRDNSResource_VCRDelete(t *testing.T) {
-	client := newVCRClient(t, "TestRDNSResource_VCRDelete")
+	const cassetteName = "TestRDNSResource_VCRDelete"
+	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
 
-	ip := vcrRDNSIPForTest(t)
+	ip := vcrRDNSIPForTest(t, cassetteName)
 	state := resourceState(schemaResp, map[string]tftypes.Value{
 		"id":         tftypes.NewValue(tftypes.String, ip),
 		"ip_address": tftypes.NewValue(tftypes.String, ip),

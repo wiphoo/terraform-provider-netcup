@@ -6,27 +6,14 @@ import (
 	"testing"
 )
 
-const testRDNSIP = "203.0.113.10"
-
 const testRDNSHostname = "host-a1b2c3d4.example.com"
-
-func rdnsIPForTest(t *testing.T) string {
-	t.Helper()
-	if os.Getenv("VCR_RECORD") == "1" {
-		ip := os.Getenv("NETCUP_TEST_IP")
-		if ip == "" {
-			t.Fatal("VCR_RECORD=1 requires NETCUP_TEST_IP")
-		}
-		return ip
-	}
-	return testRDNSIP
-}
 
 // TestSetRDNS records POST /v1/rdns/ipv4. In record mode it calls SetRDNS
 // with NETCUP_TEST_IP so the cassette captures a real SCP response.
 func TestSetRDNS(t *testing.T) {
-	client := NewClient(t, "TestSetRDNS")
-	ip := rdnsIPForTest(t)
+	const cassetteName = "TestSetRDNS"
+	client := NewClient(t, cassetteName)
+	ip := RDNSIPForTest(t, cassetteName)
 	entry, err := client.SetRDNS(context.Background(), ip, testRDNSHostname)
 	if err != nil {
 		t.Fatalf("SetRDNS() error = %v", err)
@@ -45,8 +32,9 @@ func TestSetRDNS(t *testing.T) {
 // TestGetRDNS records GET /v1/rdns/ipv4/{ip}. In record mode it first sets
 // the PTR on NETCUP_TEST_IP so the read-back has a value to return.
 func TestGetRDNS(t *testing.T) {
-	client := NewClient(t, "TestGetRDNS")
-	ip := rdnsIPForTest(t)
+	const cassetteName = "TestGetRDNS"
+	client := NewClient(t, cassetteName)
+	ip := RDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
 		_, err := client.SetRDNS(context.Background(), ip, testRDNSHostname)
@@ -73,8 +61,9 @@ func TestGetRDNS(t *testing.T) {
 // TestGetRDNS_NoPTR records GET /v1/rdns/ipv4/{ip} returning null. In record
 // mode it first deletes any PTR on NETCUP_TEST_IP so the read-back is empty.
 func TestGetRDNS_NoPTR(t *testing.T) {
-	client := NewClient(t, "TestGetRDNS_NoPTR")
-	ip := rdnsIPForTest(t)
+	const cassetteName = "TestGetRDNS_NoPTR"
+	client := NewClient(t, cassetteName)
+	ip := RDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
 		_ = client.DeleteRDNS(context.Background(), ip)
@@ -95,8 +84,9 @@ func TestGetRDNS_NoPTR(t *testing.T) {
 // TestDeleteRDNS records DELETE /v1/rdns/ipv4/{ip}. In record mode it first
 // sets a PTR on NETCUP_TEST_IP so there is something to delete.
 func TestDeleteRDNS(t *testing.T) {
-	client := NewClient(t, "TestDeleteRDNS")
-	ip := rdnsIPForTest(t)
+	const cassetteName = "TestDeleteRDNS"
+	client := NewClient(t, cassetteName)
+	ip := RDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
 		_, err := client.SetRDNS(context.Background(), ip, testRDNSHostname)

@@ -38,21 +38,11 @@ func vcrServerIDForTest(t *testing.T) int32 {
 	return 882863
 }
 
-// vcrRDNSIPForTest returns the rDNS IP for provider-tier VCR tests.
-// In record mode it reads NETCUP_TEST_IP; in replay mode it returns
-// "203.0.113.10", matching the redacted IP range used in the hand-authored
-// rDNS cassettes. Update this default if the redacted IP changes after
-// re-recording (the deterministic redactor may assign a different value).
-func vcrRDNSIPForTest(t *testing.T) string {
+// vcrRDNSIPForTest returns the live rDNS IP in record mode and the cassette's
+// redacted rDNS IP in replay mode.
+func vcrRDNSIPForTest(t *testing.T, cassetteName string) string {
 	t.Helper()
-	if os.Getenv("VCR_RECORD") == "1" {
-		ip := os.Getenv("NETCUP_TEST_IP")
-		if ip == "" {
-			t.Fatal("VCR_RECORD=1 requires NETCUP_TEST_IP")
-		}
-		return ip
-	}
-	return "203.0.113.10"
+	return vcr.RDNSIPForTest(t, cassetteName)
 }
 
 const vcrTestRDNSHostname = "host-a1b2c3d4.example.com"
