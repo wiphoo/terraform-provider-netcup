@@ -47,7 +47,7 @@ func rdnsIPFromCassetteFile(path string) (string, error) {
 			return ip, nil
 		}
 	}
-	return "", fmt.Errorf("rDNS cassette %q does not contain a redacted IPv4 handle", path)
+	return "", fmt.Errorf("rDNS cassette %q does not contain a redacted IP handle", path)
 }
 
 func rdnsIPFromInteraction(ia *cassette.Interaction) (string, bool) {
@@ -68,7 +68,7 @@ func rdnsIPFromURL(rawURL string) (string, bool) {
 	if m == nil {
 		return "", false
 	}
-	return validIPv4(m[3])
+	return validIP(m[3])
 }
 
 func rdnsIPFromJSONBody(body string) (string, bool) {
@@ -81,12 +81,12 @@ func rdnsIPFromJSONBody(body string) (string, bool) {
 	if err := json.Unmarshal([]byte(body), &fields); err != nil {
 		return "", false
 	}
-	return validIPv4(fields.IP)
+	return validIP(fields.IP)
 }
 
-func validIPv4(s string) (string, bool) {
+func validIP(s string) (string, bool) {
 	ip := net.ParseIP(s)
-	if ip == nil || ip.To4() == nil {
+	if ip == nil {
 		return "", false
 	}
 	return s, true

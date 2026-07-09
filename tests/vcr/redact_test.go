@@ -52,30 +52,72 @@ func TestFakeIPv4NonIP(t *testing.T) {
 }
 
 func TestRDNSIPFromInteractionUsesRedactedURL(t *testing.T) {
-	ia := &cassette.Interaction{
-		Request: cassette.Request{URL: "https://example.com/v1/rdns/ipv4/203.0.113.77"},
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "ipv4",
+			url:  "https://example.com/v1/rdns/ipv4/203.0.113.77",
+			want: "203.0.113.77",
+		},
+		{
+			name: "ipv6",
+			url:  "https://example.com/v1/rdns/ipv6/2001:db8::77",
+			want: "2001:db8::77",
+		},
 	}
 
-	ip, ok := rdnsIPFromInteraction(ia)
-	if !ok {
-		t.Fatal("rdnsIPFromInteraction did not find IP")
-	}
-	if ip != "203.0.113.77" {
-		t.Errorf("rdnsIPFromInteraction() = %q, want 203.0.113.77", ip)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ia := &cassette.Interaction{
+				Request: cassette.Request{URL: tt.url},
+			}
+
+			ip, ok := rdnsIPFromInteraction(ia)
+			if !ok {
+				t.Fatal("rdnsIPFromInteraction did not find IP")
+			}
+			if ip != tt.want {
+				t.Errorf("rdnsIPFromInteraction() = %q, want %s", ip, tt.want)
+			}
+		})
 	}
 }
 
 func TestRDNSIPFromInteractionFallsBackToRequestBody(t *testing.T) {
-	ia := &cassette.Interaction{
-		Request: cassette.Request{Body: `{"ip":"203.0.113.88","rdns":"host-a1b2c3d4.example.com"}`},
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "ipv4",
+			body: `{"ip":"203.0.113.88","rdns":"host-a1b2c3d4.example.com"}`,
+			want: "203.0.113.88",
+		},
+		{
+			name: "ipv6",
+			body: `{"ip":"2001:db8::88","rdns":"host-a1b2c3d4.example.com"}`,
+			want: "2001:db8::88",
+		},
 	}
 
-	ip, ok := rdnsIPFromInteraction(ia)
-	if !ok {
-		t.Fatal("rdnsIPFromInteraction did not find IP")
-	}
-	if ip != "203.0.113.88" {
-		t.Errorf("rdnsIPFromInteraction() = %q, want 203.0.113.88", ip)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ia := &cassette.Interaction{
+				Request: cassette.Request{Body: tt.body},
+			}
+
+			ip, ok := rdnsIPFromInteraction(ia)
+			if !ok {
+				t.Fatal("rdnsIPFromInteraction did not find IP")
+			}
+			if ip != tt.want {
+				t.Errorf("rdnsIPFromInteraction() = %q, want %s", ip, tt.want)
+			}
+		})
 	}
 }
 
