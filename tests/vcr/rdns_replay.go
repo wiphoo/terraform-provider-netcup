@@ -54,7 +54,7 @@ func rdnsIPFromInteraction(ia *cassette.Interaction) (string, bool) {
 	if ia == nil {
 		return "", false
 	}
-	if ip, ok := rdnsIPFromURL(ia.Request.URL); ok {
+	if ip, ok := rdnsIPFromURL(ia.URL); ok {
 		return ip, true
 	}
 	if ip, ok := rdnsIPFromJSONBody(ia.Request.Body); ok {
