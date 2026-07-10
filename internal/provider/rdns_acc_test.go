@@ -49,6 +49,25 @@ func TestAccRDNSResource(t *testing.T) {
 	testHostname := "test-acc-rdns.example.com"
 	updatedHostname := "test-acc-rdns-updated.example.com"
 
+	// The test overwrites testIP's PTR and the framework's destroy step (via
+	// CheckDestroy) clears it, so if the caller points NETCUP_TEST_IP at an IP
+	// that already has a PTR, that value would be lost. Capture it up front and
+	// restore it via t.Cleanup, which runs after resource.Test finishes
+	// (including CheckDestroy), so the restore never races the empty-hostname
+	// assertion. If the IP had no PTR, there is nothing to restore.
+	restoreClient := netcup.New(
+		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
+		netcup.WithAccessToken(os.Getenv("NETCUP_ACCESS_TOKEN")),
+	)
+	if original, err := restoreClient.GetRDNS(context.Background(), testIP); err == nil && original.Hostname != "" {
+		originalHostname := original.Hostname
+		t.Cleanup(func() {
+			if _, err := restoreClient.SetRDNS(context.Background(), testIP, originalHostname); err != nil {
+				t.Logf("failed to restore original PTR %q for %s: %v", originalHostname, testIP, err)
+			}
+		})
+	}
+
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactory(),
 		CheckDestroy:             testAccCheckRDNSDestroy,
