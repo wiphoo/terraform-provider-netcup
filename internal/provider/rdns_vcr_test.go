@@ -119,6 +119,9 @@ func TestRDNSResource_VCRReadNoPTR(t *testing.T) {
 }
 
 func TestRDNSResource_VCRRead404(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("404 case uses a fixed RFC 5737 address the account does not own; it is a hand-authored fixture, not a live recording")
+	}
 	client := newVCRClient(t, "TestRDNSResource_VCRRead404")
 	ctx := context.Background()
 	r, schemaResp := configureRDNSResource(t, client)
