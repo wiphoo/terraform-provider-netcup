@@ -74,6 +74,11 @@ func RunWithRDNSRestore(m *testing.M) int {
 			if code == 0 {
 				code = 1
 			}
+		} else if _, err := client.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: original}); err != nil {
+			fmt.Fprintf(os.Stderr, "vcr: failed to confirm restored PTR %q for %s: %v\n", original, ip, err)
+			if code == 0 {
+				code = 1
+			}
 		}
 	}
 	return code

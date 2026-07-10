@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 const testRDNSHostname = "host-a1b2c3d4.example.com"
@@ -40,6 +42,11 @@ func TestGetRDNS(t *testing.T) {
 		_, err := client.SetRDNS(context.Background(), ip, testRDNSHostname)
 		if err != nil {
 			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
+		}
+		// rDNS updates are applied asynchronously; confirm before reading so
+		// the recorded GetRDNS response is not the stale pre-set value.
+		if _, err := client.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: testRDNSHostname}); err != nil {
+			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
 		}
 	}
 
