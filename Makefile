@@ -45,6 +45,12 @@ acc:
 # SDK-level cassettes (tests/vcr/testdata/cassettes/) and the provider-tier
 # ones (internal/provider/testdata/cassettes/). Requires NETCUP_ACCESS_TOKEN,
 # NETCUP_TEST_SERVER_ID (for servers), and NETCUP_TEST_IP (for rDNS).
+#
+# The rDNS tests set/delete NETCUP_TEST_IP's live PTR while recording; each
+# package's TestMain (vcr.RunWithRDNSRestore) captures that IP's original PTR
+# before the run and restores it afterward, so recording does not leave the
+# maintainer's reverse DNS cleared. -p 1 keeps packages serial so the restore
+# is well-ordered.
 acc-record:
 	@if [ -z "$$NETCUP_ACCESS_TOKEN" ]; then \
 		echo "make acc-record requires NETCUP_ACCESS_TOKEN (see CONTRIBUTING.md)."; \
