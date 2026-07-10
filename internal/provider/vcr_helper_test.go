@@ -2,8 +2,6 @@ package provider
 
 import (
 	"context"
-	"os"
-	"strconv"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -17,25 +15,13 @@ func newVCRClient(t *testing.T, cassetteName string) *netcup.Client {
 	return vcr.NewClient(t, cassetteName)
 }
 
-// vcrServerIDForTest returns the server ID for provider-tier VCR tests.
-// In record mode it reads NETCUP_TEST_SERVER_ID; in replay mode it returns
-// the constant 882863, which is the server ID embedded in the hand-authored
-// TestServerDataSource.yaml cassette. Update this default after re-recording
-// make acc-record with a different server ID.
-func vcrServerIDForTest(t *testing.T) int32 {
+// vcrServerIDForTest returns the server ID for provider-tier VCR tests. In
+// record mode it reads NETCUP_TEST_SERVER_ID; in replay mode it derives the ID
+// from the named cassette, so a cassette regenerated with any real server ID
+// stays replayable with no constant to keep in sync.
+func vcrServerIDForTest(t *testing.T, cassetteName string) int32 {
 	t.Helper()
-	if os.Getenv("VCR_RECORD") == "1" {
-		v := os.Getenv("NETCUP_TEST_SERVER_ID")
-		if v == "" {
-			t.Fatal("VCR_RECORD=1 requires NETCUP_TEST_SERVER_ID")
-		}
-		id, err := strconv.ParseInt(v, 10, 32)
-		if err != nil {
-			t.Fatalf("NETCUP_TEST_SERVER_ID: %v", err)
-		}
-		return int32(id)
-	}
-	return 882863
+	return vcr.ServerIDForTest(t, cassetteName)
 }
 
 // vcrRDNSIPForTest returns the live rDNS IP in record mode and the cassette's

@@ -3,38 +3,16 @@ package vcr
 import (
 	"context"
 	"net/http"
-	"os"
-	"strconv"
 	"testing"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
-// testServerID is the server ID embedded in TestGetServer_200.yaml. Update
-// this constant to match after running make acc-record with real credentials.
-const testServerID = int32(882863)
-
-// testNonexistentServerID is a known-nonexistent server ID for TestGetServer_404.yaml.
+// testNonexistentServerID is a known-nonexistent server ID for
+// TestGetServer_404.yaml. It is a fixed sentinel (never a real account
+// server), so unlike the server IDs derived by ServerIDForTest it needs no
+// re-record sync.
 const testNonexistentServerID = int32(999999999)
-
-// serverIDForTest returns the server ID for GetServer tests. In record mode it
-// reads NETCUP_TEST_SERVER_ID (required); in replay mode it returns the
-// hardcoded testServerID constant that matches the committed cassette.
-func serverIDForTest(t *testing.T) int32 {
-	t.Helper()
-	if os.Getenv("VCR_RECORD") != "1" {
-		return testServerID
-	}
-	v := os.Getenv("NETCUP_TEST_SERVER_ID")
-	if v == "" {
-		t.Fatal("VCR_RECORD=1 requires NETCUP_TEST_SERVER_ID")
-	}
-	id, err := strconv.ParseInt(v, 10, 32)
-	if err != nil {
-		t.Fatalf("NETCUP_TEST_SERVER_ID: %v", err)
-	}
-	return int32(id)
-}
 
 func TestListServers(t *testing.T) {
 	client := NewClient(t, "TestListServers")
@@ -62,7 +40,7 @@ func TestListServers(t *testing.T) {
 
 func TestGetServer_200(t *testing.T) {
 	client := NewClient(t, "TestGetServer_200")
-	server, err := client.GetServer(context.Background(), serverIDForTest(t))
+	server, err := client.GetServer(context.Background(), ServerIDForTest(t, "TestGetServer_200"))
 	if err != nil {
 		t.Fatalf("GetServer() error = %v", err)
 	}

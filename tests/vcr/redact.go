@@ -373,8 +373,18 @@ func redactFormValues(values url.Values) {
 var rdnsURLPattern = regexp.MustCompile(`^(.*/v1/rdns/(ipv4|ipv6)/)([^/?]+)(.*)$`)
 
 // redactURL rewrites the IP embedded in an rDNS endpoint URL. URLs that
-// don't match the rDNS path shape (e.g. /v1/servers/{id}, whose id is
-// preserved as-is) are returned unchanged.
+// don't match the rDNS path shape (e.g. /v1/servers/{id}) are returned
+// unchanged.
+//
+// Server IDs are deliberately preserved (in both the URL and the "id" body
+// field — see TestRedactValue's "Preserved as-is" assertions in redact_test.go,
+// which lock this in): a netcup server ID is an opaque per-account integer, not
+// a credential and not a network identifier like an IP or PTR, so it is out of
+// scope for PII redaction. Because ServerIDForTest derives the replay handle
+// from the cassette rather than a hardcoded constant, a preserved (real) server
+// ID also carries no re-record maintenance cost. If a future policy decides
+// server IDs are sensitive, add "id" handling to redactField and a server-URL
+// branch here, and update the redact_test.go preservation assertions to match.
 func redactURL(rawURL string) string {
 	m := rdnsURLPattern.FindStringSubmatch(rawURL)
 	if m == nil {

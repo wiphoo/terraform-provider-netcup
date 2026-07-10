@@ -68,13 +68,17 @@ func TestAccRDNSResource(t *testing.T) {
 		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
 		netcup.WithAccessToken(os.Getenv("NETCUP_ACCESS_TOKEN")),
 	)
-	if original, err := restoreClient.GetRDNS(context.Background(), testIP); err == nil && original.Hostname != "" {
-		originalHostname := original.Hostname
+	originalEntry, err := restoreClient.GetRDNS(context.Background(), testIP)
+	if err != nil {
+		var apiErr *netcup.APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+			t.Fatalf("failed to capture original PTR for %s: %v", testIP, err)
+		}
+	}
+	if originalEntry != nil && originalEntry.Hostname != "" {
+		originalHostname := originalEntry.Hostname
 		t.Cleanup(func() {
 			if _, err := restoreClient.SetRDNS(context.Background(), testIP, originalHostname); err != nil {
-				// Restoration protects live account state; a failure here leaves
-				// the caller's original reverse DNS cleared, so fail the test
-				// rather than only logging.
 				t.Errorf("failed to restore original PTR %q for %s: %v", originalHostname, testIP, err)
 			}
 		})

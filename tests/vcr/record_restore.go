@@ -2,7 +2,9 @@ package vcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"testing"
 
@@ -47,14 +49,22 @@ func RunWithRDNSRestore(m *testing.M) int {
 	)
 
 	var original string
-	if entry, err := client.GetRDNS(context.Background(), ip); err == nil {
+	entry, err := client.GetRDNS(context.Background(), ip)
+	if err != nil {
+		var apiErr *netcup.APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+			fmt.Fprintf(os.Stderr, "vcr: failed to capture original PTR for %s: %v; aborting recording to avoid leaving PTR state unknown\n", ip, err)
+			return 1
+		}
+	}
+	if entry != nil {
 		original = entry.Hostname
 	}
 
 	code := m.Run()
 
-	// original == "" means the IP had no PTR (or the pre-read failed); leaving
-	// it cleared matches that pre-test state, so there is nothing to restore.
+	// original == "" means the IP had no PTR; leaving it cleared matches the
+	// pre-test state, so there is nothing to restore.
 	if original != "" {
 		if _, err := client.SetRDNS(context.Background(), ip, original); err != nil {
 			fmt.Fprintf(os.Stderr, "vcr: failed to restore original PTR %q for %s after recording: %v\n", original, ip, err)

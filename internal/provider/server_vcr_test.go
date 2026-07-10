@@ -15,7 +15,7 @@ func TestServerDataSource(t *testing.T) {
 	ctx := context.Background()
 	ds, schemaResp := configureServerDataSource(t, client)
 
-	serverID := strconv.FormatInt(int64(vcrServerIDForTest(t)), 10)
+	serverID := strconv.FormatInt(int64(vcrServerIDForTest(t, "TestServerDataSource")), 10)
 	req := readRequest(t, schemaResp, map[string]tftypes.Value{
 		"id": tftypes.NewValue(tftypes.String, serverID),
 	})
