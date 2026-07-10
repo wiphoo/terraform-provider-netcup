@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"os"
 	"testing"
 
@@ -105,7 +107,12 @@ func TestRDNSResource_VCRReadNoPTR(t *testing.T) {
 		// captured instead of null.
 		live := liveRDNSClient(t)
 		if err := live.DeleteRDNS(context.Background(), ip); err != nil {
-			t.Fatalf("DeleteRDNS (record-mode prep) error = %v", err)
+			// A 404 means the IP already has no custom PTR — the desired
+			// pre-test state — so tolerate it. Any other error is fatal.
+			var apiErr *netcup.APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+				t.Fatalf("DeleteRDNS (record-mode prep) error = %v", err)
+			}
 		}
 		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: ""}); err != nil {
 			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)

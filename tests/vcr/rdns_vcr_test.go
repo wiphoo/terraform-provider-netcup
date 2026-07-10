@@ -2,6 +2,8 @@ package vcr
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"os"
 	"testing"
 
@@ -99,7 +101,12 @@ func TestGetRDNS_NoPTR(t *testing.T) {
 	if os.Getenv("VCR_RECORD") == "1" {
 		live := liveRDNSClient(t)
 		if err := live.DeleteRDNS(context.Background(), ip); err != nil {
-			t.Fatalf("DeleteRDNS (record-mode prep) error = %v", err)
+			// A 404 means the IP already has no custom PTR — the desired
+			// pre-test state — so tolerate it. Any other error is fatal.
+			var apiErr *netcup.APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+				t.Fatalf("DeleteRDNS (record-mode prep) error = %v", err)
+			}
 		}
 		// rDNS deletions are applied asynchronously; confirm the PTR is
 		// empty before recording, so a stale value is never captured. Use

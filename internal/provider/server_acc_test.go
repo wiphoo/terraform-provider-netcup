@@ -30,7 +30,7 @@ func TestAccServerDataSource(t *testing.T) {
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "hostname"),
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "status"),
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "product_name"),
-					resource.TestCheckResourceAttrSet("data.netcup_server.test", "ipv4_addresses.#"),
+					testCheckResourceAttrGreaterThanZero("data.netcup_server.test", "ipv4_addresses.#"),
 				),
 			},
 		},
