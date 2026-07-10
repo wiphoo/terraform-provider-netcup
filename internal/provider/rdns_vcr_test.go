@@ -166,6 +166,22 @@ func TestRDNSResource_VCRDelete(t *testing.T) {
 	r, schemaResp := configureRDNSResource(t, client)
 
 	ip := vcrRDNSIPForTest(t, cassetteName)
+
+	if os.Getenv("VCR_RECORD") == "1" {
+		// A prior test in this file (TestRDNSResource_VCRReadNoPTR) deletes
+		// and confirms the PTR is empty, so without seeding here the recorded
+		// Delete would run against an already-empty IP and save a no-op/404
+		// cassette. Use an unrecorded live client for SetRDNS + ConfirmRDNS
+		// prep so the cassette captures only the intended DELETE.
+		live := liveRDNSClient(t)
+		if _, err := live.SetRDNS(context.Background(), ip, vcrTestRDNSHostname); err != nil {
+			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
+		}
+		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: vcrTestRDNSHostname}); err != nil {
+			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
+		}
+	}
+
 	state := resourceState(schemaResp, map[string]tftypes.Value{
 		"id":         tftypes.NewValue(tftypes.String, ip),
 		"ip_address": tftypes.NewValue(tftypes.String, ip),
