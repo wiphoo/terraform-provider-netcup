@@ -58,6 +58,12 @@ func RunWithRDNSRestore(m *testing.M) int {
 	if original != "" {
 		if _, err := client.SetRDNS(context.Background(), ip, original); err != nil {
 			fmt.Fprintf(os.Stderr, "vcr: failed to restore original PTR %q for %s after recording: %v\n", original, ip, err)
+			// Surface the restore failure as a non-zero exit so a maintainer
+			// running `make acc-record` cannot miss that the live PTR was left
+			// cleared. Don't clobber an existing test-failure code.
+			if code == 0 {
+				code = 1
+			}
 		}
 	}
 	return code
