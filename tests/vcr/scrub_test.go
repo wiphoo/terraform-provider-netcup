@@ -52,12 +52,19 @@ var (
 // than guessing at the on-disk YAML shape via regex. Runs in PR CI: no
 // credentials, no network, no dependency on VCR_RECORD.
 func TestCassettesAreScrubbed(t *testing.T) {
-	matches, err := filepath.Glob("testdata/cassettes/*.yaml")
-	if err != nil {
-		t.Fatalf("glob cassettes: %v", err)
+	var matches []string
+	for _, pattern := range []string{
+		"testdata/cassettes/*.yaml",
+		"../../internal/provider/testdata/cassettes/*.yaml",
+	} {
+		m, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		matches = append(matches, m...)
 	}
 	if len(matches) == 0 {
-		t.Fatal("no cassette files found under testdata/cassettes/ — glob pattern is likely wrong")
+		t.Fatal("no cassette files found — glob patterns matched zero files")
 	}
 
 	for _, path := range matches {

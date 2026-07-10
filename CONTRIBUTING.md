@@ -42,7 +42,7 @@ direction before you invest time writing code.
 
 ## Development setup
 
-**Prerequisites:** Go 1.24+ · Git
+**Prerequisites:** Go 1.25+ · Git
 
 ```bash
 git clone https://github.com/wiphoo/terraform-provider-netcup.git
@@ -98,7 +98,7 @@ the SCP API's IP-allowlist gate (which makes hosted-runner testing impractical).
 
 ### Tier 1 — go-vcr replay (PR CI)
 
-Files: `tests/vcr/*_vcr_test.go`
+Files: `tests/vcr/*_vcr_test.go` and `internal/provider/*_vcr_test.go`
 
 Plain Go tests that replay pre-recorded SCP responses using
 [go-vcr](https://github.com/dnaeon/go-vcr). They run in every `go test ./...`
@@ -118,15 +118,13 @@ require:
 - `NETCUP_ACCESS_TOKEN` (fresh token from `netcupctl auth login`)
 - The calling IP must be allowlisted in the SCP REST API settings
 - `NETCUP_TEST_SERVER_ID` (for `TestAccServerDataSource`)
+- `NETCUP_TEST_IP` (for `TestAccRDNSResource`)
 
 Run with:
 
 ```bash
 make acc
 ```
-
-> **Note:** Before sub-issue #42 (32-D) lands, no `*_acc_test.go` files exist
-> yet, so `make acc` is a no-op.
 
 ### Re-recording cassettes
 
@@ -140,17 +138,16 @@ export NETCUP_TEST_IP=<an-ip-on-that-server>
 make acc-record
 ```
 
-The recorder helper (`tests/vcr/recorder.go`) reads `VCR_RECORD=1` (set by the
-make target) and proxies requests to live SCP, writing the interactions to
-`tests/vcr/testdata/cassettes/`. The recorded cassettes are committed and
-replayed in PR CI. **SetRDNS and DeleteRDNS mutate the test IP's PTR during
-recording** — the test IP is set, read, deleted, and read back as null in a
-single recording pass.
+The `make acc-record` target runs `VCR_RECORD=1 go test ./...`, which
+re-records cassettes in both `tests/vcr/testdata/cassettes/` and
+`internal/provider/testdata/cassettes/` simultaneously. **SetRDNS and
+DeleteRDNS mutate the test IP's PTR during recording** — the test IP is set,
+read, deleted, and read back as null in a single recording pass.
 
 Re-record when:
 - SCP API response shapes change
 - Before cutting a v0.2.x release
-- Adding new SDK methods to the go-vcr test suite (sub-issues B/C)
+- Adding new go-vcr tests
 
 ### Redaction — what gets scrubbed
 

@@ -1,0 +1,15 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    headers: {}
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.99
+    method: GET
+  response:
+    body: '{"message":"not found"}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 404 Not Found
+    code: 404
