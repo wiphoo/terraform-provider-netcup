@@ -64,6 +64,21 @@ func TestRDNSResource_VCRRead(t *testing.T) {
 	r, schemaResp := configureRDNSResource(t, client)
 
 	ip := vcrRDNSIPForTest(t, cassetteName)
+
+	if os.Getenv("VCR_RECORD") == "1" {
+		// Seed the PTR with an unrecorded live client so the recorded Read
+		// captures the expected hostname. Without this, running just this test
+		// in record mode (or a changed test order) could capture a no-PTR or
+		// stale-PTR response. Mirrors the SDK-level TestGetRDNS prep.
+		live := liveRDNSClient(t)
+		if _, err := live.SetRDNS(context.Background(), ip, vcrTestRDNSHostname); err != nil {
+			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
+		}
+		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: vcrTestRDNSHostname}); err != nil {
+			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
+		}
+	}
+
 	state := resourceState(schemaResp, map[string]tftypes.Value{
 		"id":         tftypes.NewValue(tftypes.String, ip),
 		"ip_address": tftypes.NewValue(tftypes.String, ip),
