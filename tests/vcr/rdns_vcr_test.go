@@ -123,16 +123,25 @@ func TestGetRDNS_NoPTR(t *testing.T) {
 }
 
 // TestDeleteRDNS records DELETE /v1/rdns/ipv4/{ip}. In record mode it first
-// sets a PTR on NETCUP_TEST_IP so there is something to delete.
+// sets a PTR on NETCUP_TEST_IP so there is something to delete. Prep operations
+// (SetRDNS + ConfirmRDNS) use an unrecorded live client so the cassette
+// contains only the intended DELETE interaction.
 func TestDeleteRDNS(t *testing.T) {
 	const cassetteName = "TestDeleteRDNS"
 	client := NewClient(t, cassetteName)
 	ip := RDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
-		_, err := client.SetRDNS(context.Background(), ip, testRDNSHostname)
+		live := liveRDNSClient(t)
+		_, err := live.SetRDNS(context.Background(), ip, testRDNSHostname)
 		if err != nil {
 			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
+		}
+		// rDNS updates are asynchronous; confirm the set is readable before
+		// issuing the recorded delete, otherwise the DELETE can hit the API
+		// before the PTR exists and save a no-op/404 cassette.
+		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: testRDNSHostname}); err != nil {
+			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
 		}
 	}
 
