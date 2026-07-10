@@ -1,14 +1,9 @@
 package vcr
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"testing"
-
-	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 // RunWithRDNSRestore runs a package's tests via m.Run(), wrapping them with
@@ -43,65 +38,39 @@ func RunWithRDNSRestore(m *testing.M) int {
 		return m.Run()
 	}
 
-	client := netcup.New(
-		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
-		netcup.WithAccessToken(token),
-	)
+	client := NewLiveClient(token)
 
-	var original string
-	entry, err := client.GetRDNS(context.Background(), ip)
+	original, err := CapturePTR(client, ip)
 	if err != nil {
-		var apiErr *netcup.APIError
-		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
-			fmt.Fprintf(os.Stderr, "vcr: failed to capture original PTR for %s: %v; aborting recording to avoid leaving PTR state unknown\n", ip, err)
-			return 1
-		}
-	}
-	if entry != nil {
-		original = entry.Hostname
+		fmt.Fprintf(os.Stderr, "vcr: failed to capture original PTR for %s: %v; aborting recording to avoid leaving PTR state unknown\n", ip, err)
+		return 1
 	}
 
 	code := m.Run()
 
-	// original == "" means the IP had no PTR. The record-mode rDNS tests may
-	// have left a test hostname behind (e.g. TestDeleteRDNS sets then deletes
-	// the PTR, but deletion is asynchronous), so clear any residual PTR and
-	// confirm it is gone — don't just assume the pre-test empty state survived.
-	// When original != "", restore it and confirm the read-back converges.
+	// Surface any restore failure as a non-zero exit so a maintainer running
+	// `make acc-record` cannot miss that the live PTR was left cleared, without
+	// clobbering an existing test-failure code.
+	fail := func() {
+		if code == 0 {
+			code = 1
+		}
+	}
+
 	if original != "" {
-		if _, err := client.SetRDNS(context.Background(), ip, original); err != nil {
+		// EnsurePTR restores the value and confirms the async read-back.
+		if err := EnsurePTR(client, ip, original); err != nil {
 			fmt.Fprintf(os.Stderr, "vcr: failed to restore original PTR %q for %s after recording: %v\n", original, ip, err)
-			// Surface the restore failure as a non-zero exit so a maintainer
-			// running `make acc-record` cannot miss that the live PTR was left
-			// cleared. Don't clobber an existing test-failure code.
-			if code == 0 {
-				code = 1
-			}
-		} else if _, err := client.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: original}); err != nil {
-			fmt.Fprintf(os.Stderr, "vcr: failed to confirm restored PTR %q for %s: %v\n", original, ip, err)
-			if code == 0 {
-				code = 1
-			}
+			fail()
 		}
 	} else {
-		if err := client.DeleteRDNS(context.Background(), ip); err != nil {
-			// A 404 means there is no PTR to clear — already the desired state.
-			var apiErr *netcup.APIError
-			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
-				fmt.Fprintf(os.Stderr, "vcr: failed to clear residual PTR for %s after recording: %v\n", ip, err)
-				if code == 0 {
-					code = 1
-				}
-			}
-		}
-		// Confirm the PTR is empty: deletion is asynchronous, so even after a
-		// successful DeleteRDNS (or a 404 from a prior async delete) the
-		// read-back may still reflect the old value until it propagates.
-		if _, err := client.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: ""}); err != nil {
-			fmt.Fprintf(os.Stderr, "vcr: failed to confirm cleared PTR for %s after recording: %v\n", ip, err)
-			if code == 0 {
-				code = 1
-			}
+		// The IP had no PTR, but the record-mode rDNS tests may have left a
+		// residual one (e.g. TestDeleteRDNS sets then deletes it, and deletion
+		// is asynchronous), so clear and confirm rather than assume the empty
+		// pre-test state survived.
+		if err := EnsureNoPTR(client, ip); err != nil {
+			fmt.Fprintf(os.Stderr, "vcr: failed to clear residual PTR for %s after recording: %v\n", ip, err)
+			fail()
 		}
 	}
 	return code

@@ -2,16 +2,12 @@ package provider
 
 import (
 	"context"
-	"errors"
-	"net/http"
 	"os"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
-
-	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 // TestRDNSResource_VCRCreate replays a hand-authored cassette with exactly one
@@ -66,17 +62,10 @@ func TestRDNSResource_VCRRead(t *testing.T) {
 	ip := vcrRDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
-		// Seed the PTR with an unrecorded live client so the recorded Read
-		// captures the expected hostname. Without this, running just this test
-		// in record mode (or a changed test order) could capture a no-PTR or
-		// stale-PTR response. Mirrors the SDK-level TestGetRDNS prep.
-		live := liveRDNSClient(t)
-		if _, err := live.SetRDNS(context.Background(), ip, vcrTestRDNSHostname); err != nil {
-			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
-		}
-		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: vcrTestRDNSHostname}); err != nil {
-			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
-		}
+		// Seed the PTR so the recorded Read captures the expected hostname;
+		// without it, this test in isolation (or a changed order) could record a
+		// no-PTR/stale response. Matches the SDK-level TestGetRDNS prep.
+		seedLivePTR(t, ip)
 	}
 
 	state := resourceState(schemaResp, map[string]tftypes.Value{
@@ -115,23 +104,10 @@ func TestRDNSResource_VCRReadNoPTR(t *testing.T) {
 	ip := vcrRDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
-		// Use an unrecorded live client for prep so the DeleteRDNS and
-		// ConfirmRDNS polling GETs don't leak into the cassette. rDNS
-		// deletions are asynchronous, so confirm the PTR is empty before
-		// issuing the recorded read — otherwise a stale hostname can be
-		// captured instead of null.
-		live := liveRDNSClient(t)
-		if err := live.DeleteRDNS(context.Background(), ip); err != nil {
-			// A 404 means the IP already has no custom PTR — the desired
-			// pre-test state — so tolerate it. Any other error is fatal.
-			var apiErr *netcup.APIError
-			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
-				t.Fatalf("DeleteRDNS (record-mode prep) error = %v", err)
-			}
-		}
-		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: ""}); err != nil {
-			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
-		}
+		// Clear the PTR so the recorded Read captures a null (no-PTR) response
+		// rather than a stale hostname. Matches the SDK-level TestGetRDNS_NoPTR
+		// prep.
+		clearLivePTR(t, ip)
 	}
 
 	state := resourceState(schemaResp, map[string]tftypes.Value{
@@ -190,18 +166,10 @@ func TestRDNSResource_VCRDelete(t *testing.T) {
 	ip := vcrRDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
-		// A prior test in this file (TestRDNSResource_VCRReadNoPTR) deletes
-		// and confirms the PTR is empty, so without seeding here the recorded
-		// Delete would run against an already-empty IP and save a no-op/404
-		// cassette. Use an unrecorded live client for SetRDNS + ConfirmRDNS
-		// prep so the cassette captures only the intended DELETE.
-		live := liveRDNSClient(t)
-		if _, err := live.SetRDNS(context.Background(), ip, vcrTestRDNSHostname); err != nil {
-			t.Fatalf("SetRDNS (record-mode prep) error = %v", err)
-		}
-		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: vcrTestRDNSHostname}); err != nil {
-			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
-		}
+		// A prior test in this file (TestRDNSResource_VCRReadNoPTR) leaves the
+		// PTR empty, so seed one here or the recorded Delete would run against
+		// an already-empty IP and save a no-op/404 cassette.
+		seedLivePTR(t, ip)
 	}
 
 	state := resourceState(schemaResp, map[string]tftypes.Value{

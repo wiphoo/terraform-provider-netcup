@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -14,23 +13,6 @@ import (
 func newVCRClient(t *testing.T, cassetteName string) *netcup.Client {
 	t.Helper()
 	return vcr.NewClient(t, cassetteName)
-}
-
-// liveRDNSClient returns a plain (unrecorded) *netcup.Client for rDNS prep
-// operations in record mode. It uses the live NETCUP_ACCESS_TOKEN so that
-// DeleteRDNS/ConfirmRDNS calls do not go through go-vcr and cannot leak into
-// the cassette under test. Mirrors the same-named helper in
-// tests/vcr/rdns_vcr_test.go.
-func liveRDNSClient(t *testing.T) *netcup.Client {
-	t.Helper()
-	token := os.Getenv("NETCUP_ACCESS_TOKEN")
-	if token == "" {
-		t.Fatal("VCR_RECORD=1 requires NETCUP_ACCESS_TOKEN")
-	}
-	return netcup.New(
-		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
-		netcup.WithAccessToken(token),
-	)
 }
 
 // vcrServerIDForTest returns the server ID for provider-tier VCR tests. In
@@ -49,29 +31,30 @@ func vcrRDNSIPForTest(t *testing.T, cassetteName string) string {
 	return vcr.RDNSIPForTest(t, cassetteName)
 }
 
-const vcrTestRDNSHostname = "host-a1b2c3d4.example.com"
+// vcrTestRDNSHostname is the redacted PTR value the provider-tier rDNS VCR
+// tests plan with, single-sourced from the vcr package.
+const vcrTestRDNSHostname = vcr.TestRDNSHostname
+
+// seedLivePTR / clearLivePTR wrap the shared vcr record-mode prep helpers so
+// the provider tests match the SDK tier's set/clear-and-confirm semantics.
+func seedLivePTR(t *testing.T, ip string)  { t.Helper(); vcr.SeedLivePTR(t, ip) }
+func clearLivePTR(t *testing.T, ip string) { t.Helper(); vcr.ClearLivePTR(t, ip) }
 
 func configureServersDataSource(t *testing.T, client *netcup.Client) (datasource.DataSourceWithConfigure, datasource.SchemaResponse) {
 	t.Helper()
-	ctx := context.Background()
-	ds := NewServersDataSource().(datasource.DataSourceWithConfigure)
-
-	var configResp datasource.ConfigureResponse
-	ds.Configure(ctx, datasource.ConfigureRequest{ProviderData: client}, &configResp)
-	if configResp.Diagnostics.HasError() {
-		t.Fatalf("Configure() unexpected diagnostics: %v", configResp.Diagnostics.Errors())
-	}
-
-	var schemaResp datasource.SchemaResponse
-	ds.Schema(ctx, datasource.SchemaRequest{}, &schemaResp)
-
-	return ds, schemaResp
+	return configureDataSource(t, NewServersDataSource().(datasource.DataSourceWithConfigure), client)
 }
 
 func configureServerDataSource(t *testing.T, client *netcup.Client) (datasource.DataSourceWithConfigure, datasource.SchemaResponse) {
 	t.Helper()
+	return configureDataSource(t, NewServerDataSource().(datasource.DataSourceWithConfigure), client)
+}
+
+// configureDataSource runs the Configure→check-diagnostics→Schema boilerplate
+// shared by the servers and server data-source VCR tests.
+func configureDataSource(t *testing.T, ds datasource.DataSourceWithConfigure, client *netcup.Client) (datasource.DataSourceWithConfigure, datasource.SchemaResponse) {
+	t.Helper()
 	ctx := context.Background()
-	ds := NewServerDataSource().(datasource.DataSourceWithConfigure)
 
 	var configResp datasource.ConfigureResponse
 	ds.Configure(ctx, datasource.ConfigureRequest{ProviderData: client}, &configResp)
