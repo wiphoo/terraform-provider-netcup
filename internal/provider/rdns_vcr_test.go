@@ -8,6 +8,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 // TestRDNSResource_VCRCreate replays a hand-authored cassette with exactly one
@@ -96,7 +98,18 @@ func TestRDNSResource_VCRReadNoPTR(t *testing.T) {
 	ip := vcrRDNSIPForTest(t, cassetteName)
 
 	if os.Getenv("VCR_RECORD") == "1" {
-		_ = client.DeleteRDNS(context.Background(), ip)
+		// Use an unrecorded live client for prep so the DeleteRDNS and
+		// ConfirmRDNS polling GETs don't leak into the cassette. rDNS
+		// deletions are asynchronous, so confirm the PTR is empty before
+		// issuing the recorded read — otherwise a stale hostname can be
+		// captured instead of null.
+		live := liveRDNSClient(t)
+		if err := live.DeleteRDNS(context.Background(), ip); err != nil {
+			t.Fatalf("DeleteRDNS (record-mode prep) error = %v", err)
+		}
+		if _, err := live.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: ""}); err != nil {
+			t.Fatalf("ConfirmRDNS (record-mode prep) error = %v", err)
+		}
 	}
 
 	state := resourceState(schemaResp, map[string]tftypes.Value{

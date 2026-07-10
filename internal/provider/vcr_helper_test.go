@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -13,6 +14,23 @@ import (
 func newVCRClient(t *testing.T, cassetteName string) *netcup.Client {
 	t.Helper()
 	return vcr.NewClient(t, cassetteName)
+}
+
+// liveRDNSClient returns a plain (unrecorded) *netcup.Client for rDNS prep
+// operations in record mode. It uses the live NETCUP_ACCESS_TOKEN so that
+// DeleteRDNS/ConfirmRDNS calls do not go through go-vcr and cannot leak into
+// the cassette under test. Mirrors the same-named helper in
+// tests/vcr/rdns_vcr_test.go.
+func liveRDNSClient(t *testing.T) *netcup.Client {
+	t.Helper()
+	token := os.Getenv("NETCUP_ACCESS_TOKEN")
+	if token == "" {
+		t.Fatal("VCR_RECORD=1 requires NETCUP_ACCESS_TOKEN")
+	}
+	return netcup.New(
+		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
+		netcup.WithAccessToken(token),
+	)
 }
 
 // vcrServerIDForTest returns the server ID for provider-tier VCR tests. In
