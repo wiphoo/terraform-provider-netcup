@@ -80,6 +80,13 @@ func TestAccRDNSResource(t *testing.T) {
 		t.Cleanup(func() {
 			if _, err := restoreClient.SetRDNS(context.Background(), testIP, originalHostname); err != nil {
 				t.Errorf("failed to restore original PTR %q for %s: %v", originalHostname, testIP, err)
+				return
+			}
+			// rDNS updates are asynchronous; confirm the restored hostname is
+			// readable so the test does not pass while the caller's PTR remains
+			// cleared.
+			if _, err := restoreClient.ConfirmRDNS(context.Background(), testIP, &netcup.RdnsEntry{Hostname: originalHostname}); err != nil {
+				t.Errorf("failed to confirm restored PTR %q for %s: %v", originalHostname, testIP, err)
 			}
 		})
 	}

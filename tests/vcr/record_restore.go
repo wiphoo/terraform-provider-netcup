@@ -63,8 +63,11 @@ func RunWithRDNSRestore(m *testing.M) int {
 
 	code := m.Run()
 
-	// original == "" means the IP had no PTR; leaving it cleared matches the
-	// pre-test state, so there is nothing to restore.
+	// original == "" means the IP had no PTR. The record-mode rDNS tests may
+	// have left a test hostname behind (e.g. TestDeleteRDNS sets then deletes
+	// the PTR, but deletion is asynchronous), so clear any residual PTR and
+	// confirm it is gone — don't just assume the pre-test empty state survived.
+	// When original != "", restore it and confirm the read-back converges.
 	if original != "" {
 		if _, err := client.SetRDNS(context.Background(), ip, original); err != nil {
 			fmt.Fprintf(os.Stderr, "vcr: failed to restore original PTR %q for %s after recording: %v\n", original, ip, err)
@@ -76,6 +79,26 @@ func RunWithRDNSRestore(m *testing.M) int {
 			}
 		} else if _, err := client.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: original}); err != nil {
 			fmt.Fprintf(os.Stderr, "vcr: failed to confirm restored PTR %q for %s: %v\n", original, ip, err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	} else {
+		if err := client.DeleteRDNS(context.Background(), ip); err != nil {
+			// A 404 means there is no PTR to clear — already the desired state.
+			var apiErr *netcup.APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+				fmt.Fprintf(os.Stderr, "vcr: failed to clear residual PTR for %s after recording: %v\n", ip, err)
+				if code == 0 {
+					code = 1
+				}
+			}
+		}
+		// Confirm the PTR is empty: deletion is asynchronous, so even after a
+		// successful DeleteRDNS (or a 404 from a prior async delete) the
+		// read-back may still reflect the old value until it propagates.
+		if _, err := client.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: ""}); err != nil {
+			fmt.Fprintf(os.Stderr, "vcr: failed to confirm cleared PTR for %s after recording: %v\n", ip, err)
 			if code == 0 {
 				code = 1
 			}
