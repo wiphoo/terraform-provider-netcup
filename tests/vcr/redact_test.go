@@ -51,6 +51,76 @@ func TestFakeIPv4NonIP(t *testing.T) {
 	}
 }
 
+func TestRDNSIPFromInteractionUsesRedactedURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "ipv4",
+			url:  "https://example.com/v1/rdns/ipv4/203.0.113.77",
+			want: "203.0.113.77",
+		},
+		{
+			name: "ipv6",
+			url:  "https://example.com/v1/rdns/ipv6/2001:db8::77",
+			want: "2001:db8::77",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ia := &cassette.Interaction{
+				Request: cassette.Request{URL: tt.url},
+			}
+
+			ip, ok := rdnsIPFromInteraction(ia)
+			if !ok {
+				t.Fatal("rdnsIPFromInteraction did not find IP")
+			}
+			if ip != tt.want {
+				t.Errorf("rdnsIPFromInteraction() = %q, want %s", ip, tt.want)
+			}
+		})
+	}
+}
+
+func TestRDNSIPFromInteractionFallsBackToRequestBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "ipv4",
+			body: `{"ip":"203.0.113.88","rdns":"host-a1b2c3d4.example.com"}`,
+			want: "203.0.113.88",
+		},
+		{
+			name: "ipv6",
+			body: `{"ip":"2001:db8::88","rdns":"host-a1b2c3d4.example.com"}`,
+			want: "2001:db8::88",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ia := &cassette.Interaction{
+				Request: cassette.Request{Body: tt.body},
+			}
+
+			ip, ok := rdnsIPFromInteraction(ia)
+			if !ok {
+				t.Fatal("rdnsIPFromInteraction did not find IP")
+			}
+			if ip != tt.want {
+				t.Errorf("rdnsIPFromInteraction() = %q, want %s", ip, tt.want)
+			}
+		})
+	}
+}
+
 func TestFakeIPv6Deterministic(t *testing.T) {
 	a := fakeIPv6("2001:db8:2:8f7::")
 	b := fakeIPv6("2001:db8:2:8f7::")
@@ -113,6 +183,15 @@ func TestFakeHostnameCanonicalizesEquivalentPTRs(t *testing.T) {
 	if set != readBack {
 		t.Errorf("fakeHostname(%q) = %q, fakeHostname(%q) = %q; want equal (SDK treats these PTRs as equivalent)",
 			"Foo.Example", set, "foo.example.", readBack)
+	}
+}
+
+func TestFakeHostnamePreservesAlreadyRedactedHostnames(t *testing.T) {
+	const redacted = "host-a1b2c3d4.example.com"
+	for _, input := range []string{redacted, "HOST-A1B2C3D4.EXAMPLE.COM", redacted + "."} {
+		if got := fakeHostname(input); got != redacted {
+			t.Errorf("fakeHostname(%q) = %q, want %q", input, got, redacted)
+		}
 	}
 }
 

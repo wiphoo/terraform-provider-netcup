@@ -1,0 +1,16 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    headers: {}
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/100001
+    method: GET
+  response:
+    body: |-
+      {"id":100001,"name":"my-server","hostname":"host-a1b2c3d4.example.com","nickname":"host-e5f6a7b8.example.com","disabled":false,"template":{"id":10,"name":"VM 2000"},"serverLiveInfo":{"state":"running"},"ipv4Addresses":[{"id":1,"ip":"203.0.113.5","netmask":"255.255.255.0","gateway":"203.0.113.1","broadcast":"203.0.113.255"}],"ipv6Addresses":[{"id":1,"networkPrefix":"2001:db8::","networkPrefixLength":64,"gateway":"2001:db8::1"}],"architecture":"x86_64","site":{"id":1,"city":"Nuremberg"}}
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200

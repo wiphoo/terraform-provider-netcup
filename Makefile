@@ -24,22 +24,33 @@ generate:
 	go generate ./...
 
 # acc runs live acceptance tests against the SCP API. It requires
-# TF_ACC=1 and valid credentials (NETCUP_ACCESS_TOKEN). Before sub-issue #42
-# (32-D) lands there are no _acc_test.go files, so this is a no-op.
+# TF_ACC=1, NETCUP_ACCESS_TOKEN, NETCUP_TEST_SERVER_ID (for server data
+# source), and NETCUP_TEST_IP (for rDNS resource).
 acc:
-	@if find . -name '*_acc_test.go' -not -path './vendor/*' | grep -q .; then \
-		TF_ACC=1 go test ./...; \
-	else \
-		echo "No acceptance tests found yet — see issue #42 (32-D)."; \
+	@if [ -z "$$NETCUP_ACCESS_TOKEN" ]; then \
+		echo "make acc requires NETCUP_ACCESS_TOKEN (see CONTRIBUTING.md)."; \
+		exit 1; \
 	fi
+	@if [ -z "$$NETCUP_TEST_SERVER_ID" ]; then \
+		echo "make acc requires NETCUP_TEST_SERVER_ID (see CONTRIBUTING.md)."; \
+		exit 1; \
+	fi
+	@if [ -z "$$NETCUP_TEST_IP" ]; then \
+		echo "make acc requires NETCUP_TEST_IP (see CONTRIBUTING.md)."; \
+		exit 1; \
+	fi
+	TF_ACC=1 VCR_RECORD= go test -count=1 ./...
 
-# acc-record regenerates all go-vcr cassettes from live SCP. Requires
-# NETCUP_ACCESS_TOKEN, NETCUP_TEST_SERVER_ID (for servers), and
-# NETCUP_TEST_IP (for rDNS). Guarded explicitly rather than relying on
-# NewClient's own check: today, with only the self-test (which skips itself
-# under VCR_RECORD=1) and a pure unit test in tests/vcr/, no test actually
-# calls NewClient in record mode, so `go test` would otherwise exit 0
-# without ever validating credentials are present.
+# acc-record regenerates all go-vcr cassettes from live SCP — both the
+# SDK-level cassettes (tests/vcr/testdata/cassettes/) and the provider-tier
+# ones (internal/provider/testdata/cassettes/). Requires NETCUP_ACCESS_TOKEN,
+# NETCUP_TEST_SERVER_ID (for servers), and NETCUP_TEST_IP (for rDNS).
+#
+# The rDNS tests set/delete NETCUP_TEST_IP's live PTR while recording; each
+# package's TestMain (vcr.RunWithRDNSRestore) captures that IP's original PTR
+# before the run and restores it afterward, so recording does not leave the
+# maintainer's reverse DNS cleared. -p 1 keeps packages serial so the restore
+# is well-ordered.
 acc-record:
 	@if [ -z "$$NETCUP_ACCESS_TOKEN" ]; then \
 		echo "make acc-record requires NETCUP_ACCESS_TOKEN (see CONTRIBUTING.md)."; \
@@ -49,4 +60,8 @@ acc-record:
 		echo "make acc-record requires NETCUP_TEST_SERVER_ID (see CONTRIBUTING.md)."; \
 		exit 1; \
 	fi
-	VCR_RECORD=1 go test ./tests/vcr/...
+	@if [ -z "$$NETCUP_TEST_IP" ]; then \
+		echo "make acc-record requires NETCUP_TEST_IP (see CONTRIBUTING.md)."; \
+		exit 1; \
+	fi
+	TF_ACC= VCR_RECORD=1 go test -count=1 -p 1 ./...
