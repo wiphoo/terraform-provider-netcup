@@ -27,11 +27,14 @@ func testAccCheckRDNSDestroy(s *terraform.State) error {
 		if ip == "" {
 			continue
 		}
+		// rDNS deletions are asynchronous (the provider's Delete returns as
+		// soon as DeleteRDNS gets a 2xx), so a single immediate GetRDNS can
+		// still see the old hostname on propagation lag. ConfirmRDNS polls for
+		// the empty hostname, absorbing that delay. A 404 on the first
+		// read-back means the PTR is already gone — the expected post-destroy
+		// state — so skip the polling and move on.
 		entry, err := client.GetRDNS(context.Background(), ip)
 		if err != nil {
-			// A 404 means the PTR is gone — the expected post-destroy state.
-			// Any other error (5xx, auth, network) must not be swallowed, or a
-			// failed read would let CheckDestroy pass without verifying removal.
 			var apiErr *netcup.APIError
 			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
 				continue
@@ -39,7 +42,10 @@ func testAccCheckRDNSDestroy(s *terraform.State) error {
 			return fmt.Errorf("checking rDNS destroy for %s: %w", ip, err)
 		}
 		if entry.Hostname != "" {
-			return fmt.Errorf("rDNS entry still exists for %s: hostname=%s", ip, entry.Hostname)
+			// Poll until the PTR clears or the retry window expires.
+			if _, err := client.ConfirmRDNS(context.Background(), ip, &netcup.RdnsEntry{Hostname: ""}); err != nil {
+				return fmt.Errorf("rDNS entry for %s was not cleared after destroy: %w", ip, err)
+			}
 		}
 	}
 	return nil
