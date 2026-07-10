@@ -2,7 +2,9 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"testing"
 
@@ -27,7 +29,14 @@ func testAccCheckRDNSDestroy(s *terraform.State) error {
 		}
 		entry, err := client.GetRDNS(context.Background(), ip)
 		if err != nil {
-			continue
+			// A 404 means the PTR is gone — the expected post-destroy state.
+			// Any other error (5xx, auth, network) must not be swallowed, or a
+			// failed read would let CheckDestroy pass without verifying removal.
+			var apiErr *netcup.APIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				continue
+			}
+			return fmt.Errorf("checking rDNS destroy for %s: %w", ip, err)
 		}
 		if entry.Hostname != "" {
 			return fmt.Errorf("rDNS entry still exists for %s: hostname=%s", ip, entry.Hostname)
@@ -63,7 +72,10 @@ func TestAccRDNSResource(t *testing.T) {
 		originalHostname := original.Hostname
 		t.Cleanup(func() {
 			if _, err := restoreClient.SetRDNS(context.Background(), testIP, originalHostname); err != nil {
-				t.Logf("failed to restore original PTR %q for %s: %v", originalHostname, testIP, err)
+				// Restoration protects live account state; a failure here leaves
+				// the caller's original reverse DNS cleared, so fail the test
+				// rather than only logging.
+				t.Errorf("failed to restore original PTR %q for %s: %v", originalHostname, testIP, err)
 			}
 		})
 	}
