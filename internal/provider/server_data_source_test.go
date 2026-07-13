@@ -92,6 +92,9 @@ func TestServerDataSource_Success(t *testing.T) {
 	if state.ID.ValueString() != "123456" {
 		t.Errorf("ID = %q, want 123456", state.ID.ValueString())
 	}
+	if state.Name.ValueString() != "my-server" {
+		t.Errorf("Name = %q, want my-server", state.Name.ValueString())
+	}
 	if state.Hostname.ValueString() != "my-server.example.com" {
 		t.Errorf("Hostname = %q, want my-server.example.com", state.Hostname.ValueString())
 	}
@@ -209,6 +212,9 @@ func TestServerDataSource_NullableFields(t *testing.T) {
 
 	if state.Hostname.ValueString() != "" {
 		t.Errorf("Hostname = %q, want empty string", state.Hostname.ValueString())
+	}
+	if state.Name.ValueString() != "minimal" {
+		t.Errorf("Name = %q, want minimal", state.Name.ValueString())
 	}
 	if state.Status.ValueString() != "" {
 		t.Errorf("Status = %q, want empty string", state.Status.ValueString())

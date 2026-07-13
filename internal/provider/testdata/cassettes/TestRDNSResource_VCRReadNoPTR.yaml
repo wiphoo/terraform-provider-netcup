@@ -3,13 +3,23 @@ version: 1
 interactions:
 - request:
     body: ""
-    headers: {}
-    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.10
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv6/2001:db8:91f0:7cdf:5a7d:78d0:c100:cc0b
     method: GET
   response:
     body: '{"rdns":null}'
     headers:
+      Content-Length:
+      - "13"
       Content-Type:
       - application/json
+      Date:
+      - Sat, 11 Jul 2026 00:43:42 GMT
+      X-Frame-Options:
+      - SAMEORIGIN
     status: 200 OK
     code: 200
+    duration: ""

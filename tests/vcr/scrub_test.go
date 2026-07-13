@@ -7,11 +7,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/dnaeon/go-vcr/cassette"
 	"gopkg.in/yaml.v2"
 )
+
+// macFieldJSONPattern matches a JSON "mac" field with a colon-separated MAC
+// address value, e.g. `"mac":"a6:4e:8c:f6:07:45"`.
+var macFieldJSONPattern = regexp.MustCompile(`"mac"\s*:\s*"([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})"`)
 
 // jwtShapePattern matches an "eyJ..." base64url segment followed by two more
 // dot-separated segments — the shape of a JWT (header.payload.signature),
@@ -82,6 +87,7 @@ func TestCassettesAreScrubbed(t *testing.T) {
 
 			for _, ia := range c.Interactions {
 				checkNoAuthorizationHeader(t, ia)
+				checkNoSetCookieHeader(t, ia)
 				checkFormValuesAreSynthetic(t, ia)
 				for _, body := range []string{ia.Request.Body, ia.Response.Body} {
 					checkNoJWTShape(t, body)
@@ -89,6 +95,7 @@ func TestCassettesAreScrubbed(t *testing.T) {
 					checkIPv6sInRange(t, body)
 					checkUserIDsAreSynthetic(t, body)
 					checkTokenFieldsAreSynthetic(t, body)
+					checkMACsAreSynthetic(t, body)
 				}
 				checkIPv4sInRange(t, ia.URL)
 				checkIPv6sInRange(t, ia.URL)
@@ -101,6 +108,36 @@ func checkNoAuthorizationHeader(t *testing.T, ia *cassette.Interaction) {
 	t.Helper()
 	if _, ok := ia.Request.Headers["Authorization"]; ok {
 		t.Errorf("unscrubbed Authorization header on request to %s", ia.URL)
+	}
+}
+
+// checkNoSetCookieHeader catches a response Set-Cookie header — live SCP sets
+// a cookiesession1 session/tracking cookie on every response, and without
+// redaction these would be committed verbatim, publishing live session
+// identifiers. Request Cookie headers are checked too (defense in depth:
+// SCP uses Bearer auth, so request cookies should never appear, but a future
+// client change shouldn't silently leak them).
+// checkMACsAreSynthetic catches a live MAC address in a JSON body. The redactor
+// maps every real MAC into the synthetic range (02:00: prefix — the second byte
+// is always 0x00, which no real OUI or random local-admin MAC uses), so any MAC
+// not starting with 02:00: is an unredacted interface identifier.
+func checkMACsAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range macFieldJSONPattern.FindAllStringSubmatch(body, -1) {
+		mac := m[1]
+		if !strings.HasPrefix(strings.ToLower(mac), "02:00:") {
+			t.Errorf("found a non-synthetic MAC address: %s (want 02:00: prefix for synthetic)", mac)
+		}
+	}
+}
+
+func checkNoSetCookieHeader(t *testing.T, ia *cassette.Interaction) {
+	t.Helper()
+	if _, ok := ia.Response.Headers["Set-Cookie"]; ok {
+		t.Errorf("unscrubbed Set-Cookie header on response to %s", ia.URL)
+	}
+	if _, ok := ia.Request.Headers["Cookie"]; ok {
+		t.Errorf("unscrubbed Cookie header on request to %s", ia.URL)
 	}
 }
 

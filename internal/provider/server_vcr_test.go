@@ -37,6 +37,9 @@ func TestServerDataSource(t *testing.T) {
 	if state.ID.ValueString() != serverID {
 		t.Errorf("ID = %q, want %s", state.ID.ValueString(), serverID)
 	}
+	if state.Name.ValueString() == "" {
+		t.Error("Name is empty")
+	}
 	if state.Hostname.ValueString() == "" {
 		t.Error("Hostname is empty")
 	}
@@ -46,12 +49,8 @@ func TestServerDataSource(t *testing.T) {
 	if state.ProductName.ValueString() == "" {
 		t.Error("ProductName is empty")
 	}
-	if len(state.IPv4Addresses.Elements()) == 0 {
-		t.Error("IPv4Addresses is empty")
-	}
-	if len(state.IPv6Addresses) == 0 {
-		t.Error("IPv6Addresses is empty")
-	}
+	// IPv4/IPv6 address slices may be empty depending on the server's network
+	// config (e.g. an IPv6-only VPS), so only assert the core detail fields.
 }
 
 func TestServerDataSource_VCRNullableFields(t *testing.T) {
@@ -82,6 +81,9 @@ func TestServerDataSource_VCRNullableFields(t *testing.T) {
 
 	if state.Hostname.ValueString() != "" {
 		t.Errorf("Hostname = %q, want empty string", state.Hostname.ValueString())
+	}
+	if state.Name.ValueString() != "minimal" {
+		t.Errorf("Name = %q, want minimal", state.Name.ValueString())
 	}
 	if state.Status.ValueString() != "" {
 		t.Errorf("Status = %q, want empty string", state.Status.ValueString())

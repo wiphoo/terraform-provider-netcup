@@ -85,7 +85,7 @@ func TestGetServerDecodesRealDetailPayload(t *testing.T) {
 	defer srv.Close()
 
 	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
-	server, err := c.GetServer(context.Background(), 882863)
+	server, err := c.GetServer(context.Background(), 123456)
 	if err != nil {
 		t.Fatalf("GetServer() error = %v", err)
 	}

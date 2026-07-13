@@ -3,14 +3,24 @@ version: 1
 interactions:
 - request:
     body: ""
-    headers: {}
-    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/882863
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1681695467
     method: GET
   response:
-    body: |-
-      {"id":882863,"name":"my-server","hostname":"host-a1b2c3d4.example.com","nickname":"host-e5f6a7b8.example.com","disabled":false,"template":{"id":10,"name":"VM 2000"},"serverLiveInfo":{"state":"running"},"ipv4Addresses":[{"id":1,"ip":"203.0.113.5","netmask":"255.255.255.0","gateway":"203.0.113.1","broadcast":"203.0.113.255"}],"ipv6Addresses":[{"id":1,"networkPrefix":"2001:db8::","networkPrefixLength":64,"gateway":"2001:db8::1"}],"architecture":"x86_64","site":{"id":1,"city":"Nuremberg"}}
+    body: '{"architecture":"AMD64","disabled":false,"disksAvailableSpaceInMiB":4112384,"gpuDriverAvailable":false,"hostname":"host-3687c899.example.com","id":1681695467,"ipv4Addresses":[],"ipv6Addresses":[{"gateway":"2001:db8:5f7d:c58:c2bf:d176:1664:1e68","id":1770415706,"networkPrefix":"2001:db8:a973:b4bc:cf87:7a39:bd49:3f27","networkPrefixLength":64}],"maxCpuCount":2,"name":"server-326a2254","nickname":"","rescueSystemActive":false,"serverLiveInfo":{"autostart":true,"bootorder":["HDD","CDROM","NETWORK"],"cloudinitAttached":false,"configChanged":false,"coresPerSocket":1,"cpuCount":2,"cpuMaxCount":2,"currentServerMemoryInMiB":4096,"disks":[{"allocationInMiB":2676,"capacityInMiB":81920,"dev":"vda","driver":"virtio"}],"interfaces":[{"driver":"virtio","ipv4Addresses":[],"ipv6LinkLocalAddresses":["2001:db8:bdeb:4a7:ba0:a91c:5a05:18a8"],"ipv6NetworkPrefixes":["2001:db8:a973:b4bc:cf87:7a39:bd49:3f27/64"],"mac":"02:00:a6:34:0e:a8","mtu":1500,"rxMonthlyInMiB":3145,"speedInMBits":500,"trafficThrottled":false,"txMonthlyInMiB":437,"vlanId":null,"vlanInterface":false}],"keyboardLayout":"en-us","latestQemu":true,"machineType":"pc-i440fx-9.2","maxServerMemoryInMiB":4096,"nestedGuest":false,"osOptimization":"LINUX","requiredStorageOptimization":"NO","sockets":2,"state":"RUNNING","template":"VPS
+      Lite 1 G12s","uefi":true,"uptimeInSeconds":636324},"site":{"city":"Nuremberg","id":941927071},"snapshotAllowed":true,"snapshotCount":1,"template":{"id":1536096932,"name":"server-64b058f3"}}'
     headers:
+      Content-Length:
+      - "1367"
       Content-Type:
       - application/json
+      Date:
+      - Sat, 11 Jul 2026 00:44:47 GMT
+      X-Frame-Options:
+      - SAMEORIGIN
     status: 200 OK
     code: 200
+    duration: ""

@@ -3,14 +3,23 @@ version: 1
 interactions:
 - request:
     body: ""
-    headers: {}
-    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/999999999
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/670716827
     method: GET
   response:
-    body: |-
-      {"message":"server not found"}
+    body: '{"code":"error.notfound","message":"Resource not found"}'
     headers:
+      Content-Length:
+      - "56"
       Content-Type:
       - application/json
+      Date:
+      - Sat, 11 Jul 2026 00:51:35 GMT
+      X-Frame-Options:
+      - SAMEORIGIN
     status: 404 Not Found
     code: 404
+    duration: ""

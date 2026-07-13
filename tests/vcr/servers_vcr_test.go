@@ -47,18 +47,17 @@ func TestGetServer_200(t *testing.T) {
 	if server.Hostname == nil || *server.Hostname == "" {
 		t.Error("Hostname is nil or empty")
 	}
+	if server.Name == "" {
+		t.Error("Name is empty")
+	}
 	if server.ServerLiveInfo == nil || server.ServerLiveInfo.State == "" {
 		t.Error("ServerLiveInfo.State is empty")
 	}
 	if server.Template == nil || server.Template.Name == "" {
 		t.Error("Template.Name is empty")
 	}
-	if len(server.IPv4Addresses) == 0 {
-		t.Error("IPv4Addresses is empty")
-	}
-	if len(server.IPv6Addresses) == 0 {
-		t.Error("IPv6Addresses is empty")
-	}
+	// IPv4/IPv6 address slices may be empty depending on the server's network
+	// config (e.g. an IPv6-only VPS), so only assert the core detail fields.
 }
 
 func TestGetServer_404(t *testing.T) {

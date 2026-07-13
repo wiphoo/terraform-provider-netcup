@@ -27,6 +27,7 @@ func TestAccServerDataSource(t *testing.T) {
 				}`, serverID),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("data.netcup_server.test", "id", serverID),
+					resource.TestCheckResourceAttrSet("data.netcup_server.test", "name"),
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "hostname"),
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "status"),
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "product_name"),

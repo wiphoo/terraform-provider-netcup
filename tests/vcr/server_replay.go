@@ -12,10 +12,10 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// serverURLPattern matches the numeric server ID embedded in a
+// serverURLIDPattern matches the numeric server ID embedded in a
 // /v1/servers/{id} request URL (the server *detail* endpoint). The server
 // *list* endpoint (/v1/servers, no trailing ID) deliberately does not match.
-var serverURLPattern = regexp.MustCompile(`/v1/servers/([0-9]+)`)
+var serverURLIDPattern = regexp.MustCompile(`/v1/servers/([0-9]+)`)
 
 // ServerIDForTest returns the live NETCUP_TEST_SERVER_ID in record mode. In
 // replay mode it derives the server ID from the cassette being replayed (the
@@ -58,7 +58,7 @@ func serverIDFromCassetteFile(path string) (int32, error) {
 		if ia == nil {
 			continue
 		}
-		if m := serverURLPattern.FindStringSubmatch(ia.URL); m != nil {
+		if m := serverURLIDPattern.FindStringSubmatch(ia.URL); m != nil {
 			id, err := strconv.ParseInt(m[1], 10, 32)
 			if err != nil {
 				return 0, fmt.Errorf("server cassette %q has a non-int32 server ID %q: %w", path, m[1], err)

@@ -2,10 +2,12 @@ package vcr
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -171,9 +173,38 @@ func TestFakeHostnameDistinctInputs(t *testing.T) {
 	}
 }
 
+func TestFakeMACDeterministic(t *testing.T) {
+	a := fakeMAC("a6:4e:8c:f6:07:45")
+	b := fakeMAC("a6:4e:8c:f6:07:45")
+	if a != b {
+		t.Fatalf("fakeMAC not deterministic: %q != %q", a, b)
+	}
+	if a == "a6:4e:8c:f6:07:45" {
+		t.Errorf("fakeMAC did not rewrite input")
+	}
+	if !strings.HasPrefix(a, "02:00:") {
+		t.Errorf("fakeMAC = %q, want 02:00: prefix for synthetic MAC", a)
+	}
+}
+
+// TestFakeMACRedactsLocalAdminMAC proves the 02: idempotence gap is closed: a
+// real MAC that already starts with 02: (common for virtual NICs) must still be
+// hashed, not returned unchanged — otherwise a live interface identifier would
+// be committed verbatim. See PR #57 discussion_r3560302684.
+func TestFakeMACRedactsLocalAdminMAC(t *testing.T) {
+	const realLocalAdminMAC = "02:42:ac:11:00:01"
+	got := fakeMAC(realLocalAdminMAC)
+	if got == realLocalAdminMAC {
+		t.Fatalf("fakeMAC returned a 02:-prefixed real MAC unchanged: %q", got)
+	}
+	if !strings.HasPrefix(got, "02:") {
+		t.Errorf("fakeMAC = %q, want 02: prefix", got)
+	}
+}
+
 // TestFakeHostnameCanonicalizesEquivalentPTRs covers a SetRDNS request PTR
 // like "Foo.Example" and a later GetRDNS response PTR like "foo.example." —
-// which pkg/netcup/rdns.go's rdnsHostnamesEqual (used by ConfirmRDNS)
+// which pkg/netcup/rdns.go's EqualRDNSHostnames (used by ConfirmRDNS)
 // treats as the same value. Without normalizing before hashing, these would
 // map to two different fake hostnames, breaking a replayed set/read-back
 // comparison even though the live recording succeeded.
@@ -241,8 +272,8 @@ func TestIsIPv4Netmask(t *testing.T) {
 
 func TestRedactJSONBodyServerFields(t *testing.T) {
 	body := `{
-		"id": 882863,
-		"name": "v2202606359463472512",
+		"id": 990099,
+		"name": "test-server-01",
 		"hostname": "example.host",
 		"nickname": null,
 		"userId": 555123,
@@ -257,6 +288,19 @@ func TestRedactJSONBodyServerFields(t *testing.T) {
 		]
 	}`
 
+	// Extract original values from the source body for comparison.
+	var orig map[string]interface{}
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&orig); err != nil {
+		t.Fatalf("decode source body: %v", err)
+	}
+	origID, ok := orig["id"].(json.Number)
+	if !ok || origID.String() == "" {
+		t.Fatal("source body is missing a numeric id field")
+	}
+	origName, _ := orig["name"].(string)
+
 	out, ok := redactJSONBody(body)
 	if !ok {
 		t.Fatalf("redactJSONBody: not recognized as JSON")
@@ -268,15 +312,8 @@ func TestRedactJSONBodyServerFields(t *testing.T) {
 	}
 
 	// Preserved as-is.
-	if got["name"] != "v2202606359463472512" {
-		t.Errorf("name was modified: %v", got["name"])
-	}
 	if got["disabled"] != false {
 		t.Errorf("disabled was modified: %v", got["disabled"])
-	}
-	template := got["template"].(map[string]interface{})
-	if template["name"] != "VPS Lite 1 G12s" {
-		t.Errorf("template.name was modified: %v", template["name"])
 	}
 	site := got["site"].(map[string]interface{})
 	if site["city"] != "Nuremberg" {
@@ -290,6 +327,19 @@ func TestRedactJSONBodyServerFields(t *testing.T) {
 	if got["userId"].(float64) != fakeUserIDValue {
 		t.Errorf("userId = %v, want %d", got["userId"], fakeUserIDValue)
 	}
+	if got["name"] == origName {
+		t.Errorf("name was not redacted: %v", got["name"])
+	}
+	var idStr string
+	switch v := got["id"].(type) {
+	case json.Number:
+		idStr = v.String()
+	case float64:
+		idStr = strconv.FormatFloat(v, 'f', 0, 64)
+	}
+	if idStr == origID.String() {
+		t.Errorf("id was not redacted: %v", got["id"])
+	}
 	v4 := got["ipv4Addresses"].([]interface{})[0].(map[string]interface{})
 	if v4["ip"] == "192.0.2.10" {
 		t.Errorf("ipv4 ip was not redacted")
@@ -302,6 +352,9 @@ func TestRedactJSONBodyServerFields(t *testing.T) {
 	}
 	if v4["netmask"] != "255.255.255.0" {
 		t.Errorf("netmask should be preserved as-is, got %v", v4["netmask"])
+	}
+	if v4ID, ok := v4["id"].(float64); ok && fmt.Sprintf("%.0f", v4ID) == "1" {
+		t.Errorf("ipv4Addresses[0].id was not redacted: %v", v4["id"])
 	}
 	v6 := got["ipv6Addresses"].([]interface{})[0].(map[string]interface{})
 	if v6["networkPrefix"] == "2a03:4000:2:8f7::" {
@@ -344,8 +397,11 @@ func TestRedactJSONBodyServerLiveInfoInterfaces(t *testing.T) {
 
 	iface := got["serverLiveInfo"].(map[string]interface{})["interfaces"].([]interface{})[0].(map[string]interface{})
 
-	if iface["mac"] != "a6:4e:8c:f6:07:45" {
-		t.Errorf("mac should be preserved as-is (not in scope for this issue), got %v", iface["mac"])
+	if iface["mac"] == "a6:4e:8c:f6:07:45" {
+		t.Errorf("mac was not redacted: %v", iface["mac"])
+	}
+	if mac, ok := iface["mac"].(string); ok && !strings.HasPrefix(mac, "02:00:") {
+		t.Errorf("mac = %q, want 02:00: prefix for synthetic MAC", mac)
 	}
 
 	linkLocal := iface["ipv6LinkLocalAddresses"].([]interface{})
@@ -431,10 +487,20 @@ func TestRedactURLRdns(t *testing.T) {
 	}
 }
 
-func TestRedactURLNonRdnsUnchanged(t *testing.T) {
-	url := "https://www.servercontrolpanel.de/scp-core/api/v1/servers/882863"
-	if got := redactURL(url); got != url {
-		t.Errorf("redactURL(%q) = %q, want unchanged", url, got)
+func TestRedactURLServer(t *testing.T) {
+	raw := "https://www.servercontrolpanel.de/scp-core/api/v1/servers/990099"
+	got := redactURL(raw)
+	if got == raw {
+		t.Errorf("redactURL(%q) = %q, want redacted", raw, got)
+	}
+	fakeID := fakeServerID(json.Number("990099"))
+	want := "https://www.servercontrolpanel.de/scp-core/api/v1/servers/" + fakeID.String()
+	if got != want {
+		t.Errorf("redactURL = %q, want %q", got, want)
+	}
+	// Non-server, non-rDNS URLs should be unchanged.
+	if got := redactURL("https://example.com/health"); got != "https://example.com/health" {
+		t.Errorf("redactURL(health) = %q, want unchanged", got)
 	}
 }
 
@@ -469,14 +535,67 @@ func TestMatchInteraction(t *testing.T) {
 	}
 }
 
+func TestFakeServerIDDeterministic(t *testing.T) {
+	a := fakeServerID(json.Number("990099"))
+	b := fakeServerID(json.Number("990099"))
+	if a != b {
+		t.Fatalf("fakeServerID not deterministic: %q != %q", a, b)
+	}
+	if a.String() == "990099" {
+		t.Errorf("fakeServerID returned the real value unchanged: %s", a)
+	}
+}
+
+func TestFakeServerIDDistinctInputs(t *testing.T) {
+	a := fakeServerID(json.Number("990099"))
+	b := fakeServerID(json.Number("991100"))
+	if a == b {
+		t.Errorf("fakeServerID mapped two different ids to the same fake: %s", a)
+	}
+}
+
+func TestFakeServerNameDeterministic(t *testing.T) {
+	a := fakeServerName("test-server-01")
+	b := fakeServerName("test-server-01")
+	if a != b {
+		t.Fatalf("fakeServerName not deterministic: %q != %q", a, b)
+	}
+	if a == "test-server-01" {
+		t.Errorf("fakeServerName returned the real value unchanged: %s", a)
+	}
+}
+
+func TestFakeServerNameEmptyPassesThrough(t *testing.T) {
+	if got := fakeServerName(""); got != "" {
+		t.Errorf("fakeServerName(\"\") = %q, want empty string", got)
+	}
+}
+
+func TestMatchInteractionServer(t *testing.T) {
+	const realID = "990099"
+	fakeID := fakeServerID(json.Number(realID))
+	fakeURL := "https://example.com/v1/servers/" + fakeID.String()
+	stored := cassette.Request{Method: "GET", URL: fakeURL}
+
+	realReq := httptest.NewRequest("GET", "https://example.com/v1/servers/"+realID, nil)
+	if !matchInteraction(realReq, stored) {
+		t.Errorf("matchInteraction did not match a real-ID request against its redacted cassette entry")
+	}
+
+	fakeReq := httptest.NewRequest("GET", fakeURL, nil)
+	if !matchInteraction(fakeReq, stored) {
+		t.Errorf("matchInteraction did not match an already-redacted request (exact-match fast path)")
+	}
+}
+
 func TestMatchInteractionNonRdnsExactOnly(t *testing.T) {
-	stored := cassette.Request{Method: "GET", URL: "https://example.com/v1/servers/882863"}
-	req := httptest.NewRequest("GET", "https://example.com/v1/servers/882863", nil)
+	stored := cassette.Request{Method: "GET", URL: "https://example.com/v1/servers/990099"}
+	req := httptest.NewRequest("GET", "https://example.com/v1/servers/990099", nil)
 	if !matchInteraction(req, stored) {
 		t.Errorf("matchInteraction did not match an identical non-rDNS URL")
 	}
 
-	other := httptest.NewRequest("GET", "https://example.com/v1/servers/999999", nil)
+	other := httptest.NewRequest("GET", "https://example.com/v1/servers/991100", nil)
 	if matchInteraction(other, stored) {
 		t.Errorf("matchInteraction matched a different server id")
 	}

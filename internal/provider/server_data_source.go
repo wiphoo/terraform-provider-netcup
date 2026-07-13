@@ -23,6 +23,7 @@ type serverDataSource struct {
 
 type serverDataSourceModel struct {
 	ID            types.String      `tfsdk:"id"`
+	Name          types.String      `tfsdk:"name"`
 	Hostname      types.String      `tfsdk:"hostname"`
 	Status        types.String      `tfsdk:"status"`
 	ProductName   types.String      `tfsdk:"product_name"`
@@ -50,6 +51,10 @@ func (d *serverDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 			"id": schema.StringAttribute{
 				Required:    true,
 				Description: "The numeric server ID.",
+			},
+			"name": schema.StringAttribute{
+				Computed:    true,
+				Description: "The server name.",
 			},
 			"hostname": schema.StringAttribute{
 				Computed:    true,
@@ -137,7 +142,8 @@ func (d *serverDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 	}
 
 	state := serverDataSourceModel{
-		ID: types.StringValue(strconv.FormatInt(int64(server.ID), 10)),
+		ID:   types.StringValue(strconv.FormatInt(int64(server.ID), 10)),
+		Name: types.StringValue(server.Name),
 	}
 
 	if server.Hostname != nil {
