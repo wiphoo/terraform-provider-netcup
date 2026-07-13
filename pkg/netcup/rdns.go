@@ -222,7 +222,7 @@ func (c *Client) ConfirmRDNS(ctx context.Context, ip string, expected *RdnsEntry
 			lastErr = err
 			continue
 		}
-		if rdnsHostnamesEqual(readBack.Hostname, expected.Hostname) {
+		if EqualRDNSHostnames(readBack.Hostname, expected.Hostname) {
 			return readBack, nil
 		}
 		lastErr = nil
@@ -234,11 +234,12 @@ func (c *Client) ConfirmRDNS(ctx context.Context, ip string, expected *RdnsEntry
 	return nil, fmt.Errorf("rdns set succeeded but read-back did not match after %d attempts: set %q, got %q", rdnsConfirmAttempts, expected.Hostname, lastHostname)
 }
 
-// rdnsHostnamesEqual reports whether two reverse-DNS hostnames are equivalent.
+// EqualRDNSHostnames reports whether two reverse-DNS hostnames are equivalent.
 // PTR values are FQDNs: DNS names are case-insensitive and the API may return a
 // canonicalized form with a trailing dot, so both are ignored (along with
-// surrounding whitespace) when confirming a read-back.
-func rdnsHostnamesEqual(a, b string) bool {
+// surrounding whitespace) when comparing. It is the exported form of the
+// comparison ConfirmRDNS uses to decide a read-back match.
+func EqualRDNSHostnames(a, b string) bool {
 	return normalizeRDNSHostname(a) == normalizeRDNSHostname(b)
 }
 

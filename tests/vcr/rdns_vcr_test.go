@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 // TestSetRDNS records POST /v1/rdns/ipv4. In record mode it calls SetRDNS
@@ -19,19 +21,19 @@ func TestSetRDNS(t *testing.T) {
 	if entry == nil {
 		t.Fatal("SetRDNS() returned nil entry")
 	}
-	if entry.IP == "" {
-		t.Error("SetRDNS() entry.IP is empty")
+	if entry.IP != ip {
+		t.Errorf("entry.IP = %q, want canonical %q", entry.IP, ip)
 	}
-	if entry.Hostname == "" {
-		t.Error("SetRDNS() entry.Hostname is empty")
+	if !netcup.EqualRDNSHostnames(entry.Hostname, TestRDNSHostname) {
+		t.Errorf("entry.Hostname = %q, want %q", entry.Hostname, TestRDNSHostname)
 	}
 }
 
-// TestGetRDNS records GET /v1/rdns/ipv4/{ip}. In record mode it first seeds
-// the PTR on NETCUP_TEST_IP (via an unrecorded live client, so ConfirmRDNS
-// polling GETs don't leak into the cassette) so the read-back has a value.
-func TestGetRDNS(t *testing.T) {
-	const cassetteName = "TestGetRDNS"
+// TestGetRDNS_WithPTR records GET /v1/rdns/ipv4/{ip} with a PTR set. In record
+// mode it first seeds the PTR on NETCUP_TEST_IP (via an unrecorded live client,
+// so ConfirmRDNS polling GETs don't leak into the cassette).
+func TestGetRDNS_WithPTR(t *testing.T) {
+	const cassetteName = "TestGetRDNS_WithPTR"
 	client := NewClient(t, cassetteName)
 	ip := RDNSIPForTest(t, cassetteName)
 
@@ -46,11 +48,8 @@ func TestGetRDNS(t *testing.T) {
 	if entry == nil {
 		t.Fatal("GetRDNS() returned nil entry")
 	}
-	if entry.Hostname == "" {
-		t.Error("GetRDNS() entry.Hostname is empty")
-	}
-	if entry.IP == "" {
-		t.Error("GetRDNS() entry.IP is empty")
+	if !netcup.EqualRDNSHostnames(entry.Hostname, TestRDNSHostname) {
+		t.Errorf("Hostname = %q, want %q", entry.Hostname, TestRDNSHostname)
 	}
 }
 

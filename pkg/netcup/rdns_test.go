@@ -692,7 +692,7 @@ func TestConfirmRDNS_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestRDNSHostnamesEqual(t *testing.T) {
+func TestEqualRDNSHostnames(t *testing.T) {
 	cases := []struct {
 		a, b string
 		want bool
@@ -704,8 +704,8 @@ func TestRDNSHostnamesEqual(t *testing.T) {
 		{"", "", true},
 	}
 	for _, c := range cases {
-		if got := rdnsHostnamesEqual(c.a, c.b); got != c.want {
-			t.Errorf("rdnsHostnamesEqual(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		if got := EqualRDNSHostnames(c.a, c.b); got != c.want {
+			t.Errorf("EqualRDNSHostnames(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
 	}
 }

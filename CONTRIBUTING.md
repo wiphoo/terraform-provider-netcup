@@ -161,20 +161,20 @@ yields identical cassettes.
 | Field | Fake value |
 |-------|-----------|
 | `Authorization` header (request) | deleted entirely |
+| `Set-Cookie` header (response), `Cookie` header (request) | deleted entirely |
+| `mac` (interface MAC address, in `serverLiveInfo.interfaces[]`) | mapped to IEEE locally-administered range (`02:xx:xx:xx:xx:xx`) |
 | `access_token` / `refresh_token` (JSON or form OIDC bodies) | fixed placeholder |
 | `ipv4Addresses[].ip` / `.gateway` / `.broadcast`, and any `ip` in a request URL (e.g. the rDNS endpoints) | mapped into **RFC 5737** `203.0.113.0/24` |
 | `ipv6Addresses[].networkPrefix` / `.gateway` | mapped into **RFC 3849** `2001:db8::/32` |
 | `hostname`, `nickname`, RDNS **PTR** (request and response — `SetRDNS` sends the PTR in the request body) | `host-<hash>.example.com` |
 | `userId` | fixed synthetic value (`10001`), regardless of the real value |
+| `id` (any JSON number under key `"id"`: server id, template id, address id, site id) | mapped to a deterministic synthetic integer |
+| `name` | mapped to a deterministic synthetic prefix (`server-<hash>`) |
 
-**Preserved as-is:** `id` (server id — the natural cassette handle), `name`,
-`template.id`/`.name`, `site.id`/`.city`, `disabled`, `state`, `architecture`,
+**Preserved as-is:** `disabled`, `state`, `architecture`,
 `netmask` (structurally IPv4-shaped but not identifying — there are only 33
-possible values).
-
-> The recorder (maintainer) is still responsible for not recording against an
-> account whose server **`name`**s embed secrets/identity — redaction only
-> covers the fields in the table above.
+possible values). `template.name` and `site.name`/`site.city` are also redacted
+because the `"name"` key is redacted at all nesting levels.
 
 > **rDNS replay contract.** Unlike a redacted **IP** — which `GetRDNS`
 > re-derives from the *request* (so `matchInteraction` lets a replay call use

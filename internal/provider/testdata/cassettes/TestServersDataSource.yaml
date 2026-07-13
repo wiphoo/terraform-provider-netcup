@@ -3,14 +3,25 @@ version: 1
 interactions:
 - request:
     body: ""
-    headers: {}
+    form: {}
+    headers:
+      Accept:
+      - application/json
     url: https://www.servercontrolpanel.de/scp-core/api/v1/servers
     method: GET
   response:
-    body: |-
-      [{"id":100001,"name":"vps01","hostname":"host-a1b2c3d4.example.com","nickname":"host-e5f6a7b8.example.com","disabled":false,"template":{"id":42,"name":"VPS Lite 1 G12s"}}]
+    body: '[{"disabled":false,"hostname":"host-3687c899.example.com","id":1681695467,"name":"server-326a2254","nickname":"","template":{"id":1536096932,"name":"server-64b058f3"}}]'
     headers:
+      Content-Length:
+      - "151"
       Content-Type:
       - application/json
+      Date:
+      - Sat, 11 Jul 2026 00:44:47 GMT
+      X-Frame-Options:
+      - SAMEORIGIN
+      X-Total-Count:
+      - "1"
     status: 200 OK
     code: 200
+    duration: ""

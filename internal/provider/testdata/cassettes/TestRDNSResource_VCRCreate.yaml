@@ -2,28 +2,46 @@
 version: 1
 interactions:
 - request:
-    body: '{"ip":"203.0.113.10","rdns":"host-a1b2c3d4.example.com"}'
+    body: '{"ip":"2001:db8:91f0:7cdf:5a7d:78d0:c100:cc0b","rdns":"host-a1b2c3d4.example.com"}'
+    form: {}
     headers:
+      Accept:
+      - application/json
       Content-Type:
       - application/json
-    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv6
     method: POST
   response:
-    body: '{"ip":"203.0.113.10","rdns":"host-a1b2c3d4.example.com"}'
+    body: ""
     headers:
-      Content-Type:
-      - application/json
+      Content-Length:
+      - "0"
+      Date:
+      - Sat, 11 Jul 2026 00:43:37 GMT
+      X-Frame-Options:
+      - SAMEORIGIN
     status: 200 OK
     code: 200
+    duration: ""
 - request:
     body: ""
-    headers: {}
-    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv4/203.0.113.10
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/rdns/ipv6/2001:db8:91f0:7cdf:5a7d:78d0:c100:cc0b
     method: GET
   response:
     body: '{"rdns":"host-a1b2c3d4.example.com"}'
     headers:
+      Content-Length:
+      - "36"
       Content-Type:
       - application/json
+      Date:
+      - Sat, 11 Jul 2026 00:43:37 GMT
+      X-Frame-Options:
+      - SAMEORIGIN
     status: 200 OK
     code: 200
+    duration: ""

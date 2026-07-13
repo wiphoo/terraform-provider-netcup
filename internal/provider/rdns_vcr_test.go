@@ -64,7 +64,7 @@ func TestRDNSResource_VCRRead(t *testing.T) {
 	if os.Getenv("VCR_RECORD") == "1" {
 		// Seed the PTR so the recorded Read captures the expected hostname;
 		// without it, this test in isolation (or a changed order) could record a
-		// no-PTR/stale response. Matches the SDK-level TestGetRDNS prep.
+		// no-PTR/stale response. Matches the SDK-level TestGetRDNS_WithPTR prep.
 		seedLivePTR(t, ip)
 	}
 

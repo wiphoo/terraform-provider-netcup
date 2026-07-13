@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/dnaeon/go-vcr/cassette"
@@ -18,10 +19,13 @@ import (
 // redactInteraction is the save-time filter registered via
 // rec.AddSaveFilter in recorder.go (not rec.AddFilter — see the comment at
 // that call site for why the distinction matters). It scrubs the
-// Authorization header, plus body/URL/form fields (IPs, hostnames,
-// nicknames, PTRs, userId, OIDC tokens), on both request and response.
+// Authorization header, response Set-Cookie headers, request Cookie headers,
+// plus body/URL/form fields (IPs, hostnames, nicknames, PTRs, userId, OIDC
+// tokens), on both request and response.
 func redactInteraction(i *cassette.Interaction) error {
 	delete(i.Request.Headers, "Authorization")
+	delete(i.Request.Headers, "Cookie")
+	delete(i.Response.Headers, "Set-Cookie")
 	i.URL = redactURL(i.URL)
 	i.Request.Body = redactRequestBody(i.Request.Headers.Get("Content-Type"), i.Request.Body)
 	redactFormValues(i.Form)
@@ -111,7 +115,7 @@ func fakeHostname(real string) string {
 
 // normalizeHostnameForHash mirrors pkg/netcup/rdns.go's
 // normalizeRDNSHostname (case-insensitive, trailing-dot-insensitive DNS name
-// comparison, used by ConfirmRDNS's rdnsHostnamesEqual to decide whether a
+// comparison, used by ConfirmRDNS's EqualRDNSHostnames to decide whether a
 // read-back PTR matches what was set) — it can't be imported directly since
 // that function is unexported in a different package, so it's replicated
 // here. Without this, a SetRDNS request PTR like "Foo.Example" and a later
@@ -121,6 +125,29 @@ func fakeHostname(real string) string {
 // succeeded.
 func normalizeHostnameForHash(h string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+}
+
+// macPattern matches a colon-separated MAC address (e.g. "00:00:5e:00:53:01").
+var macPattern = regexp.MustCompile(`^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$`)
+
+// fakeMAC deterministically maps a real MAC address into the IEEE
+// locally-administered range with a distinctive 02:00: prefix that no real
+// OUI-assigned or random locally-administered MAC uses (the second byte is
+// always 0x00, while real OUIs and random assignments use the full 00–FF range
+// for that byte). This makes fakeMAC's output DETECTABLY synthetic:
+// TestCassettesAreScrubbed's checkMACsAreSynthetic can verify the 02:00:
+// prefix rather than accepting any 02:xx:xx:xx:xx:xx as synthetic.
+//
+// Every input is hashed unconditionally — including one that already starts
+// with 02: (a live virtual NIC can be assigned a locally-administered MAC, so
+// the prefix alone can't identify redactor output — see PR #57
+// discussion_r3560302684). Non-MAC input is returned unchanged.
+func fakeMAC(real string) string {
+	if !macPattern.MatchString(real) {
+		return real
+	}
+	h := hashBytes("mac:" + strings.ToLower(real))
+	return fmt.Sprintf("02:00:%02x:%02x:%02x:%02x", h[0], h[1], h[2], h[3])
 }
 
 // isIPv4Netmask reports whether ip is a syntactically valid subnet mask (a
@@ -262,8 +289,8 @@ func redactValue(v interface{}) interface{} {
 
 // redactField applies the substitution for key, if key is sensitive, to an
 // already-recursed child value. Fields not in any of the known key sets
-// (id, name, template.*, site.*, disabled, state, architecture, netmask,
-// ...) pass through unchanged.
+// Fields not in any of the known key sets (template.*, site.*, disabled,
+// state, architecture, netmask, ...) pass through unchanged.
 func redactField(key string, val interface{}) interface{} {
 	switch {
 	case ipLikeKeys[key]:
@@ -280,6 +307,24 @@ func redactField(key string, val interface{}) interface{} {
 			return val
 		}
 		return redactedTokenPlaceholder
+	case key == "id":
+		num, ok := val.(json.Number)
+		if !ok {
+			return val
+		}
+		return fakeServerID(num)
+	case key == "name":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return fakeServerName(s)
+	case key == "mac":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return fakeMAC(s)
 	case key == "userId":
 		return fakeUserIDValue
 	default:
@@ -372,48 +417,71 @@ func redactFormValues(values url.Values) {
 // body.
 var rdnsURLPattern = regexp.MustCompile(`^(.*/v1/rdns/(ipv4|ipv6)/)([^/?]+)(.*)$`)
 
-// redactURL rewrites the IP embedded in an rDNS endpoint URL. URLs that
-// don't match the rDNS path shape (e.g. /v1/servers/{id}) are returned
-// unchanged.
-//
-// Server IDs are deliberately preserved (in both the URL and the "id" body
-// field — see TestRedactValue's "Preserved as-is" assertions in redact_test.go,
-// which lock this in): a netcup server ID is an opaque per-account integer, not
-// a credential and not a network identifier like an IP or PTR, so it is out of
-// scope for PII redaction. Because ServerIDForTest derives the replay handle
-// from the cassette rather than a hardcoded constant, a preserved (real) server
-// ID also carries no re-record maintenance cost. If a future policy decides
-// server IDs are sensitive, add "id" handling to redactField and a server-URL
-// branch here, and update the redact_test.go preservation assertions to match.
+// serverURLPattern matches the server detail endpoint URL, e.g.
+// /v1/servers/990099. Server IDs are redacted from the URL alongside the
+// body "id" field.
+var serverURLPattern = regexp.MustCompile(`^(.*/v1/servers/)([0-9]+)(\?[^/]*)?$`)
+
+// fakeServerID deterministically maps a real id value (e.g. server id,
+// template id, address id, site id) to a synthetic one. The same real
+// value always maps to the same fake.
+func fakeServerID(real json.Number) json.Number {
+	h := hashBytes("id:" + real.String())
+	// Keep the result in positive int32 range (max 2147483647) so the SCP
+	// API's int32 server-id field never overflows.
+	n := (int64(h[0])<<24 | int64(h[1])<<16 | int64(h[2])<<8 | int64(h[3])) & 0x7fffffff
+	if n == 0 {
+		n = 1
+	}
+	return json.Number(strconv.FormatInt(n, 10))
+}
+
+// fakeServerName deterministically maps a real server name (or any other
+// name string) to a synthetic placeholder.
+func fakeServerName(real string) string {
+	if real == "" {
+		return real
+	}
+	h := hashBytes("name:" + real)
+	return fmt.Sprintf("server-%x", h[:4])
+}
+
+// redactURL rewrites the IP embedded in an rDNS endpoint URL or the server
+// ID embedded in a server detail URL. URLs that don't match either shape
+// are returned unchanged.
 func redactURL(rawURL string) string {
-	m := rdnsURLPattern.FindStringSubmatch(rawURL)
-	if m == nil {
-		return rawURL
+	if m := rdnsURLPattern.FindStringSubmatch(rawURL); m != nil {
+		prefix, family, ip, suffix := m[1], m[2], m[3], m[4]
+		var fake string
+		if family == "ipv4" {
+			fake = fakeIPv4(ip)
+		} else {
+			fake = fakeIPv6(ip)
+		}
+		return prefix + fake + suffix
 	}
-	prefix, family, ip, suffix := m[1], m[2], m[3], m[4]
-	var fake string
-	if family == "ipv4" {
-		fake = fakeIPv4(ip)
-	} else {
-		fake = fakeIPv6(ip)
+	if m := serverURLPattern.FindStringSubmatch(rawURL); m != nil {
+		prefix, idStr, suffix := m[1], m[2], m[3]
+		fakeID := fakeServerID(json.Number(idStr))
+		return prefix + fakeID.String() + suffix
 	}
-	return prefix + fake + suffix
+	return rawURL
 }
 
 // matchInteraction is the cassette.Matcher installed via rec.SetMatcher in
 // recorder.go, replacing go-vcr's DefaultMatcher (exact method+URL string
 // equality). redactURL rewrites the IP embedded in an rDNS request URL
-// before the cassette is saved, so a replay-mode caller that constructs its
-// request from the real IP (e.g. a maintainer's shell still exporting
-// NETCUP_TEST_IP from a prior `make acc-record`, or a future test that
-// simply hardcodes the real test IP) would otherwise never match the
-// committed, already-redacted cassette entry. The exact-match check runs
-// first, so this is a no-op for every URL redaction doesn't touch (i.e.
-// almost all of them) and for a caller that already uses the redacted fake
-// IP; only on a mismatch does it fall back to comparing the *redacted*
-// incoming URL against the cassette — redactURL is a deterministic, pure
-// function of the real IP, so it reproduces exactly the fake value the
-// cassette recorded.
+// (or the server ID in a server detail URL) before the cassette is saved,
+// so a replay-mode caller that constructs its request from the real IP
+// (e.g. a maintainer's shell still exporting NETCUP_TEST_IP from a prior
+// `make acc-record`, or a future test that simply hardcodes the real test
+// server ID) would otherwise never match the committed, already-redacted
+// cassette entry. The exact-match check runs first, so this is a no-op for
+// every URL redaction doesn't touch (i.e. almost all of them) and for a
+// caller that already uses the redacted fake value; only on a mismatch
+// does it fall back to comparing the *redacted* incoming URL against the
+// cassette -- redactURL is a deterministic, pure function, so it reproduces
+// exactly the fake value the cassette recorded.
 func matchInteraction(r *http.Request, i cassette.Request) bool {
 	if r.Method != i.Method {
 		return false
