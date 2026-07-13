@@ -14,10 +14,15 @@
 #     direct {}
 #   }
 #
-# Then build the provider binary:
+# Then build the provider binary and run `terraform plan` directly —
+# `terraform init` will fail with a "provider not found" error because
+# wiphoo/netcup is not yet published, but the dev override makes init
+# unnecessary for plan/apply:
 #
 #   cd /path/to/your/clone
 #   go build -o bin/ ./cmd/terraform-provider-netcup
+#   cd path/to/your/examples
+#   terraform plan
 
 terraform {
   required_providers {

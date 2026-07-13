@@ -145,11 +145,16 @@ provider_installation {
 }
 ```
 
-Build the provider binary:
+Build the provider binary, then run `terraform plan` directly — `terraform init`
+will fail with a "provider not found" error because `wiphoo/netcup` is not yet
+published on the Terraform Registry, but the dev override makes init
+unnecessary for plan/apply:
 
 ```bash
 cd /path/to/your/clone
 go build -o bin/ ./cmd/terraform-provider-netcup
+cd path/to/your/examples
+terraform plan
 ```
 
 ## Design principles
