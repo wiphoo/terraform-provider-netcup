@@ -30,7 +30,8 @@ terraform {
 provider "netcup" {
   # Pre-issued tokens (minted by `netcupctl auth login`).
   # Set these via variables or the NETCUP_ACCESS_TOKEN / NETCUP_REFRESH_TOKEN
-  # environment variables.
+  # environment variables. When using environment variables, omit or set these
+  # to null so the provider's env-var fallback takes effect.
   access_token  = var.netcup_access_token
   refresh_token = var.netcup_refresh_token
 
@@ -43,12 +44,14 @@ variable "netcup_access_token" {
   description = "OAuth 2.0 access token minted by `netcupctl auth login`"
   type        = string
   sensitive   = true
+  default     = null
 }
 
 variable "netcup_refresh_token" {
   description = "OAuth 2.0 refresh token used to renew the access token"
   type        = string
   sensitive   = true
+  default     = null
 }
 
 variable "netcup_api_endpoint" {

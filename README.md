@@ -95,10 +95,10 @@ another browser approval. Never log or commit tokens.
 The Terraform provider is built on the same Go SDK as `netcupctl` and ships in
 v0.2.0. See [examples/](examples/) for ready-to-use configurations:
 
-- [Provider configuration](examples/provider/provider.tf)
-- [netcup_servers data source](examples/data-sources/servers.tf)
-- [netcup_server data source](examples/data-sources/server.tf)
-- [netcup_rdns resource](examples/resources/rdns.tf)
+- [Provider configuration](examples/provider.tf)
+- [netcup_servers data source](examples/servers.tf)
+- [netcup_server data source](examples/server.tf)
+- [netcup_rdns resource](examples/rdns.tf)
 
 ```hcl
 terraform {
