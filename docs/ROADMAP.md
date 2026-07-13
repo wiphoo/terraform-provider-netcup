@@ -52,7 +52,7 @@ Scope:
 - GitHub Actions CI (test + lint)
 - `netcupctl` release automation
 
-## v0.2.0 - Terraform provider foundation
+## v0.2.0 - Terraform provider foundation (shipped)
 
 Scope:
 
@@ -61,9 +61,9 @@ Scope:
 - `netcup_server` data source
 - `netcup_rdns` resource
 - Import support for `netcup_rdns`
-- Examples and `terraform validate` in CI
+- Examples and documentation
 - Acceptance test foundation
-- Provider release automation and Terraform Registry publication
+- go-vcr replay tests for SDK and provider
 
 ## v0.3.0 - Operations (CLI)
 
