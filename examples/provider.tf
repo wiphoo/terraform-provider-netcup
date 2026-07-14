@@ -14,13 +14,14 @@
 #     direct {}
 #   }
 #
-# Then build the provider binary and run `terraform plan` directly —
-# `terraform init` will fail with a "provider not found" error because
-# wiphoo/netcup is not yet published, but the dev override makes init
-# unnecessary for plan/apply:
+# Then build the provider binary, export the tokens minted by
+# `netcupctl auth login`, and run `terraform plan` directly — `terraform init`
+# will fail with a "provider not found" error because wiphoo/netcup is not yet
+# published, but the dev override makes init unnecessary for plan/apply:
 #
 #   cd /path/to/your/clone
 #   go build -o bin/ ./cmd/terraform-provider-netcup
+#   eval "$(./bin/netcupctl auth export)"
 #   cd examples
 #   terraform plan
 #

@@ -6,8 +6,9 @@
 #
 #   terraform plan -var 'rdns_ip_address=203.0.113.10' -var 'rdns_hostname=server.example.com'
 #
-# Import an existing reverse DNS entry:
-#   terraform import 'netcup_rdns.server[0]' 203.0.113.10
+# Import an existing reverse DNS entry (the enabling variable must be set so
+# Terraform can resolve the counted resource address):
+#   terraform import -var 'rdns_ip_address=203.0.113.10' 'netcup_rdns.server[0]' 203.0.113.10
 variable "rdns_ip_address" {
   description = "IP address to manage a PTR record for. Leave null to skip this example."
   type        = string
