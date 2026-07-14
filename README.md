@@ -153,8 +153,23 @@ unnecessary for plan/apply:
 ```bash
 cd /path/to/your/clone
 go build -o bin/ ./cmd/terraform-provider-netcup
-cd path/to/your/examples
+cd examples
 terraform plan
+```
+
+A bare `terraform plan` in `examples/` only exercises the `netcup_servers` data
+source, which lists the servers on *your* authenticated account — a safe
+read-only smoke test. The single-server lookup (`server.tf`) and the rDNS
+resource (`rdns.tf`) are opt-in placeholders, skipped via `count` unless you
+pass your own values, so the plan never reads a hard-coded server ID or proposes
+a placeholder PTR record:
+
+```bash
+# Look up one of your servers by ID.
+terraform plan -var 'server_id=123456'
+
+# Manage a PTR record for an IP you own.
+terraform plan -var 'rdns_ip_address=203.0.113.10' -var 'rdns_hostname=host.example.com'
 ```
 
 ## Design principles

@@ -21,8 +21,13 @@
 #
 #   cd /path/to/your/clone
 #   go build -o bin/ ./cmd/terraform-provider-netcup
-#   cd path/to/your/examples
+#   cd examples
 #   terraform plan
+#
+# A bare `terraform plan` only reads the netcup_servers data source (a safe
+# read-only listing of your own account). The single-server lookup and rDNS
+# examples are opt-in — pass -var 'server_id=...' or -var 'rdns_ip_address=...'
+# to enable them.
 
 terraform {
   required_providers {
