@@ -153,6 +153,7 @@ Terraform Registry, but the dev override makes init unnecessary for plan/apply:
 ```bash
 cd /path/to/your/clone
 go build -o bin/ ./cmd/terraform-provider-netcup
+go build -o bin/ ./cmd/netcupctl
 eval "$(./bin/netcupctl auth export)"
 cd examples
 terraform plan
