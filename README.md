@@ -10,10 +10,10 @@ and other Netcup APIs planned in later releases.
 
 ## Status
 
-**v0.1.0 — netcupctl CLI foundation is complete.**
+**v0.2.0 — Terraform provider is available.**
 
-The `netcupctl` CLI, shared Go SDK, CI, and release automation are shipped.
-The next milestone (v0.2.0) adds the Terraform provider on top of the same SDK.
+The `netcupctl` CLI, shared Go SDK, CI, and release automation shipped in v0.1.0.
+The Terraform provider (data sources, rDNS resource, examples, and docs) ships in v0.2.0 on top of the same SDK.
 
 See the [Roadmap](docs/ROADMAP.md) for the full release plan.
 
@@ -90,10 +90,15 @@ export NETCUP_REFRESH_TOKEN="..."   # pre-issued; optional when using auth login
 Treat the refresh token like a password: it can mint new access tokens without
 another browser approval. Never log or commit tokens.
 
-## Terraform provider (v0.2.0 — coming next)
+## Terraform provider (v0.2.0 — available)
 
-The Terraform provider is built on the same Go SDK as `netcupctl` and is planned
-for v0.2.0. Planned configuration:
+The Terraform provider is built on the same Go SDK as `netcupctl` and ships in
+v0.2.0. See [examples/](examples/) for ready-to-use configurations:
+
+- [Provider configuration](examples/provider.tf)
+- [netcup_servers data source](examples/servers.tf)
+- [netcup_server data source](examples/server.tf)
+- [netcup_rdns resource](examples/rdns.tf)
 
 ```hcl
 terraform {
@@ -113,9 +118,60 @@ provider "netcup" {
 data "netcup_servers" "all" {}
 
 resource "netcup_rdns" "server" {
-  ip_address = "2a03:xxxx::1"
+  ip_address = "203.0.113.10"
   hostname   = "server.example.com"
 }
+```
+
+> **Refresh-token rotation caveat**
+>
+> Keycloak may rotate the refresh token when it is used. Reusing the same
+> `NETCUP_REFRESH_TOKEN` across separate `terraform apply` runs may fail after
+> a rotation has occurred. If you encounter token errors, re-run
+> `netcupctl auth login` to mint fresh tokens.
+
+### Terraform provider local development
+
+Before the provider is published on the Terraform Registry (planned for v1.0.0),
+you need a `dev_overrides` CLI configuration to point at a locally-built binary.
+Add the following to `~/.terraformrc`:
+
+```hcl
+provider_installation {
+  dev_overrides {
+    "wiphoo/netcup" = "/path/to/your/clone/bin"
+  }
+  direct {}
+}
+```
+
+Build the provider binary, export the tokens minted by `netcupctl auth login`,
+then run `terraform plan` directly — `terraform init` will fail with a
+"provider not found" error because `wiphoo/netcup` is not yet published on the
+Terraform Registry, but the dev override makes init unnecessary for plan/apply:
+
+```bash
+cd /path/to/your/clone
+go build -o bin/ ./cmd/terraform-provider-netcup
+go build -o bin/ ./cmd/netcupctl
+eval "$(./bin/netcupctl auth export)"
+cd examples
+terraform plan
+```
+
+A bare `terraform plan` in `examples/` only exercises the `netcup_servers` data
+source, which lists the servers on *your* authenticated account — a safe
+read-only smoke test. The single-server lookup (`server.tf`) and the rDNS
+resource (`rdns.tf`) are opt-in placeholders, skipped via `count` unless you
+pass your own values, so the plan never reads a hard-coded server ID or proposes
+a placeholder PTR record:
+
+```bash
+# Look up one of your servers by ID.
+terraform plan -var 'server_id=123456'
+
+# Manage a PTR record for an IP you own.
+terraform plan -var 'rdns_ip_address=203.0.113.10' -var 'rdns_hostname=host.example.com'
 ```
 
 ## Design principles

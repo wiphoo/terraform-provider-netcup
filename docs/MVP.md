@@ -152,8 +152,9 @@ Computed fields:
 - hostname
 - status
 - product_name
-- ipv4_addresses
-- ipv6_addresses
+- name
+- ipv4_addresses (list of strings)
+- ipv6_addresses (list of objects with `network_prefix` and `network_prefix_length`)
 
 Acceptance criteria:
 
