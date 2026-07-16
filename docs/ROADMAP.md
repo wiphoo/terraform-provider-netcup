@@ -64,6 +64,7 @@ Scope:
 - Examples and documentation
 - Acceptance test foundation
 - go-vcr replay tests for SDK and provider
+- Provider release automation (goreleaser + cosign)
 
 ## v0.3.0 - Operations (CLI)
 

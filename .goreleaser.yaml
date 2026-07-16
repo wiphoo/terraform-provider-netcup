@@ -1,4 +1,4 @@
-# GoReleaser configuration for the netcupctl CLI.
+# GoReleaser configuration for the terraform-provider-netcup project.
 # Docs: https://goreleaser.com
 #
 # Releases are cut by pushing a SemVer tag (vX.Y.Z); the release workflow
@@ -7,7 +7,7 @@
 # so there is no signing key to manage. See the "Releasing" section in README.md.
 version: 2
 
-project_name: netcupctl
+project_name: terraform-provider-netcup
 
 before:
   hooks:
@@ -29,6 +29,21 @@ builds:
     ldflags:
       - -s -w -X github.com/wiphoo/terraform-provider-netcup/internal/version.Version={{ .Version }}
 
+  - id: terraform-provider-netcup
+    main: ./cmd/terraform-provider-netcup
+    binary: terraform-provider-netcup
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/wiphoo/terraform-provider-netcup/internal/version.Version={{ .Version }}
+
 archives:
   - id: netcupctl
     ids:
@@ -38,6 +53,18 @@ archives:
     formats:
       - tar.gz
     # Windows users expect a .zip.
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+  - id: terraform-provider-netcup
+    ids:
+      - terraform-provider-netcup
+    name_template: >-
+      terraform-provider-netcup_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
     format_overrides:
       - goos: windows
         formats:
