@@ -184,21 +184,23 @@ terraform plan -var 'rdns_ip_address=203.0.113.10' -var 'rdns_hostname=host.exam
 
 ## Releasing
 
-`netcupctl` binaries are built and published automatically by
-[GoReleaser](https://goreleaser.com) via the `Release` GitHub Actions workflow
-(`.github/workflows/release.yml`). Configuration lives in `.goreleaser.yaml`.
+`netcupctl` CLI and `terraform-provider-netcup` binaries are built and
+published automatically by [GoReleaser](https://goreleaser.com) via the
+`Release` GitHub Actions workflow (`.github/workflows/release.yml`).
+Configuration lives in `.goreleaser.yaml`.
 
 Cut a release by pushing a SemVer tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The workflow builds `netcupctl` for linux, macOS, and Windows (amd64 and arm64),
-embeds the tag as the version (visible in `netcupctl version`), produces
-`tar.gz` / `.zip` archives and a SHA-256 `checksums.txt`, and creates a GitHub
-Release with all assets attached.
+The workflow builds both `netcupctl` and `terraform-provider-netcup` for linux,
+macOS, and Windows (amd64 and arm64), embeds the tag as the version (visible
+in `netcupctl version` and the provider's version string), produces
+`tar.gz` / `.zip` archives and a single SHA-256 `checksums.txt` covering both
+artifacts, and creates a GitHub Release with all assets attached.
 
 ### Verifying a release
 
