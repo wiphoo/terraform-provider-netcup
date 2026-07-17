@@ -3,6 +3,7 @@ package netcup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -124,8 +125,13 @@ func (c *Client) GetTask(ctx context.Context, uuid string) (*TaskInfo, error) {
 // count: netcup's power and rescue tasks can take minutes, so the timeout
 // belongs to the caller (e.g. the CLI's --wait flag). Between reads it waits
 // taskPollInterval, honoring ctx so cancellation is observed promptly.
-// Transient GetTask errors (network blips, transient non-2xx) are retried
-// until ctx expires; the last such error is returned if ctx ends first.
+//
+// Transient GetTask errors (network blips, 5xx, 429) are retried until ctx
+// expires; the last such error is wrapped into the returned ctx error if the
+// context ends first. Permanent client errors (a 4xx other than 429, such as a
+// 404 for a bad UUID or 401/403 for an invalid token/IP) will never succeed on
+// retry, so they are returned immediately and unwrapped, letting callers
+// recover the *APIError with errors.As instead of waiting out the window.
 func (c *Client) WaitForTask(ctx context.Context, uuid string) (*TaskInfo, error) {
 	var lastErr error
 	for {
@@ -134,6 +140,11 @@ func (c *Client) WaitForTask(ctx context.Context, uuid string) (*TaskInfo, error
 			// A canceled context is authoritative; stop and report it.
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			// Permanent client errors won't recover on retry — return the
+			// actionable error now rather than after the wait window.
+			if isPermanentTaskPollError(err) {
+				return nil, err
 			}
 			lastErr = err
 		} else if task.State.IsTerminal() {
@@ -158,4 +169,17 @@ func (c *Client) WaitForTask(ctx context.Context, uuid string) (*TaskInfo, error
 		case <-time.After(taskPollInterval):
 		}
 	}
+}
+
+// isPermanentTaskPollError reports whether a GetTask error is a permanent
+// client error that will never succeed on retry (a 4xx other than 429 Too Many
+// Requests). Network errors, 5xx, and 429 are treated as transient.
+func isPermanentTaskPollError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode >= 400 &&
+		apiErr.StatusCode < 500 &&
+		apiErr.StatusCode != http.StatusTooManyRequests
 }

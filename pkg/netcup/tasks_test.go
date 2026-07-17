@@ -158,6 +158,39 @@ func TestWaitForTaskTransientErrorThenSuccess(t *testing.T) {
 	}
 }
 
+func TestWaitForTaskPermanentErrorReturnsImmediately(t *testing.T) {
+	fastTaskPoll(t)
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		// A bad UUID (or bad token/IP) is a permanent 4xx: it must not be
+		// retried until the wait window expires.
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"task not found"}`))
+	}))
+	defer srv.Close()
+
+	// A generous deadline: a correct implementation returns well before it, so
+	// a DeadlineExceeded here would signal a regression (retrying forever).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	_, err := c.WaitForTask(ctx, "missing")
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("WaitForTask() error = %v, want *APIError returned immediately", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want 404", apiErr.StatusCode)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("server calls = %d, want 1 (permanent error should not be retried)", n)
+	}
+}
+
 func TestWaitForTaskContextDeadline(t *testing.T) {
 	// A non-terminal task that never finishes: WaitForTask must give up when
 	// the caller's context deadline passes.
