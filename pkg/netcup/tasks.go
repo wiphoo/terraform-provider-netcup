@@ -62,6 +62,11 @@ type TaskInfo struct {
 	// Message is a human-readable status/error detail; nil when absent.
 	Message *string `json:"message"`
 
+	// ResponseError carries the structured error (code + message) for a failed
+	// task; nil when absent. The API may populate this instead of the top-level
+	// Message, so failureMessage falls back to it.
+	ResponseError *ResponseError `json:"responseError"`
+
 	// OnRollback is true when the task is rolling back a failed operation.
 	OnRollback bool `json:"onRollback"`
 }
@@ -70,6 +75,34 @@ type TaskInfo struct {
 type TaskProgress struct {
 	ExpectedFinishedAt *time.Time `json:"expectedFinishedAt"`
 	ProgressInPercent  float64    `json:"progressInPercent"`
+}
+
+// ResponseError is the structured error object the SCP API returns for failed
+// tasks (and other error responses): a machine-readable code and a message.
+type ResponseError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// failureMessage returns the best available human-readable detail for a failed
+// task, preferring the top-level Message and falling back to ResponseError
+// (which the API may populate instead). It returns an empty string when neither
+// carries a detail.
+func (t *TaskInfo) failureMessage() string {
+	if t.Message != nil && *t.Message != "" {
+		return *t.Message
+	}
+	if t.ResponseError != nil {
+		switch {
+		case t.ResponseError.Code != "" && t.ResponseError.Message != "":
+			return t.ResponseError.Code + ": " + t.ResponseError.Message
+		case t.ResponseError.Message != "":
+			return t.ResponseError.Message
+		case t.ResponseError.Code != "":
+			return t.ResponseError.Code
+		}
+	}
+	return ""
 }
 
 // TaskError is returned by WaitForTask when a task reaches a failure terminal
@@ -151,11 +184,7 @@ func (c *Client) WaitForTask(ctx context.Context, uuid string) (*TaskInfo, error
 			if task.State == TaskStateFinished {
 				return task, nil
 			}
-			msg := ""
-			if task.Message != nil {
-				msg = *task.Message
-			}
-			return nil, &TaskError{UUID: uuid, State: task.State, Message: msg}
+			return nil, &TaskError{UUID: uuid, State: task.State, Message: task.failureMessage()}
 		} else {
 			lastErr = nil
 		}

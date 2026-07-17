@@ -133,6 +133,33 @@ func TestWaitForTaskFailureStates(t *testing.T) {
 	}
 }
 
+func TestWaitForTaskResponseErrorFallback(t *testing.T) {
+	fastTaskPoll(t)
+
+	// Top-level message is empty; the detail lives in responseError. The
+	// resulting TaskError must surface the responseError code + message.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"uuid": "t",
+			"state": "ERROR",
+			"message": null,
+			"responseError": {"code": "POWER_ON_FAILED", "message": "host is out of capacity"}
+		}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	_, err := c.WaitForTask(context.Background(), "t")
+	var taskErr *TaskError
+	if !errors.As(err, &taskErr) {
+		t.Fatalf("WaitForTask() error = %v, want *TaskError", err)
+	}
+	if want := "POWER_ON_FAILED: host is out of capacity"; taskErr.Message != want {
+		t.Errorf("Message = %q, want %q", taskErr.Message, want)
+	}
+}
+
 func TestWaitForTaskTransientErrorThenSuccess(t *testing.T) {
 	fastTaskPoll(t)
 
