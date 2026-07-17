@@ -31,7 +31,9 @@ func TestAccServerDataSource(t *testing.T) {
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "hostname"),
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "status"),
 					resource.TestCheckResourceAttrSet("data.netcup_server.test", "product_name"),
-					testCheckResourceAttrGreaterThanZero("data.netcup_server.test", "ipv4_addresses.#"),
+					// A server may be IPv6-only, so accept an address of either
+					// family rather than requiring IPv4.
+					testCheckResourceAttrAnyGreaterThanZero("data.netcup_server.test", "ipv4_addresses.#", "ipv6_addresses.#"),
 				),
 			},
 		},
