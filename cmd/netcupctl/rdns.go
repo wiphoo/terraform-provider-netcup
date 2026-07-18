@@ -7,9 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/netip"
 	"os"
 	"text/tabwriter"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 func cmdRDNS(args []string) error {
@@ -174,7 +175,7 @@ func rdnsDelete(args []string, out io.Writer) error {
 
 	// Canonicalize the IP for display so the output always shows a consistent
 	// form (RFC 5952 for IPv6), matching what rdnsGet and rdnsSet display.
-	canon, err := canonicalDisplayIP(positional[0])
+	canon, err := netcup.CanonicalizeIP(positional[0])
 	if err != nil {
 		return err
 	}
@@ -188,17 +189,4 @@ func rdnsDelete(args []string, out io.Writer) error {
 
 	fmt.Fprintf(out, "Deleted reverse DNS for %s\n", canon)
 	return nil
-}
-
-// canonicalDisplayIP parses ip and returns its canonical string form (RFC 5952
-// for IPv6; IPv4-in-IPv6 addresses are unmapped to dotted-quad). This is the
-// same logic as netcup.canonicalizeIP but replicated in the CLI package to
-// avoid depending on an unexported SDK function.
-func canonicalDisplayIP(ip string) (string, error) {
-	addr, err := netip.ParseAddr(ip)
-	if err != nil {
-		return "", fmt.Errorf("invalid IP address %q: %w", ip, err)
-	}
-	addr = addr.Unmap()
-	return addr.String(), nil
 }

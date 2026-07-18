@@ -487,6 +487,24 @@ func TestRDNSDelete_InvalidIP(t *testing.T) {
 	}
 }
 
+func TestRDNSDelete_ZoneRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("API should not be called for a zoned address")
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	err := rdnsDelete([]string{"fe80::1%eth0"}, &buf)
+	if err == nil {
+		t.Fatal("rdnsDelete() error = nil, want error for zoned address")
+	}
+	if !strings.Contains(err.Error(), "zone") {
+		t.Errorf("error should mention zone identifiers, got: %v", err)
+	}
+}
+
 func TestRDNSDelete_DeleteFails(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
