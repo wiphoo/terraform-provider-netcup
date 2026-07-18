@@ -170,7 +170,7 @@ yields identical cassettes.
 | `userId` | fixed synthetic value (`10001`), regardless of the real value |
 | `id` (any JSON number under key `"id"`: server id, template id, address id, site id) | mapped to a deterministic synthetic integer |
 | `name` | mapped to a deterministic synthetic prefix (`server-<hash>`) |
-| `username` (`TaskInfo.executingUser` — the CCP customer number, on every async task response) | `user-<hash>` |
+| `username` (`TaskInfo.executingUser` — the CCP customer number, on every async task response) | fixed placeholder (`vcr-redacted-username`) — a non-derived constant, since the customer number's small numeric space would make an unsalted hash reversible |
 | `password` (`RescueSystemStatus`, populated while rescue is active — a live root credential) | fixed placeholder (`vcr-redacted-password`) |
 | `description` (snapshot free-text — may carry arbitrary notes) | fixed placeholder (`vcr-redacted-description`) |
 

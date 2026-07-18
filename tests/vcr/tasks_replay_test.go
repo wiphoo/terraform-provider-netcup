@@ -9,6 +9,16 @@ import (
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
+// replayWaitTimeout bounds WaitForTask in the replay tests. If a cassette stops
+// matching (exhausted, or an SDK request change), go-vcr returns
+// ErrInteractionNotFound; WaitForTask sees that as a non-*APIError and treats it
+// as transient, retrying until its context ends. With an unbounded context that
+// would hang CI until the global `go test` timeout instead of failing promptly,
+// so these waits get a short deadline — the normal path completes in well under
+// a millisecond (WithTaskPollInterval shrinks the poll gap), so this only ever
+// bites a genuinely broken cassette.
+const replayWaitTimeout = 30 * time.Second
+
 // TestWaitForTaskFinished replays a power change (202 TaskInfo) followed by the
 // GET /v1/tasks/{uuid} polls it produces, transitioning RUNNING -> FINISHED.
 // The UUID flows from the 202 body into WaitForTask, so no cassette-derived
@@ -30,7 +40,9 @@ func TestWaitForTaskFinished(t *testing.T) {
 		t.Fatalf("SetPowerState() task = %+v, want a task with a UUID", task)
 	}
 
-	final, err := client.WaitForTask(context.Background(), task.UUID)
+	ctx, cancel := context.WithTimeout(context.Background(), replayWaitTimeout)
+	defer cancel()
+	final, err := client.WaitForTask(ctx, task.UUID)
 	if err != nil {
 		t.Fatalf("WaitForTask() error = %v", err)
 	}
@@ -56,7 +68,9 @@ func TestWaitForTaskError(t *testing.T) {
 	client := NewClient(t, cassetteName, netcup.WithTaskPollInterval(time.Millisecond))
 	uuid := taskUUIDFromCassette(t, cassetteName)
 
-	_, err := client.WaitForTask(context.Background(), uuid)
+	ctx, cancel := context.WithTimeout(context.Background(), replayWaitTimeout)
+	defer cancel()
+	_, err := client.WaitForTask(ctx, uuid)
 	var taskErr *netcup.TaskError
 	if !errors.As(err, &taskErr) {
 		t.Fatalf("WaitForTask() error = %v, want *netcup.TaskError", err)

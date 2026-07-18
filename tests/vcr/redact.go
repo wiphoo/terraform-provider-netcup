@@ -58,6 +58,14 @@ const redactedPasswordPlaceholder = "vcr-redacted-password"
 // to a single fixed marker.
 const redactedDescriptionPlaceholder = "vcr-redacted-description"
 
+// redactedUsernamePlaceholder replaces every SCP username (TaskInfo.executingUser
+// — the CCP customer number). Like userId (fakeUserIDValue), a recording account
+// has exactly one username, so there is nothing to distinguish between values and
+// no need to derive one. A fixed marker is also strictly safer than a hash: the
+// customer number is a small, enumerable numeric space, so an unsalted hash of it
+// could be brute-forced back to the real identifier (PR #88 review).
+const redactedUsernamePlaceholder = "vcr-redacted-username"
+
 // fakeHostnameDomain is the fixed domain every hostname/nickname/PTR is
 // rewritten under.
 const fakeHostnameDomain = "example.com"
@@ -343,7 +351,7 @@ func redactField(key string, val interface{}) interface{} {
 		if !ok || s == "" {
 			return val
 		}
-		return fakeUsername(s)
+		return redactedUsernamePlaceholder
 	case key == "password":
 		s, ok := val.(string)
 		if !ok || s == "" {
@@ -448,10 +456,14 @@ func redactFormValues(values url.Values) {
 // body.
 var rdnsURLPattern = regexp.MustCompile(`^(.*/v1/rdns/(ipv4|ipv6)/)([^/?]+)(.*)$`)
 
-// serverURLPattern matches the server detail endpoint URL, e.g.
-// /v1/servers/990099. Server IDs are redacted from the URL alongside the
-// body "id" field.
-var serverURLPattern = regexp.MustCompile(`^(.*/v1/servers/)([0-9]+)(\?[^/]*)?$`)
+// serverURLPattern matches the server detail endpoint URL (/v1/servers/990099)
+// and every per-server sub-resource under it — /v1/servers/{id}/snapshots,
+// /imageflavours, /rescuesystem, ... — with an optional query string. Group 3
+// captures everything after the id (a "/sub/path" and/or "?query"), so the id
+// is redacted from the URL in all of these shapes, not just the bare detail
+// URL, keeping a live VCR_RECORD refresh of the sub-resource cassettes from
+// committing the real server id alongside the redacted body "id" field.
+var serverURLPattern = regexp.MustCompile(`^(.*/v1/servers/)([0-9]+)([/?].*)?$`)
 
 // fakeServerID deterministically maps a real id value (e.g. server id,
 // template id, address id, site id) to a synthetic one. The same real
@@ -475,19 +487,6 @@ func fakeServerName(real string) string {
 	}
 	h := hashBytes("name:" + real)
 	return fmt.Sprintf("server-%x", h[:4])
-}
-
-// fakeUsername deterministically maps a real SCP username to a synthetic one.
-// The SCP username is the CCP customer number (see docs/SCP-API-NOTES.md), so a
-// real one is an account identifier: it appears in TaskInfo.executingUser and
-// must not be committed. The synthetic form is user-<hash>, which
-// TestCassettesAreScrubbed's checkUsernamesAreSynthetic re-derives independently.
-func fakeUsername(real string) string {
-	if real == "" {
-		return real
-	}
-	h := hashBytes("username:" + real)
-	return fmt.Sprintf("user-%x", h[:4])
 }
 
 // redactURL rewrites the IP embedded in an rDNS endpoint URL or the server

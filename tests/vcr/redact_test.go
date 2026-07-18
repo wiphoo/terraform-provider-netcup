@@ -504,6 +504,22 @@ func TestRedactURLServer(t *testing.T) {
 	}
 }
 
+// TestRedactURLServerSubResource covers the per-server sub-resource endpoints
+// (snapshots, imageflavours, rescuesystem, and a power PATCH's stateOption
+// query): the server id must be redacted from the URL in every one, so a live
+// VCR_RECORD refresh of those cassettes never commits the real server id.
+func TestRedactURLServerSubResource(t *testing.T) {
+	const base = "https://www.servercontrolpanel.de/scp-core/api/v1/servers/"
+	fakeID := fakeServerID(json.Number("990099")).String()
+	for _, suffix := range []string{"/snapshots", "/imageflavours", "/rescuesystem", "?stateOption=POWERCYCLE"} {
+		raw := base + "990099" + suffix
+		want := base + fakeID + suffix
+		if got := redactURL(raw); got != want {
+			t.Errorf("redactURL(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 // TestMatchInteraction covers the cassette.Matcher installed via
 // rec.SetMatcher in recorder.go (replacing go-vcr's DefaultMatcher's exact
 // method+URL string equality): a replay-mode request built from the real IP
@@ -571,28 +587,6 @@ func TestFakeServerNameEmptyPassesThrough(t *testing.T) {
 	}
 }
 
-func TestFakeUsernameDeterministicAndSynthetic(t *testing.T) {
-	a := fakeUsername("555123")
-	b := fakeUsername("555123")
-	if a != b {
-		t.Fatalf("fakeUsername not deterministic: %q != %q", a, b)
-	}
-	if a == "555123" {
-		t.Errorf("fakeUsername returned the real value unchanged: %s", a)
-	}
-	// syntheticUsernamePattern lives in scrub_test.go (same package) — the guard
-	// must accept exactly what the redactor emits.
-	if !syntheticUsernamePattern.MatchString(a) {
-		t.Errorf("fakeUsername(%q) = %q, want to match %s", "555123", a, syntheticUsernamePattern)
-	}
-}
-
-func TestFakeUsernameEmptyPassesThrough(t *testing.T) {
-	if got := fakeUsername(""); got != "" {
-		t.Errorf("fakeUsername(\"\") = %q, want empty string", got)
-	}
-}
-
 // TestRedactJSONBodyV030Fields covers the fields the v0.3.0 surface adds:
 // TaskInfo.executingUser.username (an account identifier), the rescue-system
 // password (a live root credential), and a snapshot description (free text).
@@ -614,11 +608,8 @@ func TestRedactJSONBodyV030Fields(t *testing.T) {
 	}
 
 	user := got["executingUser"].(map[string]interface{})
-	if user["username"] == "555123" {
-		t.Errorf("executingUser.username was not redacted: %v", user["username"])
-	}
-	if u, ok := user["username"].(string); ok && !syntheticUsernamePattern.MatchString(u) {
-		t.Errorf("executingUser.username = %q, want user-<hash>", u)
+	if user["username"] != redactedUsernamePlaceholder {
+		t.Errorf("executingUser.username = %v, want %q", user["username"], redactedUsernamePlaceholder)
 	}
 	if got["password"] != redactedPasswordPlaceholder {
 		t.Errorf("password = %v, want %q", got["password"], redactedPasswordPlaceholder)

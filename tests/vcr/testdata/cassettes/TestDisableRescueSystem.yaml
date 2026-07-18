@@ -10,7 +10,7 @@ interactions:
     url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/rescuesystem
     method: DELETE
   response:
-    body: '{"uuid":"bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb","name":"DisableRescueSystem","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"user-1a2b3c4d"},"taskProgress":null,"onRollback":false}'
+    body: '{"uuid":"bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb","name":"DisableRescueSystem","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":null,"onRollback":false}'
     headers:
       Content-Type:
       - application/json

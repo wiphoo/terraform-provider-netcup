@@ -49,10 +49,6 @@ var (
 	passwordFieldPattern = regexp.MustCompile(`"password"\s*:\s*"([^"]*)"`)
 )
 
-// syntheticUsernamePattern is the shape fakeUsername emits (user-<8 hex>). The
-// guard re-derives "is this OK" from the shape rather than calling the redactor.
-var syntheticUsernamePattern = regexp.MustCompile(`^user-[0-9a-f]{8}$`)
-
 var (
 	_, fakeIPv4CIDR, _ = net.ParseCIDR("203.0.113.0/24")
 	_, fakeIPv6CIDR, _ = net.ParseCIDR("2001:db8::/32")
@@ -213,14 +209,15 @@ func checkIPv6sInRange(t *testing.T, text string) {
 
 // checkUsernamesAreSynthetic catches a live SCP username (the CCP customer
 // number) in a JSON body — it appears in TaskInfo.executingUser on every async
-// task response (power, rescue). The redactor maps it to user-<hash>, so any
-// "username" value not matching that shape is an unredacted account identifier.
+// task response (power, rescue). The redactor replaces it with a fixed marker
+// (like userId), so any other non-empty "username" value is an unredacted
+// account identifier.
 func checkUsernamesAreSynthetic(t *testing.T, body string) {
 	t.Helper()
 	for _, m := range usernameFieldPattern.FindAllStringSubmatch(body, -1) {
 		v := m[1]
-		if v != "" && !syntheticUsernamePattern.MatchString(v) {
-			t.Errorf("found a non-synthetic username: %q (want user-<hash>)", truncate(v, 20))
+		if v != "" && v != redactedUsernamePlaceholder {
+			t.Errorf("found a non-synthetic username: %q (want %q)", truncate(v, 20), redactedUsernamePlaceholder)
 		}
 	}
 }
