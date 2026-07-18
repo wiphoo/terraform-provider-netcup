@@ -13,14 +13,17 @@ import (
 // skipInRecordMode skips a test when VCR_RECORD=1. Some v0.3.0 cassettes are
 // authored from the documented SCP OpenAPI schema rather than a live capture,
 // because the interaction they model can't be reproduced idempotently against a
-// live server: a task that ends in ERROR (can't be forced on demand), an
+// live server, or a live recording would leak an identifier the save filter has
+// no rule for: a task that ends in ERROR (can't be forced on demand), an
 // *active* rescue system or rescue enable/disable (each reboots the server, and
-// enabling twice is a 400), a power change (reboots the server), and an empty
-// snapshot list (depends on the server having no snapshots). These stay
-// replay-only so `make acc-record` neither reboots the maintainer's server nor
-// overwrites a hand-authored fixture with a non-matching live one. The
-// read-only status/list cassettes (imageflavours, snapshots, rescue status
-// inactive) are omitted here and remain live-refreshable. See CONTRIBUTING.md.
+// enabling twice is a 400), a power change (reboots the server), an empty
+// snapshot list (depends on the server having no snapshots), and the snapshot
+// list itself (SnapshotMinimal.uuid is an unredacted live resource identifier).
+// These stay replay-only so `make acc-record` neither reboots the maintainer's
+// server, commits a live UUID, nor overwrites a hand-authored fixture with a
+// non-matching live one. The remaining read-only cassettes (imageflavours and
+// rescue status inactive — neither carries a UUID) are omitted here and remain
+// live-refreshable. See CONTRIBUTING.md.
 func skipInRecordMode(t *testing.T) {
 	t.Helper()
 	if os.Getenv("VCR_RECORD") == "1" {

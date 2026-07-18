@@ -7,10 +7,18 @@ import (
 
 // TestListSnapshots replays GET /v1/servers/{id}/snapshots and asserts the
 // snapshot list decodes, including the nullable description and
-// exportedSizeInKiB. Read-only, so it is live-refreshable with VCR_RECORD=1; a
-// live re-record on a server with no snapshots yields an empty list, which the
-// len-guarded shape checks below tolerate.
+// exportedSizeInKiB.
+//
+// Replay-only: although the call is read-only, SnapshotMinimal.uuid is a live
+// resource identifier with no save-filter redaction rule (and, being an opaque
+// UUID with no distinctive shape, no feasible scrub guard — unlike the marked
+// synthetic ranges used for IPs/MACs), so a VCR_RECORD refresh against a server
+// with snapshots would commit real snapshot UUIDs. Keeping it replay-only
+// avoids that; the fixture is authored from the documented SnapshotMinimal
+// schema. See CONTRIBUTING.md and PR #88.
 func TestListSnapshots(t *testing.T) {
+	skipInRecordMode(t)
+
 	const cassetteName = "TestListSnapshots"
 	client := NewClient(t, cassetteName)
 	id := ServerIDForTest(t, cassetteName)
@@ -19,11 +27,8 @@ func TestListSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSnapshots() error = %v", err)
 	}
-	if snaps == nil {
-		t.Fatal("ListSnapshots() returned nil slice, want a decoded (possibly empty) list")
-	}
 	if len(snaps) == 0 {
-		return // an empty list is a valid response (e.g. a live re-record)
+		t.Fatal("ListSnapshots() returned no snapshots, want the recorded fixtures")
 	}
 
 	first := snaps[0]

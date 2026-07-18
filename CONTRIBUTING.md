@@ -209,13 +209,19 @@ the documented SCP OpenAPI schema** (`2026.0703.095128`) with the same
 synthetic values, because their interaction can't be reproduced idempotently
 against a live server — a task that ends in `ERROR`, an *active* rescue system
 or rescue enable/disable (each reboots the server), a power change (reboots the
-server), and an empty snapshot list. Those tests call `skipInRecordMode(t)` so
-`make acc-record` neither reboots the maintainer's server nor overwrites the
-authored fixture with a non-matching live one. The read-only status/list
-cassettes — `imageflavours`, `snapshots`, and rescue **status (inactive)** — are
+server), and an empty snapshot list — or because a live recording would leak an
+identifier the save filter has no rule for. The **snapshot list** falls in the
+latter bucket: `SnapshotMinimal.uuid` is a live resource identifier, and an
+opaque UUID has no distinctive shape to route into a documentation range or to
+assert in the scrub guard (unlike IPs/MACs), so `TestListSnapshots` is
+replay-only rather than committing real UUIDs on refresh. All of these call
+`skipInRecordMode(t)` so `make acc-record` neither reboots the maintainer's
+server, commits a live UUID, nor overwrites an authored fixture with a
+non-matching live one. The remaining read-only cassettes — `imageflavours` and
+rescue **status (inactive)**, neither of which carries a UUID — are
 live-refreshable as usual. The redactor still covers every field the *live*
-responses would carry (see the `password`/`username` rows above), so switching
-any of these to a live recording later stays safe.
+responses of those would carry (see the `password`/`username` rows above), so
+switching them to a live recording later stays safe.
 
 ---
 
