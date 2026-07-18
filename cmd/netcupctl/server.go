@@ -34,6 +34,8 @@ func cmdServer(args []string) error {
 		return serverSnapshots(args[1:], os.Stdout)
 	case "power":
 		return serverPower(args[1:], os.Stdout, os.Stderr, os.Stdin)
+	case "rescue":
+		return serverRescue(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "help", "-h", "--help":
 		usageServer(os.Stdout)
 		return nil
@@ -52,9 +54,11 @@ Usage:
   netcupctl server images <id> [--json]
   netcupctl server snapshots <id> [--json]
   netcupctl server power <subcommand> <id> [flags]
+  netcupctl server rescue <subcommand> <id> [flags]
   netcupctl server help          show this help
 
 Run 'netcupctl server power help' for power subcommands.
+Run 'netcupctl server rescue help' for rescue subcommands.
 `)
 }
 
@@ -411,7 +415,7 @@ Flags:
 func serverPowerStatus(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("server-power-status", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
-	id, done, err := parseServerIDArg(fs, args, "server power status")
+	id, done, err := parseServerIDArg(fs, args, "server power status", usageServerPower)
 	if err != nil || done {
 		return err
 	}
@@ -454,7 +458,7 @@ func serverPowerSet(action powerAction, args []string, out, errW io.Writer, in i
 	hardFlag := fs.Bool("hard", false, "use the hard stateOption")
 	forceFlag := fs.Bool("force", false, "skip the confirmation prompt")
 	yesFlag := fs.Bool("yes", false, "alias for --force")
-	id, done, err := parseServerIDArg(fs, args, "server power "+action.verb)
+	id, done, err := parseServerIDArg(fs, args, "server power "+action.verb, usageServerPower)
 	if err != nil || done {
 		return err
 	}
@@ -503,12 +507,15 @@ func serverPowerSet(action powerAction, args []string, out, errW io.Writer, in i
 	return printPowerResult(out, *jsonFlag, id, action.state, stateOption, task, waited)
 }
 
-// confirmDowntime writes the downtime warning and prompt to errW (stderr, not
-// the result stream) and reads a yes/no answer from in. Only "y"/"yes"
-// (case-insensitive) confirms; anything else (including EOF) declines.
-func confirmDowntime(errW io.Writer, in io.Reader, action powerAction, id int32) (bool, error) {
-	fmt.Fprintf(errW, "WARNING: %s\n", action.warning)
-	fmt.Fprintf(errW, "Continue with 'power %s' on server %d? [y/N]: ", action.verb, id)
+// confirmAction writes a warning and a yes/no prompt to errW (stderr, not the
+// result stream, so --json output on stdout stays parseable) and reads the
+// answer from in. warning is shown as "WARNING: <warning>"; prompt is the
+// question shown before "[y/N]: ". Only "y"/"yes" (case-insensitive) confirms;
+// anything else (including EOF) declines. It is shared by the power and rescue
+// confirmation prompts.
+func confirmAction(errW io.Writer, in io.Reader, warning, prompt string) (bool, error) {
+	fmt.Fprintf(errW, "WARNING: %s\n", warning)
+	fmt.Fprintf(errW, "%s [y/N]: ", prompt)
 
 	line, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -520,6 +527,13 @@ func confirmDowntime(errW io.Writer, in io.Reader, action powerAction, id int32)
 	default:
 		return false, nil
 	}
+}
+
+// confirmDowntime prompts before a power change that causes downtime, delegating
+// to confirmAction with power-specific wording.
+func confirmDowntime(errW io.Writer, in io.Reader, action powerAction, id int32) (bool, error) {
+	return confirmAction(errW, in, action.warning,
+		fmt.Sprintf("Continue with 'power %s' on server %d?", action.verb, id))
 }
 
 // printPowerResult renders the outcome of a power change. task is nil for a
@@ -559,9 +573,11 @@ func printPowerResult(out io.Writer, asJSON bool, id int32, state netcup.PowerSt
 
 // parseServerIDArg parses fs and requires exactly one positional server ID,
 // returning it as an int32. context is used in error messages (e.g. "server
-// power off"). done is true when the caller should stop with a clean exit — a
-// -h/--help request — in which case id/err are zero and the caller returns nil.
-func parseServerIDArg(fs *flag.FlagSet, args []string, context string) (id int32, done bool, err error) {
+// power off"), and usage prints the relevant subcommand help on a missing-ID
+// error (e.g. usageServerPower vs usageServerRescue). done is true when the
+// caller should stop with a clean exit — a -h/--help request — in which case
+// id/err are zero and the caller returns nil.
+func parseServerIDArg(fs *flag.FlagSet, args []string, context string, usage func(io.Writer)) (id int32, done bool, err error) {
 	positional, err := parsePositionalArgs(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -570,7 +586,7 @@ func parseServerIDArg(fs *flag.FlagSet, args []string, context string) (id int32
 		return 0, false, err
 	}
 	if len(positional) == 0 {
-		usageServerPower(os.Stderr)
+		usage(os.Stderr)
 		return 0, false, fmt.Errorf("%s requires a server ID", context)
 	}
 	if len(positional) > 1 {
