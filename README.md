@@ -64,6 +64,109 @@ export NETCUP_REFRESH_TOKEN="..."
 netcupctl server list
 ```
 
+## netcupctl operations
+
+Beyond listing servers, `netcupctl` can control a server's power state and rescue
+system and list its installable images and snapshots. All commands take a numeric
+server `<id>` (from `netcupctl server list`) and support `--json` for scripting.
+
+> ⚠️ **Some of these commands cause downtime.** Read
+> [Operational risk & downtime](#operational-risk--downtime) before running the
+> power or rescue commands.
+
+### Power state
+
+```bash
+# Read the current live power state (RUNNING / SHUTOFF / PAUSED / …).
+netcupctl server power status <id>
+
+# Power on (no downtime, no confirmation).
+netcupctl server power on <id>
+
+# Soft/ACPI shutdown — prompts for confirmation (causes downtime).
+netcupctl server power off <id>
+
+# Hard poweroff, skip the prompt, and wait for the async task to finish.
+netcupctl server power off <id> --hard --force --wait
+
+# Suspend (pause) the server.
+netcupctl server power suspend <id>
+
+# Reboot: soft power-cycle by default, --hard for a hard reset.
+netcupctl server power reboot <id>
+netcupctl server power reboot <id> --hard
+```
+
+Flags: `--wait` polls the async task to a terminal state and prints the result;
+`--hard` selects the hard variant (`POWEROFF` for `off`, `RESET` for `reboot`);
+`--force` (alias `--yes`) skips the downtime confirmation prompt; `--json` emits
+machine-readable output.
+
+### Rescue system
+
+```bash
+# Show whether rescue mode is active (and the password, when active).
+netcupctl server rescue status <id>
+
+# Enable rescue mode — REBOOTS into the rescue environment (prompts to confirm).
+# --wait polls to completion, then reads back and prints the rescue password.
+netcupctl server rescue enable <id> --wait
+
+# Disable rescue mode — REBOOTS back into the normal OS (prompts to confirm).
+netcupctl server rescue disable <id> --wait
+```
+
+The rescue password is only available while rescue mode is active. With
+`enable --wait` it is printed once activation finishes; otherwise read it later
+with `netcupctl server rescue status <id>`.
+
+### Images and snapshots (read-only)
+
+```bash
+# List the OS images installable on a server (ID, name, alias, base image).
+netcupctl server images <id>
+
+# List the server's snapshots (name, created, state, online, exported).
+netcupctl server snapshots <id>
+
+# Both support --json for the full objects.
+netcupctl server images <id> --json
+netcupctl server snapshots <id> --json
+```
+
+Snapshot listing is read-only; snapshot create/delete/restore is planned for a
+later release. See the [Roadmap](docs/ROADMAP.md).
+
+### Operational risk & downtime
+
+Several `netcupctl` commands are **operationally destructive** — they interrupt
+service on a running server. Treat them with the same care as running the
+equivalent action from the SCP web panel.
+
+| Command | Effect | Downtime |
+|---------|--------|----------|
+| `server power off` | Shuts the server down (soft/ACPI; `--hard` = forced `POWEROFF`) | **Yes** — server goes offline until powered on again |
+| `server power suspend` | Pauses (suspends) the server | **Yes** — server is unresponsive until resumed |
+| `server power reboot` | Power-cycles the server (soft; `--hard` = `RESET`) | **Yes** — brief outage during the reboot |
+| `server power on` | Powers the server on | No |
+| `server rescue enable` | **Reboots** the server into the rescue environment | **Yes** — the normal OS is not running while in rescue mode |
+| `server rescue disable` | **Reboots** the server back into the normal OS | **Yes** — brief outage during the reboot |
+| `server power status` / `rescue status` / `images` / `snapshots` | Read-only | No |
+
+Safeguards built into the CLI:
+
+- **Confirmation prompts.** `power off`, `power suspend`, `power reboot`,
+  `rescue enable`, and `rescue disable` prompt for confirmation before acting.
+  The warning and prompt are written to **stderr**, so `--json` output on stdout
+  stays clean.
+- **`--force` / `--yes`** skips the confirmation prompt for non-interactive or
+  scripted use — only pass it when you have already accepted the downtime.
+- **`--wait`** polls the underlying async task (`202 TaskInfo`) to a terminal
+  state so scripts can observe success/failure instead of firing and forgetting.
+- **`--hard`** opts into the forced variants (`POWEROFF` / `RESET`), which do not
+  give the guest OS a chance to shut down cleanly — prefer the soft default
+  unless the server is unresponsive.
+
 ## Authentication model
 
 The Netcup SCP REST API is an OAuth 2.0 / OIDC API backed by Keycloak. There is no
