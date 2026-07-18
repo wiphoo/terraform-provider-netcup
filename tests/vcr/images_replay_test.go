@@ -23,20 +23,28 @@ func TestListImageFlavours(t *testing.T) {
 		t.Fatal("ListImageFlavours() returned no flavours, want at least one")
 	}
 
-	first := flavours[0]
-	if first.ID == 0 {
-		t.Errorf("flavours[0].ID = 0, want a non-zero image flavour id")
+	// Assertions are position-independent so a live VCR_RECORD=1 refresh of this
+	// read-only cassette (which returns the real OS catalog in its own order,
+	// with `image` nullable per the OpenAPI) doesn't fail on an artifact of the
+	// authored fixture. Required fields (id, alias, text) must hold for every
+	// flavour; the nested `image` must decode to a real object or a nil pointer
+	// (never a fabricated zero struct), and at least one flavour must carry it.
+	sawImage := false
+	for _, f := range flavours {
+		if f.ID == 0 {
+			t.Errorf("flavour %+v has a zero ID, want a non-zero image flavour id", f)
+		}
+		if f.Alias == "" || f.Text == "" {
+			t.Errorf("flavour %d = %+v, want non-empty Alias and Text", f.ID, f)
+		}
+		if f.Image != nil {
+			sawImage = true
+			if f.Image.ID == 0 {
+				t.Errorf("flavour %d has a non-nil Image with a zero ID", f.ID)
+			}
+		}
 	}
-	if first.Alias == "" || first.Text == "" {
-		t.Errorf("flavours[0] = %+v, want non-empty Alias and Text", first)
-	}
-	if first.Image == nil || first.Image.ID == 0 {
-		t.Errorf("flavours[0].Image = %+v, want a decoded nested image with an id", first.Image)
-	}
-
-	// The last recorded flavour has a null image — the nullable field must
-	// decode to a nil pointer, not panic or fabricate a zero image.
-	if last := flavours[len(flavours)-1]; last.Image != nil {
-		t.Errorf("flavours[last].Image = %+v, want nil for a null image", last.Image)
+	if !sawImage {
+		t.Error("no flavour carried a decoded nested image; want at least one")
 	}
 }
