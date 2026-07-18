@@ -14,6 +14,27 @@ import (
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
+// isolateNetcupEnv clears the ambient NETCUP_* environment variables for the
+// duration of a test so the provider unit tests are hermetic. Without it, a
+// maintainer running `make acc` (which exports NETCUP_ACCESS_TOKEN and
+// NETCUP_REFRESH_TOKEN) would have those real credentials leak into Configure:
+// a non-JWT test token seeds a zero expiry, the refreshing TokenSource then
+// refreshes against the live OIDC endpoint, and a real bearer token overrides
+// the value the test asserts. Tests set only the vars they intend to exercise
+// after calling this. Empty is equivalent to unset for resolveConfigString and
+// netcup.New (both treat os.Getenv() == "" as "not set").
+func isolateNetcupEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"NETCUP_ACCESS_TOKEN",
+		"NETCUP_REFRESH_TOKEN",
+		"NETCUP_API_ENDPOINT",
+		"NETCUP_OIDC_ENDPOINT",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
 // configureRequest builds a provider.ConfigureRequest from the given schema
 // attribute values, driving Configure the same way Terraform would after
 // parsing an HCL provider block. A nil value means the attribute was omitted
@@ -57,6 +78,8 @@ func newTestSchema(t *testing.T) provider.SchemaResponse {
 }
 
 func TestConfigure_UsesConfigAccessToken(t *testing.T) {
+	isolateNetcupEnv(t)
+
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -94,6 +117,8 @@ func TestConfigure_UsesConfigAccessToken(t *testing.T) {
 }
 
 func TestConfigure_FallsBackToEnv(t *testing.T) {
+	isolateNetcupEnv(t)
+
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -128,6 +153,8 @@ func TestConfigure_FallsBackToEnv(t *testing.T) {
 }
 
 func TestConfigure_ConfigWinsOverEnv(t *testing.T) {
+	isolateNetcupEnv(t)
+
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -160,6 +187,8 @@ func TestConfigure_ConfigWinsOverEnv(t *testing.T) {
 }
 
 func TestConfigure_MalformedAccessTokenFallsBackToZeroExpiry(t *testing.T) {
+	isolateNetcupEnv(t)
+
 	// A non-JWT access token can't be parsed for an "exp" claim.
 	// ParseAccessTokenExpiry returning an error must not fail Configure or
 	// panic; the provider falls back to a zero expiry.
@@ -197,6 +226,7 @@ func TestConfigure_MalformedAccessTokenFallsBackToZeroExpiry(t *testing.T) {
 // applied) surfaces a clear diagnostic instead of silently resolving to ""
 // and overriding the env var fallback with an empty token.
 func TestConfigure_UnknownAccessTokenErrorsInsteadOfClobberingEnv(t *testing.T) {
+	isolateNetcupEnv(t)
 	t.Setenv("NETCUP_ACCESS_TOKEN", "env-token")
 
 	schemaResp := newTestSchema(t)
@@ -229,6 +259,8 @@ func TestConfigure_UnknownAccessTokenErrorsInsteadOfClobberingEnv(t *testing.T) 
 // TestConfigure_UnknownEndpointErrors covers the same unknown-value guard for
 // a non-token attribute, proving all four schema attributes are checked.
 func TestConfigure_UnknownEndpointErrors(t *testing.T) {
+	isolateNetcupEnv(t)
+
 	schemaResp := newTestSchema(t)
 	req := configureRequest(t, schemaResp, map[string]any{
 		"api_endpoint": tftypes.UnknownValue,
