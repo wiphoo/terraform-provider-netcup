@@ -90,6 +90,8 @@ labels:
     description: No activity for 90 days; will be closed if it stays inactive
 
 branches:
+  # Applied to `main` by the Settings app; requires the app to have
+  # Administration: Read & Write on the repo.
   - name: main
     protection:
       # Require CI to pass before merge, and require branches to be up to date
