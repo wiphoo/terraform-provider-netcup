@@ -39,6 +39,20 @@ var userIDFieldPattern = regexp.MustCompile(`"userId"\s*:\s*(-?[0-9]+)`)
 // tokenFieldJSONPattern matches a JSON access_token/refresh_token field.
 var tokenFieldJSONPattern = regexp.MustCompile(`"(access_token|refresh_token)"\s*:\s*"([^"]*)"`)
 
+// usernameFieldPattern matches a JSON "username" field with a string value,
+// e.g. `"username":"123456"` (TaskInfo.executingUser). passwordFieldPattern
+// matches a JSON "password" field with a string value (RescueSystemStatus,
+// active). Both only match the string form, so a `null` (no password / absent)
+// is correctly ignored.
+var (
+	usernameFieldPattern = regexp.MustCompile(`"username"\s*:\s*"([^"]*)"`)
+	passwordFieldPattern = regexp.MustCompile(`"password"\s*:\s*"([^"]*)"`)
+)
+
+// syntheticUsernamePattern is the shape fakeUsername emits (user-<8 hex>). The
+// guard re-derives "is this OK" from the shape rather than calling the redactor.
+var syntheticUsernamePattern = regexp.MustCompile(`^user-[0-9a-f]{8}$`)
+
 var (
 	_, fakeIPv4CIDR, _ = net.ParseCIDR("203.0.113.0/24")
 	_, fakeIPv6CIDR, _ = net.ParseCIDR("2001:db8::/32")
@@ -96,6 +110,8 @@ func TestCassettesAreScrubbed(t *testing.T) {
 					checkUserIDsAreSynthetic(t, body)
 					checkTokenFieldsAreSynthetic(t, body)
 					checkMACsAreSynthetic(t, body)
+					checkUsernamesAreSynthetic(t, body)
+					checkPasswordsAreSynthetic(t, body)
 				}
 				checkIPv4sInRange(t, ia.URL)
 				checkIPv6sInRange(t, ia.URL)
@@ -191,6 +207,34 @@ func checkIPv6sInRange(t *testing.T, text string) {
 		}
 		if !fakeIPv6CIDR.Contains(ip) {
 			t.Errorf("found an IPv6 address outside RFC 3849 (2001:db8::/32): %s", m)
+		}
+	}
+}
+
+// checkUsernamesAreSynthetic catches a live SCP username (the CCP customer
+// number) in a JSON body — it appears in TaskInfo.executingUser on every async
+// task response (power, rescue). The redactor maps it to user-<hash>, so any
+// "username" value not matching that shape is an unredacted account identifier.
+func checkUsernamesAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range usernameFieldPattern.FindAllStringSubmatch(body, -1) {
+		v := m[1]
+		if v != "" && !syntheticUsernamePattern.MatchString(v) {
+			t.Errorf("found a non-synthetic username: %q (want user-<hash>)", truncate(v, 20))
+		}
+	}
+}
+
+// checkPasswordsAreSynthetic catches a live rescue-system password in a JSON
+// body (RescueSystemStatus.password, populated while rescue is active) — the
+// most sensitive field in the v0.3.0 surface. The redactor replaces it with a
+// fixed marker, so any other non-empty value is a committed root credential.
+func checkPasswordsAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range passwordFieldPattern.FindAllStringSubmatch(body, -1) {
+		v := m[1]
+		if v != "" && v != redactedPasswordPlaceholder {
+			t.Errorf("found a non-synthetic password: %q (want %q)", truncate(v, 12), redactedPasswordPlaceholder)
 		}
 	}
 }

@@ -571,6 +571,82 @@ func TestFakeServerNameEmptyPassesThrough(t *testing.T) {
 	}
 }
 
+func TestFakeUsernameDeterministicAndSynthetic(t *testing.T) {
+	a := fakeUsername("555123")
+	b := fakeUsername("555123")
+	if a != b {
+		t.Fatalf("fakeUsername not deterministic: %q != %q", a, b)
+	}
+	if a == "555123" {
+		t.Errorf("fakeUsername returned the real value unchanged: %s", a)
+	}
+	// syntheticUsernamePattern lives in scrub_test.go (same package) — the guard
+	// must accept exactly what the redactor emits.
+	if !syntheticUsernamePattern.MatchString(a) {
+		t.Errorf("fakeUsername(%q) = %q, want to match %s", "555123", a, syntheticUsernamePattern)
+	}
+}
+
+func TestFakeUsernameEmptyPassesThrough(t *testing.T) {
+	if got := fakeUsername(""); got != "" {
+		t.Errorf("fakeUsername(\"\") = %q, want empty string", got)
+	}
+}
+
+// TestRedactJSONBodyV030Fields covers the fields the v0.3.0 surface adds:
+// TaskInfo.executingUser.username (an account identifier), the rescue-system
+// password (a live root credential), and a snapshot description (free text).
+// All three must be rewritten; a null password (rescue inactive) must survive.
+func TestRedactJSONBodyV030Fields(t *testing.T) {
+	body := `{
+		"executingUser": {"id": 42, "username": "555123"},
+		"password": "s3cr3t-root-pw",
+		"description": "weekly backup for the billing db"
+	}`
+
+	out, ok := redactJSONBody(body)
+	if !ok {
+		t.Fatalf("redactJSONBody: not recognized as JSON")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("redacted output is not valid JSON: %v\n%s", err, out)
+	}
+
+	user := got["executingUser"].(map[string]interface{})
+	if user["username"] == "555123" {
+		t.Errorf("executingUser.username was not redacted: %v", user["username"])
+	}
+	if u, ok := user["username"].(string); ok && !syntheticUsernamePattern.MatchString(u) {
+		t.Errorf("executingUser.username = %q, want user-<hash>", u)
+	}
+	if got["password"] != redactedPasswordPlaceholder {
+		t.Errorf("password = %v, want %q", got["password"], redactedPasswordPlaceholder)
+	}
+	if got["description"] != redactedDescriptionPlaceholder {
+		t.Errorf("description = %v, want %q", got["description"], redactedDescriptionPlaceholder)
+	}
+}
+
+// TestRedactJSONBodyNullPasswordPreserved confirms a null password (the rescue
+// system inactive) is meaningful state, not a secret, and survives redaction.
+func TestRedactJSONBodyNullPasswordPreserved(t *testing.T) {
+	out, ok := redactJSONBody(`{"active":false,"password":null}`)
+	if !ok {
+		t.Fatalf("redactJSONBody: not recognized as JSON")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("redacted output is not valid JSON: %v\n%s", err, out)
+	}
+	if got["password"] != nil {
+		t.Errorf("password = %v, want null preserved", got["password"])
+	}
+	if got["active"] != false {
+		t.Errorf("active = %v, want false preserved", got["active"])
+	}
+}
+
 func TestMatchInteractionServer(t *testing.T) {
 	const realID = "990099"
 	fakeID := fakeServerID(json.Number(realID))

@@ -45,6 +45,19 @@ const fakeUserIDValue = 10001
 // can never trip TestCassettesAreScrubbed's own JWT-shape detector.
 const redactedTokenPlaceholder = "vcr-redacted-token"
 
+// redactedPasswordPlaceholder replaces every rescue-system password value
+// (RescueSystemStatus.password, populated only while rescue is active). A
+// rescue password is a live root credential — the single most sensitive field
+// in the v0.3.0 surface — so it is replaced with a fixed, non-secret marker
+// rather than a hash of the real value.
+const redactedPasswordPlaceholder = "vcr-redacted-password"
+
+// redactedDescriptionPlaceholder replaces every snapshot description value.
+// A description is maintainer-authored free text that can carry arbitrary PII
+// (notes, hostnames) with no structure to preserve for replay, so it collapses
+// to a single fixed marker.
+const redactedDescriptionPlaceholder = "vcr-redacted-description"
+
 // fakeHostnameDomain is the fixed domain every hostname/nickname/PTR is
 // rewritten under.
 const fakeHostnameDomain = "example.com"
@@ -325,6 +338,24 @@ func redactField(key string, val interface{}) interface{} {
 			return val
 		}
 		return fakeMAC(s)
+	case key == "username":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return fakeUsername(s)
+	case key == "password":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return redactedPasswordPlaceholder
+	case key == "description":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return redactedDescriptionPlaceholder
 	case key == "userId":
 		return fakeUserIDValue
 	default:
@@ -444,6 +475,19 @@ func fakeServerName(real string) string {
 	}
 	h := hashBytes("name:" + real)
 	return fmt.Sprintf("server-%x", h[:4])
+}
+
+// fakeUsername deterministically maps a real SCP username to a synthetic one.
+// The SCP username is the CCP customer number (see docs/SCP-API-NOTES.md), so a
+// real one is an account identifier: it appears in TaskInfo.executingUser and
+// must not be committed. The synthetic form is user-<hash>, which
+// TestCassettesAreScrubbed's checkUsernamesAreSynthetic re-derives independently.
+func fakeUsername(real string) string {
+	if real == "" {
+		return real
+	}
+	h := hashBytes("username:" + real)
+	return fmt.Sprintf("user-%x", h[:4])
 }
 
 // redactURL rewrites the IP embedded in an rDNS endpoint URL or the server

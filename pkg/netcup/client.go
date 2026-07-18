@@ -37,6 +37,13 @@ type Client struct {
 	refreshToken string
 	tokenSource  TokenSource
 	httpClient   *http.Client
+
+	// pollInterval overrides taskPollInterval for WaitForTask when > 0. It lets
+	// a caller that constructs a Client — notably the go-vcr replay tests, in an
+	// external package that cannot reach the unexported taskPollInterval package
+	// var — shrink the wait between polls so a recorded multi-poll task replays
+	// without sleeping for real seconds. Zero means "use the package default".
+	pollInterval time.Duration
 }
 
 // Option customizes a Client during construction.
@@ -76,6 +83,19 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) {
 		if h != nil {
 			c.httpClient = h
+		}
+	}
+}
+
+// WithTaskPollInterval overrides how long WaitForTask waits between polls of
+// GET /v1/tasks/{uuid}. A value <= 0 is ignored (the package default of 2s
+// applies). This is primarily for tests replaying a recorded multi-poll task,
+// which would otherwise sleep the full interval between each recorded poll; it
+// also lets a caller tune responsiveness against SCP rate limits.
+func WithTaskPollInterval(d time.Duration) Option {
+	return func(c *Client) {
+		if d > 0 {
+			c.pollInterval = d
 		}
 	}
 }

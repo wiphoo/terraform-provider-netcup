@@ -1,0 +1,19 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/rescuesystem
+    method: POST
+  response:
+    body: '{"uuid":"aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa","name":"EnableRescueSystem","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"user-1a2b3c4d"},"taskProgress":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 202 Accepted
+    code: 202
+    duration: ""

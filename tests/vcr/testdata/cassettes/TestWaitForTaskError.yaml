@@ -1,0 +1,19 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/22222222-2222-4222-8222-222222222222
+    method: GET
+  response:
+    body: '{"uuid":"22222222-2222-4222-8222-222222222222","name":"SetServerState","state":"ERROR","startedAt":"2026-07-17T11:00:00Z","finishedAt":"2026-07-17T11:00:12Z","executingUser":{"id":10001,"username":"user-1a2b3c4d"},"taskProgress":null,"message":null,"responseError":{"code":"POWER_ON_FAILED","message":"host is out of capacity"},"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""

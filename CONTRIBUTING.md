@@ -170,6 +170,9 @@ yields identical cassettes.
 | `userId` | fixed synthetic value (`10001`), regardless of the real value |
 | `id` (any JSON number under key `"id"`: server id, template id, address id, site id) | mapped to a deterministic synthetic integer |
 | `name` | mapped to a deterministic synthetic prefix (`server-<hash>`) |
+| `username` (`TaskInfo.executingUser` — the CCP customer number, on every async task response) | `user-<hash>` |
+| `password` (`RescueSystemStatus`, populated while rescue is active — a live root credential) | fixed placeholder (`vcr-redacted-password`) |
+| `description` (snapshot free-text — may carry arbitrary notes) | fixed placeholder (`vcr-redacted-description`) |
 
 **Preserved as-is:** `disabled`, `state`, `architecture`,
 `netmask` (structurally IPv4-shaped but not identifying — there are only 33
@@ -193,9 +196,26 @@ because the `"name"` key is redacted at all nesting levels.
 `TestCassettesAreScrubbed` (`tests/vcr/scrub_test.go`) is an independent guard
 that scans every committed cassette (bodies, headers, and URLs) and fails on
 any IP outside the documentation ranges above, a non-scrubbed `Authorization`
-header, a JWT (`Bearer eyJ…`) shape, or a `userId` outside the synthetic
-value. It runs in PR CI alongside the rest of `go test ./...`, with no
+header, a JWT (`Bearer eyJ…`) shape, a `userId` outside the synthetic value, a
+`username` not of the `user-<hash>` shape, or a `password` other than the
+placeholder. It runs in PR CI alongside the rest of `go test ./...`, with no
 credentials or network access.
+
+#### Recordable vs. authored cassettes (v0.3.0 async/rescue surface)
+
+Most SDK cassettes are captured live with `VCR_RECORD=1` (`make acc-record`) and
+redacted at save time. Some of the v0.3.0 cassettes are instead **authored from
+the documented SCP OpenAPI schema** (`2026.0703.095128`) with the same
+synthetic values, because their interaction can't be reproduced idempotently
+against a live server — a task that ends in `ERROR`, an *active* rescue system
+or rescue enable/disable (each reboots the server), a power change (reboots the
+server), and an empty snapshot list. Those tests call `skipInRecordMode(t)` so
+`make acc-record` neither reboots the maintainer's server nor overwrites the
+authored fixture with a non-matching live one. The read-only status/list
+cassettes — `imageflavours`, `snapshots`, and rescue **status (inactive)** — are
+live-refreshable as usual. The redactor still covers every field the *live*
+responses would carry (see the `password`/`username` rows above), so switching
+any of these to a live recording later stays safe.
 
 ---
 
