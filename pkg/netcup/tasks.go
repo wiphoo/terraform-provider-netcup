@@ -15,7 +15,8 @@ import (
 // waiting for it to reach a terminal state. netcup executes power and rescue
 // operations asynchronously (the mutating call returns 202 with a TaskInfo),
 // so WaitForTask polls across this interval until the task finishes or the
-// caller's context is done. It is a package variable so tests can shrink it.
+// caller's context is done. It is a package variable so in-package tests can
+// shrink it; external callers use WithTaskPollInterval, which takes precedence.
 var taskPollInterval = 2 * time.Second
 
 // TaskState is the lifecycle state of an asynchronous SCP task.
@@ -187,6 +188,10 @@ func (c *Client) GetTask(ctx context.Context, uuid string) (*TaskInfo, error) {
 // retry, so they are returned immediately and unwrapped, letting callers
 // recover the *APIError with errors.As instead of waiting out the window.
 func (c *Client) WaitForTask(ctx context.Context, uuid string) (*TaskInfo, error) {
+	interval := taskPollInterval
+	if c.pollInterval > 0 {
+		interval = c.pollInterval
+	}
 	var lastErr error
 	for {
 		task, err := c.GetTask(ctx, uuid)
@@ -216,7 +221,7 @@ func (c *Client) WaitForTask(ctx context.Context, uuid string) (*TaskInfo, error
 				return nil, fmt.Errorf("waiting for task %s: %w (last poll error: %v)", uuid, ctx.Err(), lastErr)
 			}
 			return nil, ctx.Err()
-		case <-time.After(taskPollInterval):
+		case <-time.After(interval):
 		}
 	}
 }

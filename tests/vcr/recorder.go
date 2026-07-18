@@ -28,7 +28,13 @@ const clientTimeout = 30 * time.Second
 // substituted and CONTRIBUTING.md's "Redaction" section for the full table.
 //
 // The cassette name should match the test function name, e.g. "TestListServers".
-func NewClient(t *testing.T, cassetteName string) *netcup.Client {
+//
+// Any extraOpts are appended after the recorder is wired, so a caller can tune
+// the client — e.g. WithTaskPollInterval to replay a multi-poll WaitForTask
+// cassette without sleeping the full interval between recorded polls. They
+// must not replace the recorder transport (WithHTTPClient) or the endpoint, or
+// replay would no longer hit the cassette.
+func NewClient(t *testing.T, cassetteName string, extraOpts ...netcup.Option) *netcup.Client {
 	t.Helper()
 
 	mode := recorder.ModeReplaying
@@ -93,7 +99,7 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 		}
 	}
 
-	return netcup.New(
+	opts := []netcup.Option{
 		// Pinned explicitly rather than left to default resolution: netcup.New
 		// falls back to the NETCUP_API_ENDPOINT env var when set, which would
 		// change the request URL and break DefaultMatcher's method+URL match
@@ -101,7 +107,11 @@ func NewClient(t *testing.T, cassetteName string) *netcup.Client {
 		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
 		netcup.WithHTTPClient(&http.Client{Transport: rec, Timeout: clientTimeout}),
 		netcup.WithAccessToken(token),
-	)
+	}
+	// Appended last so a caller-provided option wins on conflict, but see the
+	// doc comment: extraOpts must not replace the recorder transport/endpoint.
+	opts = append(opts, extraOpts...)
+	return netcup.New(opts...)
 }
 
 // checkCassetteFound returns a non-nil error when requestedMode asked for

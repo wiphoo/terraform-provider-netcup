@@ -1,0 +1,19 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/snapshots
+    method: GET
+  response:
+    body: '[{"uuid":"55555555-5555-4555-8555-555555555555","name":"server-9a8b7c6d","description":"vcr-redacted-description","disks":["vda"],"creationTime":"2026-07-10T08:30:00Z","state":"SHUTOFF","online":false,"exported":false,"exportedSizeInKiB":null},{"uuid":"66666666-6666-4666-8666-666666666666","name":"server-1122aabb","description":null,"disks":["vda","vdb"],"creationTime":"2026-07-12T09:00:00Z","state":"RUNNING","online":true,"exported":true,"exportedSizeInKiB":2097152}]'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""

@@ -45,6 +45,27 @@ const fakeUserIDValue = 10001
 // can never trip TestCassettesAreScrubbed's own JWT-shape detector.
 const redactedTokenPlaceholder = "vcr-redacted-token"
 
+// redactedPasswordPlaceholder replaces every rescue-system password value
+// (RescueSystemStatus.password, populated only while rescue is active). A
+// rescue password is a live root credential — the single most sensitive field
+// in the v0.3.0 surface — so it is replaced with a fixed, non-secret marker
+// rather than a hash of the real value.
+const redactedPasswordPlaceholder = "vcr-redacted-password"
+
+// redactedDescriptionPlaceholder replaces every snapshot description value.
+// A description is maintainer-authored free text that can carry arbitrary PII
+// (notes, hostnames) with no structure to preserve for replay, so it collapses
+// to a single fixed marker.
+const redactedDescriptionPlaceholder = "vcr-redacted-description"
+
+// redactedUsernamePlaceholder replaces every SCP username (TaskInfo.executingUser
+// — the CCP customer number). Like userId (fakeUserIDValue), a recording account
+// has exactly one username, so there is nothing to distinguish between values and
+// no need to derive one. A fixed marker is also strictly safer than a hash: the
+// customer number is a small, enumerable numeric space, so an unsalted hash of it
+// could be brute-forced back to the real identifier (PR #88 review).
+const redactedUsernamePlaceholder = "vcr-redacted-username"
+
 // fakeHostnameDomain is the fixed domain every hostname/nickname/PTR is
 // rewritten under.
 const fakeHostnameDomain = "example.com"
@@ -325,6 +346,24 @@ func redactField(key string, val interface{}) interface{} {
 			return val
 		}
 		return fakeMAC(s)
+	case key == "username":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return redactedUsernamePlaceholder
+	case key == "password":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return redactedPasswordPlaceholder
+	case key == "description":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return redactedDescriptionPlaceholder
 	case key == "userId":
 		return fakeUserIDValue
 	default:
@@ -417,10 +456,14 @@ func redactFormValues(values url.Values) {
 // body.
 var rdnsURLPattern = regexp.MustCompile(`^(.*/v1/rdns/(ipv4|ipv6)/)([^/?]+)(.*)$`)
 
-// serverURLPattern matches the server detail endpoint URL, e.g.
-// /v1/servers/990099. Server IDs are redacted from the URL alongside the
-// body "id" field.
-var serverURLPattern = regexp.MustCompile(`^(.*/v1/servers/)([0-9]+)(\?[^/]*)?$`)
+// serverURLPattern matches the server detail endpoint URL (/v1/servers/990099)
+// and every per-server sub-resource under it — /v1/servers/{id}/snapshots,
+// /imageflavours, /rescuesystem, ... — with an optional query string. Group 3
+// captures everything after the id (a "/sub/path" and/or "?query"), so the id
+// is redacted from the URL in all of these shapes, not just the bare detail
+// URL, keeping a live VCR_RECORD refresh of the sub-resource cassettes from
+// committing the real server id alongside the redacted body "id" field.
+var serverURLPattern = regexp.MustCompile(`^(.*/v1/servers/)([0-9]+)([/?].*)?$`)
 
 // fakeServerID deterministically maps a real id value (e.g. server id,
 // template id, address id, site id) to a synthetic one. The same real

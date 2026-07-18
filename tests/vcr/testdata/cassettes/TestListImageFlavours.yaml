@@ -1,0 +1,19 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/imageflavours
+    method: GET
+  response:
+    body: '[{"id":101,"name":"server-1a2b3c4d","alias":"ubuntu-22.04","text":"Ubuntu 22.04 LTS","image":{"id":11,"name":"server-5e6f7a8b"}},{"id":102,"name":"server-2b3c4d5e","alias":"debian-12","text":"Debian 12 (Bookworm)","image":{"id":12,"name":"server-6f7a8b9c"}},{"id":103,"name":"server-3c4d5e6f","alias":"rocky-9","text":"Rocky Linux 9","image":null}]'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""

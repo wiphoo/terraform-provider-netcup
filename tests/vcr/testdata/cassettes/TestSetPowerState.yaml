@@ -1,0 +1,21 @@
+---
+version: 1
+interactions:
+- request:
+    body: '{"state":"ON"}'
+    form: {}
+    headers:
+      Accept:
+      - application/json
+      Content-Type:
+      - application/merge-patch+json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123?stateOption=POWERCYCLE
+    method: PATCH
+  response:
+    body: '{"uuid":"33333333-3333-4333-8333-333333333333","name":"SetServerState","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 202 Accepted
+    code: 202
+    duration: ""

@@ -39,6 +39,18 @@ var userIDFieldPattern = regexp.MustCompile(`"userId"\s*:\s*(-?[0-9]+)`)
 // tokenFieldJSONPattern matches a JSON access_token/refresh_token field.
 var tokenFieldJSONPattern = regexp.MustCompile(`"(access_token|refresh_token)"\s*:\s*"([^"]*)"`)
 
+// usernameFieldPattern matches a JSON "username" field with a string value,
+// e.g. `"username":"123456"` (TaskInfo.executingUser). passwordFieldPattern
+// matches a JSON "password" field (RescueSystemStatus, active), and
+// descriptionFieldPattern a JSON "description" field (SnapshotMinimal). All
+// three only match the string form, so a `null` (no password / no description /
+// absent) is correctly ignored.
+var (
+	usernameFieldPattern    = regexp.MustCompile(`"username"\s*:\s*"([^"]*)"`)
+	passwordFieldPattern    = regexp.MustCompile(`"password"\s*:\s*"([^"]*)"`)
+	descriptionFieldPattern = regexp.MustCompile(`"description"\s*:\s*"([^"]*)"`)
+)
+
 var (
 	_, fakeIPv4CIDR, _ = net.ParseCIDR("203.0.113.0/24")
 	_, fakeIPv6CIDR, _ = net.ParseCIDR("2001:db8::/32")
@@ -96,6 +108,9 @@ func TestCassettesAreScrubbed(t *testing.T) {
 					checkUserIDsAreSynthetic(t, body)
 					checkTokenFieldsAreSynthetic(t, body)
 					checkMACsAreSynthetic(t, body)
+					checkUsernamesAreSynthetic(t, body)
+					checkPasswordsAreSynthetic(t, body)
+					checkDescriptionsAreSynthetic(t, body)
 				}
 				checkIPv4sInRange(t, ia.URL)
 				checkIPv6sInRange(t, ia.URL)
@@ -191,6 +206,50 @@ func checkIPv6sInRange(t *testing.T, text string) {
 		}
 		if !fakeIPv6CIDR.Contains(ip) {
 			t.Errorf("found an IPv6 address outside RFC 3849 (2001:db8::/32): %s", m)
+		}
+	}
+}
+
+// checkUsernamesAreSynthetic catches a live SCP username (the CCP customer
+// number) in a JSON body — it appears in TaskInfo.executingUser on every async
+// task response (power, rescue). The redactor replaces it with a fixed marker
+// (like userId), so any other non-empty "username" value is an unredacted
+// account identifier.
+func checkUsernamesAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range usernameFieldPattern.FindAllStringSubmatch(body, -1) {
+		v := m[1]
+		if v != "" && v != redactedUsernamePlaceholder {
+			t.Errorf("found a non-synthetic username: %q (want %q)", truncate(v, 20), redactedUsernamePlaceholder)
+		}
+	}
+}
+
+// checkPasswordsAreSynthetic catches a live rescue-system password in a JSON
+// body (RescueSystemStatus.password, populated while rescue is active) — the
+// most sensitive field in the v0.3.0 surface. The redactor replaces it with a
+// fixed marker, so any other non-empty value is a committed root credential.
+func checkPasswordsAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range passwordFieldPattern.FindAllStringSubmatch(body, -1) {
+		v := m[1]
+		if v != "" && v != redactedPasswordPlaceholder {
+			t.Errorf("found a non-synthetic password: %q (want %q)", truncate(v, 12), redactedPasswordPlaceholder)
+		}
+	}
+}
+
+// checkDescriptionsAreSynthetic catches a live snapshot description in a JSON
+// body (SnapshotMinimal.description) — maintainer-authored free text that can
+// carry arbitrary notes/PII. The redactor replaces it with a fixed marker, so
+// any other non-empty value is unredacted free text (in a hand-authored
+// cassette or after a save-filter regression).
+func checkDescriptionsAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range descriptionFieldPattern.FindAllStringSubmatch(body, -1) {
+		v := m[1]
+		if v != "" && v != redactedDescriptionPlaceholder {
+			t.Errorf("found a non-synthetic description: %q (want %q)", truncate(v, 20), redactedDescriptionPlaceholder)
 		}
 	}
 }
