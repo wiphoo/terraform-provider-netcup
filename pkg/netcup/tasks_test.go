@@ -2,6 +2,7 @@ package netcup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -57,6 +58,47 @@ func TestGetTaskSuccess(t *testing.T) {
 	}
 	if task.TaskProgress == nil || task.TaskProgress.ProgressInPercent != 42.5 {
 		t.Errorf("TaskProgress = %+v, want ProgressInPercent 42.5", task.TaskProgress)
+	}
+}
+
+func TestGetTaskDecodesStepsAndResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"uuid": "abc-123",
+			"name": "SetServerState",
+			"state": "FINISHED",
+			"steps": [
+				{"uuid": "s1", "name": "prepare", "state": "FINISHED"},
+				{"uuid": "s2", "name": "apply", "state": "FINISHED"}
+			],
+			"result": {"powerState": "ON", "code": 200}
+		}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	task, err := c.GetTask(context.Background(), "abc-123")
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if len(task.Steps) != 2 {
+		t.Fatalf("Steps = %+v, want 2 entries", task.Steps)
+	}
+	if task.Steps[1].Name != "apply" || task.Steps[1].State != TaskStateFinished {
+		t.Errorf("Steps[1] = %+v, want name=apply state=FINISHED", task.Steps[1])
+	}
+	// Result is preserved as raw JSON for callers to decode per operation.
+	var result struct {
+		PowerState string `json:"powerState"`
+		Code       int    `json:"code"`
+	}
+	if err := json.Unmarshal(task.Result, &result); err != nil {
+		t.Fatalf("decode Result: %v", err)
+	}
+	if result.PowerState != "ON" || result.Code != 200 {
+		t.Errorf("Result = %+v, want powerState=ON code=200", result)
 	}
 }
 

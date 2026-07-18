@@ -70,6 +70,26 @@ type TaskInfo struct {
 
 	// OnRollback is true when the task is rolling back a failed operation.
 	OnRollback bool `json:"onRollback"`
+
+	// Steps holds the task's sub-steps when the API reports them; nil when
+	// absent. Async operations (power, rescue) expose per-step progress here.
+	Steps []TaskInfoStep `json:"steps,omitempty"`
+
+	// Result is the task's operation-output payload, present on some finished
+	// tasks. The API types it as a free-form object, so it is kept as raw JSON
+	// for callers to decode against the specific operation's shape; nil when
+	// absent.
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// TaskInfoStep is a single sub-step of a TaskInfo, mirroring the spec's
+// TaskInfoStep schema.
+type TaskInfoStep struct {
+	UUID       string     `json:"uuid"`
+	Name       string     `json:"name"`
+	State      TaskState  `json:"state"`
+	StartedAt  *time.Time `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt"`
 }
 
 // TaskProgress is the optional progress hint embedded in TaskInfo.
