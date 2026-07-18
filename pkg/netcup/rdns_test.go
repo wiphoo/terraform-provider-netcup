@@ -709,3 +709,54 @@ func TestEqualRDNSHostnames(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalizeIP(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr string // substring expected in the error, "" means no error
+	}{
+		{name: "ipv4", in: "203.0.113.10", want: "203.0.113.10"},
+		{name: "ipv6 uppercase compressed", in: "2001:0DB8:0000:0000:0000:0000:0000:0001", want: "2001:db8::1"},
+		{name: "ipv4-in-ipv6 unmapped", in: "::ffff:203.0.113.10", want: "203.0.113.10"},
+		{name: "zone rejected", in: "fe80::1%eth0", wantErr: "zone"},
+		{name: "invalid", in: "not-an-ip", wantErr: "invalid IP address"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := CanonicalizeIP(c.in)
+			if c.wantErr != "" {
+				if err == nil {
+					t.Fatalf("CanonicalizeIP(%q) error = nil, want error mentioning %q", c.in, c.wantErr)
+				}
+				if !strings.Contains(err.Error(), c.wantErr) {
+					t.Errorf("CanonicalizeIP(%q) error = %v, want mention of %q", c.in, err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CanonicalizeIP(%q) error = %v, want nil", c.in, err)
+			}
+			if got != c.want {
+				t.Errorf("CanonicalizeIP(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeRDNSHostname(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"server.example.com", "server.example.com"},
+		{"Server.Example.COM.", "server.example.com"},
+		{"  server.example.com.  ", "server.example.com"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizeRDNSHostname(c.in); got != c.want {
+			t.Errorf("NormalizeRDNSHostname(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

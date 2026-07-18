@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -109,7 +108,7 @@ func (r *rdnsResource) Create(ctx context.Context, req resource.CreateRequest, r
 	ip := plan.IPAddress.ValueString()
 	hostname := plan.Hostname.ValueString()
 
-	canonical, err := r.canonicalizeIP(ip)
+	canonical, err := netcup.CanonicalizeIP(ip)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid IP address", err.Error())
 		return
@@ -128,7 +127,7 @@ func (r *rdnsResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	normalizedHostname := normalizeRDNSHostname(hostname)
+	normalizedHostname := netcup.NormalizeRDNSHostname(hostname)
 	if hostname != normalizedHostname {
 		resp.Diagnostics.AddError(
 			"Non-canonical hostname",
@@ -202,7 +201,7 @@ func (r *rdnsResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	state = rdnsResourceModel{
 		IPAddress: types.StringValue(entry.IP),
-		Hostname:  types.StringValue(normalizeRDNSHostname(entry.Hostname)),
+		Hostname:  types.StringValue(netcup.NormalizeRDNSHostname(entry.Hostname)),
 		ID:        types.StringValue(entry.IP),
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -226,7 +225,7 @@ func (r *rdnsResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	ip := plan.IPAddress.ValueString()
 	hostname := plan.Hostname.ValueString()
 
-	canonical, err := r.canonicalizeIP(ip)
+	canonical, err := netcup.CanonicalizeIP(ip)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid IP address", err.Error())
 		return
@@ -245,7 +244,7 @@ func (r *rdnsResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	normalizedHostname := normalizeRDNSHostname(hostname)
+	normalizedHostname := netcup.NormalizeRDNSHostname(hostname)
 	if hostname != normalizedHostname {
 		resp.Diagnostics.AddError(
 			"Non-canonical hostname",
@@ -309,18 +308,6 @@ func (r *rdnsResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 func (r *rdnsResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
-}
-
-func (r *rdnsResource) canonicalizeIP(ip string) (string, error) {
-	addr, err := netip.ParseAddr(ip)
-	if err != nil {
-		return "", fmt.Errorf("invalid IP address %q: %w", ip, err)
-	}
-	if addr.Zone() != "" {
-		return "", fmt.Errorf("invalid IP address %q: zone identifiers are not supported", ip)
-	}
-	addr = addr.Unmap()
-	return addr.String(), nil
 }
 
 // canonicalIPValidator rejects IPs that are not in canonical (RFC 5952) form.
@@ -393,7 +380,7 @@ func (v canonicalHostnameValidator) ValidateString(_ context.Context, req valida
 		return
 	}
 
-	normalized := normalizeRDNSHostname(input)
+	normalized := netcup.NormalizeRDNSHostname(input)
 	if input != normalized {
 		resp.Diagnostics.AddAttributeError(
 			req.Path,
@@ -401,12 +388,4 @@ func (v canonicalHostnameValidator) ValidateString(_ context.Context, req valida
 			fmt.Sprintf("Hostname must be in canonical form: use %q instead of %q.", normalized, input),
 		)
 	}
-}
-
-// normalizeRDNSHostname lowers and strips the trailing dot from a PTR
-// read-back, matching the SDK's unexported normalizeRDNSHostname
-// (pkg/netcup/rdns.go:245-247). The SDK's GetRDNS already trims whitespace
-// before returning the hostname, so only case and trailing-dot differ.
-func normalizeRDNSHostname(h string) string {
-	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }

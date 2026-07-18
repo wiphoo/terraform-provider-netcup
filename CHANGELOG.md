@@ -31,6 +31,22 @@ This file is the human-curated companion to those release notes:
 - Stale-issue/PR automation workflow.
 - GitHub issue forms for bug reports and feature requests (replacing the
   Markdown templates).
+- Exported `netcup.CanonicalizeIP` and `netcup.NormalizeRDNSHostname` from the
+  SDK so the CLI and Terraform provider share a single implementation of IP
+  canonicalization and reverse-DNS hostname normalization.
+
+### Changed
+
+- Consolidated the triplicated IP canonicalization and duplicated hostname
+  normalization logic across the SDK, CLI, and provider into the SDK
+  (`pkg/netcup`); the CLI and provider now call the exported helpers instead of
+  local copies.
+
+### Fixed
+
+- `netcupctl rdns delete` now rejects IP addresses carrying a zone identifier,
+  matching the SDK and provider (the CLI's former local canonicalization
+  silently accepted them).
 
 ## [0.2.0]
 

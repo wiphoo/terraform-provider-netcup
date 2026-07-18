@@ -67,6 +67,18 @@ func canonicalizeIP(ip string) (canonical, family string, err error) {
 	return addr.String(), family, nil
 }
 
+// CanonicalizeIP validates ip and returns its canonical form (RFC 5952 for
+// IPv6; IPv4-in-IPv6 addresses are unmapped to dotted-quad). Zone identifiers
+// are rejected, matching what the SCP rDNS endpoints accept. It is the
+// exported form of the canonicalization the SDK applies internally, for
+// consumers (the CLI and Terraform provider) that need to display or validate
+// an IP exactly the way the SDK does. The address family is dropped here since
+// only the SDK's endpoint routing needs it.
+func CanonicalizeIP(ip string) (string, error) {
+	canonical, _, err := canonicalizeIP(ip)
+	return canonical, err
+}
+
 // GetRDNS calls GET /v1/rdns/{ipv4|ipv6}/{ip} and returns the current reverse
 // DNS entry for the IP address.
 //
@@ -240,9 +252,15 @@ func (c *Client) ConfirmRDNS(ctx context.Context, ip string, expected *RdnsEntry
 // surrounding whitespace) when comparing. It is the exported form of the
 // comparison ConfirmRDNS uses to decide a read-back match.
 func EqualRDNSHostnames(a, b string) bool {
-	return normalizeRDNSHostname(a) == normalizeRDNSHostname(b)
+	return NormalizeRDNSHostname(a) == NormalizeRDNSHostname(b)
 }
 
-func normalizeRDNSHostname(h string) string {
+// NormalizeRDNSHostname lowercases a reverse-DNS hostname and strips its
+// trailing dot and surrounding whitespace, yielding a canonical form suitable
+// for comparison. PTR values are FQDNs, which are case-insensitive and may
+// carry a trailing dot. It is exported so the CLI and Terraform provider can
+// normalize hostnames the same way the SDK does, rather than replicating the
+// logic.
+func NormalizeRDNSHostname(h string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }
