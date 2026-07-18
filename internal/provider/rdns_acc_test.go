@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"testing"
 
@@ -49,6 +50,12 @@ func TestAccRDNSResource(t *testing.T) {
 	testIP := os.Getenv("NETCUP_TEST_IP")
 	if testIP == "" {
 		t.Skip("NETCUP_TEST_IP not set")
+	}
+	// The rDNS endpoints operate on a single address; a CIDR/prefix (e.g.
+	// "2001:db8::/64") fails to parse deep inside CapturePTR. Fail fast with a
+	// clear message so a misconfigured value is obvious.
+	if _, err := netip.ParseAddr(testIP); err != nil {
+		t.Fatalf("NETCUP_TEST_IP must be a single IP address, not a CIDR/prefix (got %q): %v", testIP, err)
 	}
 
 	testHostname := "test-acc-rdns.example.com"

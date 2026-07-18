@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"text/tabwriter"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 func cmdRDNS(args []string) error {
@@ -22,6 +24,8 @@ func cmdRDNS(args []string) error {
 		return rdnsGet(args[1:], os.Stdout)
 	case "set":
 		return rdnsSet(args[1:], os.Stdout)
+	case "delete":
+		return rdnsDelete(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		usageRDNS(os.Stdout)
 		return nil
@@ -37,6 +41,7 @@ func usageRDNS(w *os.File) {
 Usage:
   netcupctl rdns get <ip> [--json]
   netcupctl rdns set <ip> <hostname> [--json]
+  netcupctl rdns delete <ip> [--json]
   netcupctl rdns help                show this help
 `)
 }
@@ -138,4 +143,50 @@ func rdnsSet(args []string, out io.Writer) error {
 	fmt.Fprintf(tw, "IP:\t%s\n", entry.IP)
 	fmt.Fprintf(tw, "Hostname:\t%s\n", entry.Hostname)
 	return tw.Flush()
+}
+
+func rdnsDelete(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("rdns-delete", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "output as JSON")
+	positional, err := parsePositionalArgs(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	if len(positional) == 0 {
+		usageRDNS(os.Stderr)
+		return fmt.Errorf("rdns delete requires an IP address")
+	}
+	if len(positional) > 1 {
+		return fmt.Errorf("rdns delete takes a single IP address, got %d arguments", len(positional))
+	}
+
+	client, err := clientWithToken()
+	if err != nil {
+		return err
+	}
+
+	if err := client.DeleteRDNS(context.Background(), positional[0]); err != nil {
+		return err
+	}
+
+	// Canonicalize the IP for display so the output always shows a consistent
+	// form (RFC 5952 for IPv6), matching what rdnsGet and rdnsSet display.
+	canon, err := netcup.CanonicalizeIP(positional[0])
+	if err != nil {
+		return err
+	}
+
+	if *jsonFlag {
+		return json.NewEncoder(out).Encode(map[string]interface{}{
+			"ip":      canon,
+			"deleted": true,
+		})
+	}
+
+	fmt.Fprintf(out, "Deleted reverse DNS for %s\n", canon)
+	return nil
 }

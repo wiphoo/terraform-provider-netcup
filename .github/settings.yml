@@ -85,6 +85,9 @@ labels:
   - name: dependencies
     color: 0366d6
     description: Dependency updates (Dependabot)
+  - name: stale
+    color: ededed
+    description: No activity for 90 days; will be closed if it stays inactive
 
 branches:
   - name: main
