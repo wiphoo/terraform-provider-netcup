@@ -196,8 +196,8 @@ because the `"name"` key is redacted at all nesting levels.
 `TestCassettesAreScrubbed` (`tests/vcr/scrub_test.go`) is an independent guard
 that scans every committed cassette (bodies, headers, and URLs) and fails on
 any IP outside the documentation ranges above, a non-scrubbed `Authorization`
-header, a JWT (`Bearer eyJ…`) shape, a `userId` outside the synthetic value, a
-`username` not of the `user-<hash>` shape, or a `password` other than the
+header, a JWT (`Bearer eyJ…`) shape, a `userId` outside the synthetic value, or
+a `username`, `password`, or snapshot `description` other than its fixed
 placeholder. It runs in PR CI alongside the rest of `go test ./...`, with no
 credentials or network access.
 

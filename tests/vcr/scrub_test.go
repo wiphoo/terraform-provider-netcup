@@ -41,12 +41,14 @@ var tokenFieldJSONPattern = regexp.MustCompile(`"(access_token|refresh_token)"\s
 
 // usernameFieldPattern matches a JSON "username" field with a string value,
 // e.g. `"username":"123456"` (TaskInfo.executingUser). passwordFieldPattern
-// matches a JSON "password" field with a string value (RescueSystemStatus,
-// active). Both only match the string form, so a `null` (no password / absent)
-// is correctly ignored.
+// matches a JSON "password" field (RescueSystemStatus, active), and
+// descriptionFieldPattern a JSON "description" field (SnapshotMinimal). All
+// three only match the string form, so a `null` (no password / no description /
+// absent) is correctly ignored.
 var (
-	usernameFieldPattern = regexp.MustCompile(`"username"\s*:\s*"([^"]*)"`)
-	passwordFieldPattern = regexp.MustCompile(`"password"\s*:\s*"([^"]*)"`)
+	usernameFieldPattern    = regexp.MustCompile(`"username"\s*:\s*"([^"]*)"`)
+	passwordFieldPattern    = regexp.MustCompile(`"password"\s*:\s*"([^"]*)"`)
+	descriptionFieldPattern = regexp.MustCompile(`"description"\s*:\s*"([^"]*)"`)
 )
 
 var (
@@ -108,6 +110,7 @@ func TestCassettesAreScrubbed(t *testing.T) {
 					checkMACsAreSynthetic(t, body)
 					checkUsernamesAreSynthetic(t, body)
 					checkPasswordsAreSynthetic(t, body)
+					checkDescriptionsAreSynthetic(t, body)
 				}
 				checkIPv4sInRange(t, ia.URL)
 				checkIPv6sInRange(t, ia.URL)
@@ -232,6 +235,21 @@ func checkPasswordsAreSynthetic(t *testing.T, body string) {
 		v := m[1]
 		if v != "" && v != redactedPasswordPlaceholder {
 			t.Errorf("found a non-synthetic password: %q (want %q)", truncate(v, 12), redactedPasswordPlaceholder)
+		}
+	}
+}
+
+// checkDescriptionsAreSynthetic catches a live snapshot description in a JSON
+// body (SnapshotMinimal.description) — maintainer-authored free text that can
+// carry arbitrary notes/PII. The redactor replaces it with a fixed marker, so
+// any other non-empty value is unredacted free text (in a hand-authored
+// cassette or after a save-filter regression).
+func checkDescriptionsAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range descriptionFieldPattern.FindAllStringSubmatch(body, -1) {
+		v := m[1]
+		if v != "" && v != redactedDescriptionPlaceholder {
+			t.Errorf("found a non-synthetic description: %q (want %q)", truncate(v, 20), redactedDescriptionPlaceholder)
 		}
 	}
 }
