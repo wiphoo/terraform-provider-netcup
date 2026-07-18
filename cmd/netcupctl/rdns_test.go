@@ -360,3 +360,148 @@ func TestRDNSSet_SetFails(t *testing.T) {
 		t.Errorf("error should mention 422, got: %v", err)
 	}
 }
+
+func TestRDNSDelete_TextOutput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/rdns/ipv4/203.0.113.10" {
+			t.Errorf("path = %q, want /v1/rdns/ipv4/203.0.113.10", r.URL.Path)
+		}
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %q, want DELETE", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := rdnsDelete([]string{"203.0.113.10"}, &buf); err != nil {
+		t.Fatalf("rdnsDelete() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "203.0.113.10") {
+		t.Errorf("output missing IP: %q", out)
+	}
+	if !strings.Contains(out, "Deleted reverse DNS") {
+		t.Errorf("output missing success message: %q", out)
+	}
+}
+
+func TestRDNSDelete_TextOutput_IPv6(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/rdns/ipv6/2001:db8:6:b1d::1"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %q, want DELETE", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	if err := rdnsDelete([]string{"2001:0DB8:0006:0B1D::1"}, &buf); err != nil {
+		t.Fatalf("rdnsDelete() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "2001:db8:6:b1d::1") {
+		t.Errorf("output missing canonicalized IP: %q", out)
+	}
+	if !strings.Contains(out, "Deleted reverse DNS") {
+		t.Errorf("output missing success message: %q", out)
+	}
+}
+
+func TestRDNSDelete_JSONOutput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	for _, args := range [][]string{{"--json", "203.0.113.10"}, {"203.0.113.10", "--json"}} {
+		var buf bytes.Buffer
+		if err := rdnsDelete(args, &buf); err != nil {
+			t.Fatalf("rdnsDelete(%v) error = %v", args, err)
+		}
+		out := strings.TrimSpace(buf.String())
+		if !strings.HasPrefix(out, "{") {
+			t.Errorf("rdnsDelete(%v) JSON output unexpected: %q", args, out)
+			continue
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+			t.Errorf("rdnsDelete(%v) invalid JSON: %v", args, err)
+			continue
+		}
+		if parsed["ip"] != "203.0.113.10" {
+			t.Errorf("rdnsDelete(%v) JSON missing ip field: %q", args, out)
+		}
+		if parsed["deleted"] != true {
+			t.Errorf("rdnsDelete(%v) JSON missing deleted field: %q", args, out)
+		}
+	}
+}
+
+func TestRDNSDelete_MissingArgs(t *testing.T) {
+	var buf bytes.Buffer
+	err := rdnsDelete(nil, &buf)
+	if err == nil {
+		t.Fatal("rdnsDelete() error = nil, want error for missing args")
+	}
+	if !strings.Contains(err.Error(), "IP address") {
+		t.Errorf("error should mention missing IP, got: %v", err)
+	}
+}
+
+func TestRDNSDelete_TooManyArgs(t *testing.T) {
+	var buf bytes.Buffer
+	err := rdnsDelete([]string{"203.0.113.10", "extra"}, &buf)
+	if err == nil {
+		t.Fatal("rdnsDelete() error = nil, want error for two args")
+	}
+	if !strings.Contains(err.Error(), "IP address") {
+		t.Errorf("error should reject extra args, got: %v", err)
+	}
+}
+
+func TestRDNSDelete_InvalidIP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("API should not be called for invalid IP")
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	err := rdnsDelete([]string{"not-an-ip"}, &buf)
+	if err == nil {
+		t.Fatal("rdnsDelete() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "invalid IP address") {
+		t.Errorf("error should mention invalid IP, got: %v", err)
+	}
+}
+
+func TestRDNSDelete_DeleteFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"not found"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var buf bytes.Buffer
+	err := rdnsDelete([]string{"203.0.113.10"}, &buf)
+	if err == nil {
+		t.Fatal("rdnsDelete() error = nil, want error for failed DELETE")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention 404, got: %v", err)
+	}
+}
