@@ -72,6 +72,42 @@ Other `Server` fields available: `architecture`, `disabled`, `nickname`, `site`,
 `maxCpuCount`, `snapshotAllowed`, `snapshotCount`, `rescueSystemActive`,
 `gpuDriverAvailable`, `disksAvailableSpaceInMiB`.
 
+### Power state — `PATCH /v1/servers/{serverId}`
+
+Change a server's power state. The SDK exposes this as `SetPowerState` and the
+CLI as `netcupctl server power on|off|suspend|reboot`.
+
+- **Content type:** `application/merge-patch+json` (⚠️ **not** `application/json` —
+  the endpoint rejects the wrong media type). Body is `ServerStatePatch`:
+  `{ "state": "ON" | "OFF" | "SUSPENDED" }` (the write-side enum `ServerState1`).
+- **Responses:** `202 TaskInfo` (async — poll with `GET /v1/tasks/{uuid}`), `200`
+  (applied synchronously, no body), `503 ResponseError` (node in maintenance).
+- **Read-back:** there is no dedicated power-read endpoint; use
+  `GET /v1/servers/{id}` → `serverLiveInfo.state` (`ServerState`: `RUNNING`,
+  `SHUTOFF`, `PAUSED`, `PMSUSPENDED`, …). Note this **live/read** enum differs
+  from the **desired/write** enum `ServerState1` above.
+
+#### `stateOption` query parameter (open question — RESOLVED by the spec)
+
+`stateOption` is typed as a free-form string, but the live OpenAPI parameter
+description enumerates the accepted values per target state:
+
+| Target `state` | Valid `stateOption` values | Meaning |
+|----------------|----------------------------|---------|
+| `ON` | `POWERCYCLE`, `RESET` | `POWERCYCLE` = graceful power cycle (used for **reboot**); `RESET` = hard reset |
+| `OFF` | `POWEROFF` | hard poweroff (the default `OFF` with no option is a soft/ACPI shutdown) |
+| `SUSPENDED` | *(none)* | — |
+
+So a **reboot** is native: `PATCH {state:ON}?stateOption=POWERCYCLE` (no
+OFF-then-ON orchestration needed); `RESET` is the hard variant. The CLI maps its
+`--hard` flag to `POWEROFF` for `off` and `RESET` for `reboot`; omitting the flag
+uses the soft form (no option for `off`, `POWERCYCLE` for `reboot`).
+
+> Confirmed against live OpenAPI `2026.0703.095128` (the issue referenced
+> `2026.0624.115833`; the `stateOption` description is unchanged). Recheck with
+> `curl -H 'accept: application/json' "$NETCUP_API_ENDPOINT/v1/openapi"` and grep
+> the `PATCH /v1/servers/{serverId}` `stateOption` parameter.
+
 ## Reverse DNS (rDNS)
 
 IPv4 and IPv6 are **separate endpoints**. The SDK/CLI/provider must detect the IP
