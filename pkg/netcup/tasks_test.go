@@ -185,6 +185,38 @@ func TestWaitForTaskTransientErrorThenSuccess(t *testing.T) {
 	}
 }
 
+func TestWaitForTaskRetriesRetryable4xx(t *testing.T) {
+	fastTaskPoll(t)
+
+	// 408 Request Timeout is a 4xx but inherently retryable: WaitForTask must
+	// retry it rather than surface it immediately like a permanent 404.
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"uuid":"t","state":"FINISHED"}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+	task, err := c.WaitForTask(ctx, "t")
+	if err != nil {
+		t.Fatalf("WaitForTask() error = %v, want success after retrying 408", err)
+	}
+	if task.State != TaskStateFinished {
+		t.Errorf("State = %q, want FINISHED", task.State)
+	}
+	if n := calls.Load(); n < 2 {
+		t.Errorf("calls = %d, want >= 2 (408 should be retried)", n)
+	}
+}
+
 func TestWaitForTaskPermanentErrorReturnsImmediately(t *testing.T) {
 	fastTaskPoll(t)
 
@@ -221,8 +253,9 @@ func TestWaitForTaskPermanentErrorReturnsImmediately(t *testing.T) {
 func TestWaitForTaskContextDeadline(t *testing.T) {
 	// A non-terminal task that never finishes: WaitForTask must give up when
 	// the caller's context deadline passes.
+	old := taskPollInterval
 	taskPollInterval = 5 * time.Millisecond
-	t.Cleanup(func() { taskPollInterval = 2 * time.Second })
+	t.Cleanup(func() { taskPollInterval = old })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

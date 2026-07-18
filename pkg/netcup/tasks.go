@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -126,7 +127,7 @@ func (e *TaskError) Error() string {
 // GetTask calls GET /v1/tasks/{uuid} and returns the task's current state. An
 // unknown UUID surfaces as an *APIError with StatusCode 404.
 func (c *Client) GetTask(ctx context.Context, uuid string) (*TaskInfo, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/tasks/%s", uuid), "application/json", nil, true)
+	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/tasks/%s", url.PathEscape(uuid)), "application/json", nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -201,14 +202,22 @@ func (c *Client) WaitForTask(ctx context.Context, uuid string) (*TaskInfo, error
 }
 
 // isPermanentTaskPollError reports whether a GetTask error is a permanent
-// client error that will never succeed on retry (a 4xx other than 429 Too Many
-// Requests). Network errors, 5xx, and 429 are treated as transient.
+// client error that will never succeed on retry. A 4xx is permanent except for
+// the ones that are inherently retryable: 408 Request Timeout, 425 Too Early,
+// and 429 Too Many Requests. Network errors and 5xx are also treated as
+// transient (they return false here).
 func isPermanentTaskPollError(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	return apiErr.StatusCode >= 400 &&
-		apiErr.StatusCode < 500 &&
-		apiErr.StatusCode != http.StatusTooManyRequests
+	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
+		return false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
+	}
 }
