@@ -347,3 +347,4 @@ Labels are defined in `.github/settings.yml` and kept in sync with this table.
 | `needs-decision` | Requires a human decision before work can proceed |
 | `ready` | Ready to be picked up |
 | `dependencies` | Dependency updates (Dependabot) |
+| `stale` | No activity for 90 days; will be closed if it stays inactive (applied by the stale workflow) |

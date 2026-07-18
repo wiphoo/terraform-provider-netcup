@@ -1,0 +1,45 @@
+name: Stale
+
+on:
+  schedule:
+    - cron: "0 1 * * *" # daily at 01:00 UTC
+  workflow_dispatch:
+
+# Least-privilege token: only enough to label and close stale issues/PRs.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark and close stale issues and PRs
+        uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10.4.0
+        with:
+          # Inactivity thresholds: 90 days to stale, then 14 more to close.
+          days-before-stale: 90
+          days-before-close: 14
+          stale-issue-label: stale
+          stale-pr-label: stale
+          stale-issue-message: >
+            This issue has been automatically marked as stale because it has had
+            no activity for 90 days. It will be closed in 14 days if no further
+            activity occurs. Comment or remove the `stale` label to keep it open.
+          stale-pr-message: >
+            This pull request has been automatically marked as stale because it
+            has had no activity for 90 days. It will be closed in 14 days if no
+            further activity occurs. Comment or remove the `stale` label to keep
+            it open.
+          close-issue-message: >
+            This issue was closed because it has been stale for 14 days with no
+            activity. Feel free to reopen if it is still relevant.
+          close-pr-message: >
+            This pull request was closed because it has been stale for 14 days
+            with no activity. Feel free to reopen if you wish to continue.
+          # Never auto-close prioritised work, items awaiting a human decision,
+          # groomed-ready issues, or anything attached to a milestone.
+          exempt-issue-labels: "priority/high,needs-decision,ready"
+          exempt-pr-labels: "priority/high,needs-decision"
+          exempt-all-milestones: true
