@@ -73,12 +73,12 @@ func TestServerPowerStatus(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	if err := serverPower([]string{"status", "5"}, &buf, nil); err != nil {
+	var out, errBuf bytes.Buffer
+	if err := serverPower([]string{"status", "5"}, &out, &errBuf, nil); err != nil {
 		t.Fatalf("serverPower status error = %v", err)
 	}
-	if !strings.Contains(buf.String(), "RUNNING") {
-		t.Errorf("output missing live state: %q", buf.String())
+	if !strings.Contains(out.String(), "RUNNING") {
+		t.Errorf("output missing live state: %q", out.String())
 	}
 	if rec.patchCalls != 0 {
 		t.Errorf("status issued %d PATCH calls, want 0", rec.patchCalls)
@@ -91,9 +91,9 @@ func TestServerPowerOn(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
+	var out, errBuf bytes.Buffer
 	// on causes no downtime, so no confirmation and no --force needed.
-	if err := serverPower([]string{"on", "5"}, &buf, nil); err != nil {
+	if err := serverPower([]string{"on", "5"}, &out, &errBuf, nil); err != nil {
 		t.Fatalf("serverPower on error = %v", err)
 	}
 	if rec.state != "ON" {
@@ -102,8 +102,8 @@ func TestServerPowerOn(t *testing.T) {
 	if rec.option != "" {
 		t.Errorf("stateOption = %q, want empty", rec.option)
 	}
-	if !strings.Contains(buf.String(), "ON") {
-		t.Errorf("output missing requested state: %q", buf.String())
+	if !strings.Contains(out.String(), "ON") {
+		t.Errorf("output missing requested state: %q", out.String())
 	}
 }
 
@@ -113,16 +113,20 @@ func TestServerPowerOffConfirmYes(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	if err := serverPower([]string{"off", "5"}, &buf, strings.NewReader("y\n")); err != nil {
+	var out, errBuf bytes.Buffer
+	if err := serverPower([]string{"off", "5"}, &out, &errBuf, strings.NewReader("y\n")); err != nil {
 		t.Fatalf("serverPower off error = %v", err)
 	}
 	if rec.state != "OFF" || rec.option != "" {
 		t.Errorf("state=%q option=%q, want OFF and no option", rec.state, rec.option)
 	}
-	out := buf.String()
-	if !strings.Contains(out, "WARNING") || !strings.Contains(strings.ToLower(out), "downtime") {
-		t.Errorf("output missing downtime warning: %q", out)
+	// The downtime warning and prompt go to stderr, never the result stream.
+	e := errBuf.String()
+	if !strings.Contains(e, "WARNING") || !strings.Contains(strings.ToLower(e), "downtime") {
+		t.Errorf("stderr missing downtime warning: %q", e)
+	}
+	if strings.Contains(out.String(), "WARNING") {
+		t.Errorf("warning leaked into stdout: %q", out.String())
 	}
 }
 
@@ -132,8 +136,8 @@ func TestServerPowerOffAbort(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	err := serverPower([]string{"off", "5"}, &buf, strings.NewReader("n\n"))
+	var out, errBuf bytes.Buffer
+	err := serverPower([]string{"off", "5"}, &out, &errBuf, strings.NewReader("n\n"))
 	if err == nil {
 		t.Fatal("serverPower off (declined) error = nil, want abort error")
 	}
@@ -143,8 +147,8 @@ func TestServerPowerOffAbort(t *testing.T) {
 	if rec.patchCalls != 0 {
 		t.Errorf("declined confirmation still issued %d PATCH calls, want 0", rec.patchCalls)
 	}
-	if !strings.Contains(buf.String(), "Aborted") {
-		t.Errorf("output missing abort notice: %q", buf.String())
+	if !strings.Contains(errBuf.String(), "Aborted") {
+		t.Errorf("stderr missing abort notice: %q", errBuf.String())
 	}
 }
 
@@ -154,9 +158,9 @@ func TestServerPowerOffForceSkipsPrompt(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
+	var out, errBuf bytes.Buffer
 	// No reader provided; --force must bypass the prompt entirely.
-	if err := serverPower([]string{"off", "5", "--force"}, &buf, nil); err != nil {
+	if err := serverPower([]string{"off", "5", "--force"}, &out, &errBuf, nil); err != nil {
 		t.Fatalf("serverPower off --force error = %v", err)
 	}
 	if rec.patchCalls != 1 || rec.state != "OFF" {
@@ -170,8 +174,8 @@ func TestServerPowerOffHard(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	if err := serverPower([]string{"off", "5", "--hard", "--yes"}, &buf, nil); err != nil {
+	var out, errBuf bytes.Buffer
+	if err := serverPower([]string{"off", "5", "--hard", "--yes"}, &out, &errBuf, nil); err != nil {
 		t.Fatalf("serverPower off --hard error = %v", err)
 	}
 	if rec.state != "OFF" || rec.option != "POWEROFF" {
@@ -192,8 +196,8 @@ func TestServerPowerRebootSoftAndHard(t *testing.T) {
 		srv := newPowerServer(rec)
 		setPowerEnv(t, srv.URL)
 
-		var buf bytes.Buffer
-		if err := serverPower(tc.args, &buf, nil); err != nil {
+		var out, errBuf bytes.Buffer
+		if err := serverPower(tc.args, &out, &errBuf, nil); err != nil {
 			srv.Close()
 			t.Fatalf("serverPower %v error = %v", tc.args, err)
 		}
@@ -210,8 +214,8 @@ func TestServerPowerSuspendHardUnsupported(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	err := serverPower([]string{"suspend", "5", "--hard", "--force"}, &buf, nil)
+	var out, errBuf bytes.Buffer
+	err := serverPower([]string{"suspend", "5", "--hard", "--force"}, &out, &errBuf, nil)
 	if err == nil {
 		t.Fatal("serverPower suspend --hard error = nil, want unsupported error")
 	}
@@ -229,12 +233,12 @@ func TestServerPowerWaitPollsToTerminal(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	if err := serverPower([]string{"off", "5", "--force", "--wait"}, &buf, nil); err != nil {
+	var out, errBuf bytes.Buffer
+	if err := serverPower([]string{"off", "5", "--force", "--wait"}, &out, &errBuf, nil); err != nil {
 		t.Fatalf("serverPower off --wait error = %v", err)
 	}
-	if !strings.Contains(buf.String(), "FINISHED") {
-		t.Errorf("output missing final task state: %q", buf.String())
+	if !strings.Contains(out.String(), "FINISHED") {
+		t.Errorf("output missing final task state: %q", out.String())
 	}
 }
 
@@ -244,19 +248,46 @@ func TestServerPowerJSON(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	if err := serverPower([]string{"off", "5", "--force", "--json"}, &buf, nil); err != nil {
+	var out, errBuf bytes.Buffer
+	if err := serverPower([]string{"off", "5", "--force", "--json"}, &out, &errBuf, nil); err != nil {
 		t.Fatalf("serverPower off --json error = %v", err)
 	}
-	out := strings.TrimSpace(buf.String())
-	if !strings.HasPrefix(out, "{") || !strings.Contains(out, `"requested":"OFF"`) {
-		t.Errorf("JSON output unexpected: %q", out)
+	s := strings.TrimSpace(out.String())
+	if !strings.HasPrefix(s, "{") || !strings.Contains(s, `"requested":"OFF"`) {
+		t.Errorf("JSON output unexpected: %q", s)
+	}
+}
+
+// TestServerPowerJSONWithPromptKeepsStdoutClean covers the reviewer's scenario:
+// `--json` without --force/--yes still prompts, but the warning/prompt must go
+// to stderr so stdout stays valid, parseable JSON.
+func TestServerPowerJSONWithPromptKeepsStdoutClean(t *testing.T) {
+	rec := &powerRecorder{}
+	srv := newPowerServer(rec)
+	defer srv.Close()
+	setPowerEnv(t, srv.URL)
+
+	var out, errBuf bytes.Buffer
+	if err := serverPower([]string{"off", "5", "--json"}, &out, &errBuf, strings.NewReader("y\n")); err != nil {
+		t.Fatalf("serverPower off --json (prompted) error = %v", err)
+	}
+	// stdout must be pure JSON — a single object that decodes cleanly.
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\nstdout=%q", err, out.String())
+	}
+	if decoded["requested"] != "OFF" {
+		t.Errorf("decoded requested = %v, want OFF", decoded["requested"])
+	}
+	// The interactive warning/prompt must have gone to stderr.
+	if !strings.Contains(errBuf.String(), "WARNING") {
+		t.Errorf("stderr missing warning: %q", errBuf.String())
 	}
 }
 
 func TestServerPowerInvalidID(t *testing.T) {
-	var buf bytes.Buffer
-	err := serverPower([]string{"off", "not-a-number", "--force"}, &buf, nil)
+	var out, errBuf bytes.Buffer
+	err := serverPower([]string{"off", "not-a-number", "--force"}, &out, &errBuf, nil)
 	if err == nil {
 		t.Fatal("serverPower off <bad id> error = nil, want error")
 	}
@@ -266,8 +297,8 @@ func TestServerPowerInvalidID(t *testing.T) {
 }
 
 func TestServerPowerMissingID(t *testing.T) {
-	var buf bytes.Buffer
-	err := serverPower([]string{"off", "--force"}, &buf, nil)
+	var out, errBuf bytes.Buffer
+	err := serverPower([]string{"off", "--force"}, &out, &errBuf, nil)
 	if err == nil {
 		t.Fatal("serverPower off (no id) error = nil, want error")
 	}
@@ -282,8 +313,8 @@ func TestServerPowerAPIError(t *testing.T) {
 	defer srv.Close()
 	setPowerEnv(t, srv.URL)
 
-	var buf bytes.Buffer
-	err := serverPower([]string{"off", "5", "--force"}, &buf, nil)
+	var out, errBuf bytes.Buffer
+	err := serverPower([]string{"off", "5", "--force"}, &out, &errBuf, nil)
 	if err == nil {
 		t.Fatal("serverPower off (503) error = nil, want API error")
 	}
@@ -293,8 +324,8 @@ func TestServerPowerAPIError(t *testing.T) {
 }
 
 func TestServerPowerUnknownSubcommand(t *testing.T) {
-	var buf bytes.Buffer
-	err := serverPower([]string{"frobnicate", "5"}, &buf, nil)
+	var out, errBuf bytes.Buffer
+	err := serverPower([]string{"frobnicate", "5"}, &out, &errBuf, nil)
 	if err == nil {
 		t.Fatal("serverPower <unknown> error = nil, want error")
 	}

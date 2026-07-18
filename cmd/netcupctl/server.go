@@ -33,7 +33,7 @@ func cmdServer(args []string) error {
 	case "snapshots":
 		return serverSnapshots(args[1:], os.Stdout)
 	case "power":
-		return serverPower(args[1:], os.Stdout, os.Stdin)
+		return serverPower(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "help", "-h", "--help":
 		usageServer(os.Stdout)
 		return nil
@@ -360,9 +360,13 @@ var powerActions = map[string]powerAction{
 	},
 }
 
-func serverPower(args []string, out io.Writer, in io.Reader) error {
+// serverPower dispatches the `server power` subcommands. out receives the
+// machine-readable result (JSON/table); errW receives interactive and
+// diagnostic text (the downtime warning, the confirmation prompt, abort
+// notices) so that --json output on out stays parseable.
+func serverPower(args []string, out, errW io.Writer, in io.Reader) error {
 	if len(args) == 0 {
-		usageServerPower(os.Stderr)
+		usageServerPower(errW)
 		return fmt.Errorf("server power requires a subcommand")
 	}
 
@@ -370,12 +374,12 @@ func serverPower(args []string, out io.Writer, in io.Reader) error {
 	case "status":
 		return serverPowerStatus(args[1:], out)
 	case "on", "off", "suspend", "reboot":
-		return serverPowerSet(powerActions[args[0]], args[1:], out, in)
+		return serverPowerSet(powerActions[args[0]], args[1:], out, errW, in)
 	case "help", "-h", "--help":
 		usageServerPower(out)
 		return nil
 	default:
-		usageServerPower(os.Stderr)
+		usageServerPower(errW)
 		return fmt.Errorf("unknown server power subcommand %q", args[0])
 	}
 }
@@ -443,7 +447,7 @@ func serverPowerStatus(args []string, out io.Writer) error {
 // resolves the stateOption from --hard, confirms downtime actions unless
 // --force/--yes is set, calls SetPowerState, and optionally waits for the async
 // task to reach a terminal state.
-func serverPowerSet(action powerAction, args []string, out io.Writer, in io.Reader) error {
+func serverPowerSet(action powerAction, args []string, out, errW io.Writer, in io.Reader) error {
 	fs := flag.NewFlagSet("server-power-"+action.verb, flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	waitFlag := fs.Bool("wait", false, "poll the task to a terminal state")
@@ -464,12 +468,12 @@ func serverPowerSet(action powerAction, args []string, out io.Writer, in io.Read
 	}
 
 	if action.downtime && !*forceFlag && !*yesFlag {
-		confirmed, err := confirmDowntime(out, in, action, id)
+		confirmed, err := confirmDowntime(errW, in, action, id)
 		if err != nil {
 			return err
 		}
 		if !confirmed {
-			fmt.Fprintln(out, "Aborted; no changes made.")
+			fmt.Fprintln(errW, "Aborted; no changes made.")
 			return fmt.Errorf("aborted by user")
 		}
 	}
@@ -499,12 +503,12 @@ func serverPowerSet(action powerAction, args []string, out io.Writer, in io.Read
 	return printPowerResult(out, *jsonFlag, id, action.state, stateOption, task, waited)
 }
 
-// confirmDowntime prints the downtime warning and reads a yes/no answer from in.
-// Only "y"/"yes" (case-insensitive) confirms; anything else (including EOF)
-// declines.
-func confirmDowntime(out io.Writer, in io.Reader, action powerAction, id int32) (bool, error) {
-	fmt.Fprintf(out, "WARNING: %s\n", action.warning)
-	fmt.Fprintf(out, "Continue with 'power %s' on server %d? [y/N]: ", action.verb, id)
+// confirmDowntime writes the downtime warning and prompt to errW (stderr, not
+// the result stream) and reads a yes/no answer from in. Only "y"/"yes"
+// (case-insensitive) confirms; anything else (including EOF) declines.
+func confirmDowntime(errW io.Writer, in io.Reader, action powerAction, id int32) (bool, error) {
+	fmt.Fprintf(errW, "WARNING: %s\n", action.warning)
+	fmt.Fprintf(errW, "Continue with 'power %s' on server %d? [y/N]: ", action.verb, id)
 
 	line, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
