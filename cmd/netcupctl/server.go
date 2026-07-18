@@ -26,6 +26,8 @@ func cmdServer(args []string) error {
 		return serverList(args[1:], os.Stdout)
 	case "get":
 		return serverGet(args[1:], os.Stdout)
+	case "images":
+		return serverImages(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		usageServer(os.Stdout)
 		return nil
@@ -41,6 +43,7 @@ func usageServer(w *os.File) {
 Usage:
   netcupctl server list [--json]
   netcupctl server get <id> [--json]
+  netcupctl server images <id> [--json]
   netcupctl server help          show this help
 `)
 }
@@ -164,6 +167,61 @@ func serverGet(args []string, out io.Writer) error {
 		site = server.Site.City
 	}
 	fmt.Fprintf(tw, "Site:\t%s\n", site)
+	return tw.Flush()
+}
+
+func serverImages(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("server-images", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "output as JSON")
+	positional, err := parsePositionalArgs(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	if len(positional) == 0 {
+		usageServer(os.Stderr)
+		return fmt.Errorf("server images requires a server ID")
+	}
+	if len(positional) > 1 {
+		return fmt.Errorf("server images takes a single server ID, got %d arguments", len(positional))
+	}
+	id, err := strconv.ParseInt(positional[0], 10, 32)
+	if err != nil {
+		return fmt.Errorf("invalid server ID %q: must be an integer", positional[0])
+	}
+
+	client, err := clientWithToken()
+	if err != nil {
+		return err
+	}
+	flavours, err := client.ListImageFlavours(context.Background(), int32(id))
+	if err != nil {
+		return err
+	}
+
+	if *jsonFlag {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(flavours)
+	}
+
+	if len(flavours) == 0 {
+		fmt.Fprintln(out, "No image flavours found.")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "ID\tNAME\tALIAS\tIMAGE")
+	for _, f := range flavours {
+		image := "-"
+		if f.Image != nil && f.Image.Name != "" {
+			image = f.Image.Name
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", f.ID, f.Name, f.Alias, image)
+	}
 	return tw.Flush()
 }
 
