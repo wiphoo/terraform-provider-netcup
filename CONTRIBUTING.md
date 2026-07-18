@@ -29,8 +29,8 @@ By participating you agree to uphold it. Please report unacceptable behavior to
 
 ## What can I contribute?
 
-- Bug reports and reproduction cases — open a [Bug report](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=bug_report.md) issue.
-- Feature proposals — open a [Feature request](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=feature_request.md) issue.
+- Bug reports and reproduction cases — open a [Bug report](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=bug_report.yml) issue.
+- Feature proposals — open a [Feature request](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=feature_request.yml) issue.
 - SDK, CLI, or provider code — see the workflow below.
 - Documentation improvements — PRs welcome.
 - Test coverage — especially acceptance tests against the live SCP API.
@@ -347,3 +347,4 @@ Labels are defined in `.github/settings.yml` and kept in sync with this table.
 | `needs-decision` | Requires a human decision before work can proceed |
 | `ready` | Ready to be picked up |
 | `dependencies` | Dependency updates (Dependabot) |
+| `stale` | No activity for 90 days; will be closed if it stays inactive (applied by the stale workflow) |
