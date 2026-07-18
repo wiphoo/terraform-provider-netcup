@@ -29,8 +29,8 @@ By participating you agree to uphold it. Please report unacceptable behavior to
 
 ## What can I contribute?
 
-- Bug reports and reproduction cases — open a [Bug report](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=bug_report.md) issue.
-- Feature proposals — open a [Feature request](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=feature_request.md) issue.
+- Bug reports and reproduction cases — open a [Bug report](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=bug_report.yml) issue.
+- Feature proposals — open a [Feature request](https://github.com/wiphoo/terraform-provider-netcup/issues/new?template=feature_request.yml) issue.
 - SDK, CLI, or provider code — see the workflow below.
 - Documentation improvements — PRs welcome.
 - Test coverage — especially acceptance tests against the live SCP API.
