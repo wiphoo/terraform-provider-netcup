@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
@@ -28,6 +29,8 @@ func cmdServer(args []string) error {
 		return serverGet(args[1:], os.Stdout)
 	case "images":
 		return serverImages(args[1:], os.Stdout)
+	case "snapshots":
+		return serverSnapshots(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		usageServer(os.Stdout)
 		return nil
@@ -44,6 +47,7 @@ Usage:
   netcupctl server list [--json]
   netcupctl server get <id> [--json]
   netcupctl server images <id> [--json]
+  netcupctl server snapshots <id> [--json]
   netcupctl server help          show this help
 `)
 }
@@ -221,6 +225,61 @@ func serverImages(args []string, out io.Writer) error {
 			image = f.Image.Name
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", f.ID, f.Name, f.Alias, image)
+	}
+	return tw.Flush()
+}
+
+func serverSnapshots(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("server-snapshots", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "output as JSON")
+	positional, err := parsePositionalArgs(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	if len(positional) == 0 {
+		usageServer(os.Stderr)
+		return fmt.Errorf("server snapshots requires a server ID")
+	}
+	if len(positional) > 1 {
+		return fmt.Errorf("server snapshots takes a single server ID, got %d arguments", len(positional))
+	}
+	id, err := strconv.ParseInt(positional[0], 10, 32)
+	if err != nil {
+		return fmt.Errorf("invalid server ID %q: must be an integer", positional[0])
+	}
+
+	client, err := clientWithToken()
+	if err != nil {
+		return err
+	}
+	snapshots, err := client.ListSnapshots(context.Background(), int32(id))
+	if err != nil {
+		return err
+	}
+
+	if *jsonFlag {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(snapshots)
+	}
+
+	if len(snapshots) == 0 {
+		fmt.Fprintln(out, "No snapshots found.")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tCREATED\tSTATE\tONLINE\tEXPORTED")
+	for _, s := range snapshots {
+		created := "-"
+		if !s.CreationTime.IsZero() {
+			created = s.CreationTime.Format(time.RFC3339)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%t\n", s.Name, created, s.State, s.Online, s.Exported)
 	}
 	return tw.Flush()
 }
