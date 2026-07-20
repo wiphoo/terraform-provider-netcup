@@ -34,8 +34,10 @@ This file is the human-curated companion to those release notes:
     `--hard` selects the forced variants (`POWEROFF`/`RESET`).
   - `server rescue status|enable|disable` (`GetRescueSystem` /
     `EnableRescueSystem` / `DisableRescueSystem`) — control the rescue system.
-    `enable`/`disable` reboot the server and confirm first; `enable --wait` reads
-    back and prints the rescue password once activation finishes.
+    `enable`/`disable` reboot the server and confirm first; `enable --wait`
+    attempts to read back the rescue password once activation finishes
+    (best-effort — the API may expose it a moment later, so re-run
+    `server rescue status` if it is not yet available).
   - `server images` (`ListImageFlavours`) — list installable OS image flavours.
   - `server snapshots` (`ListSnapshots`) — list a server's snapshots (read-only).
   - Async task polling foundation (`GetTask` / `WaitForTask`, `TaskInfo`) powering

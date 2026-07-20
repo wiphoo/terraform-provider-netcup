@@ -70,6 +70,12 @@ Beyond listing servers, `netcupctl` can control a server's power state and rescu
 system and list its installable images and snapshots. All commands take a numeric
 server `<id>` (from `netcupctl server list`) and support `--json` for scripting.
 
+> ℹ️ **Availability:** these operations ship in **v0.3.0**. Until the v0.3.0
+> release is published they live only in the source tree — build from source
+> (`make build`, or `go install github.com/wiphoo/terraform-provider-netcup/cmd/netcupctl@main`).
+> The latest tagged release (v0.2.0) does **not** include these subcommands, so
+> installing it and running them fails with an unknown-subcommand error.
+
 > ⚠️ **Some of these commands cause downtime.** Read
 > [Operational risk & downtime](#operational-risk--downtime) before running the
 > power or rescue commands.
