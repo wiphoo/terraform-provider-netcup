@@ -136,15 +136,16 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	// Thread 1 fix: when wait=false, the enable task has not yet completed so a
-	// read-back of rescue status would reflect pre-task state (active:false,
-	// no password). Committing that would cause the next plan/refresh to remove
-	// the resource from state and attempt a re-enable, which the API rejects
-	// because a task is already pending/active. Instead, persist only the known
-	// identity and leave active/password as unknown (computed) to be resolved on
-	// the next refresh.
+	idStr := plan.ServerID.ValueString()
+
+	// when wait=false, the enable task has not yet completed so a read-back of
+	// rescue status would reflect pre-task state (active:false, no password).
+	// Committing that would cause the next plan/refresh to remove the resource
+	// from state and attempt a re-enable, which the API rejects because a task
+	// is already pending/active. Instead, persist only the known identity and
+	// leave active/password as unknown (computed) to be resolved on the next
+	// refresh.
 	if !plan.Wait.ValueBool() {
-		idStr := plan.ServerID.ValueString()
 		partialState := rescueResourceModel{
 			ServerID: types.StringValue(idStr),
 			Active:   types.BoolUnknown(),
@@ -162,17 +163,16 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
-		resp.Diagnostics.AddError("Rescue enable task failed", err.Error())
-		return
-	}
-
-	// Thread 2 fix: persist the resource identity into state BEFORE the
-	// fallible GetRescueSystem read-back. If GetRescueSystem returns a transient
-	// error, the resource ID is already in state so Terraform knows the server
-	// is in rescue mode; the next refresh/apply will re-read and fill
-	// active/password rather than attempting a duplicate enable.
-	idStr := plan.ServerID.ValueString()
+	// Thread 2 fix: persist the resource identity BEFORE calling WaitForTask.
+	// If WaitForTask exits with an indeterminate error (context deadline, transient
+	// poll auth/404 — i.e. any error that is NOT a confirmed *TaskError from a
+	// terminal FAILED/CANCELED/ROLLBACK state), the task may still complete after
+	// the apply returns. Keeping identity in state prevents the next apply from
+	// attempting a duplicate enable that the API would reject as already-active.
+	//
+	// Conversely, if WaitForTask returns a *TaskError we have confirmed the task
+	// reached a terminal failure state — rescue is definitely NOT enabled, so we
+	// clear state and let Terraform re-try the create.
 	partialState := rescueResourceModel{
 		ServerID: types.StringValue(idStr),
 		Active:   types.BoolUnknown(),
@@ -182,6 +182,21 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &partialState)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if _, pollErr := r.client.WaitForTask(ctx, task.UUID); pollErr != nil {
+		var taskErr *netcup.TaskError
+		if errors.As(pollErr, &taskErr) {
+			// Confirmed terminal failure: the task is in ERROR/CANCELED/ROLLBACK.
+			// Rescue was NOT enabled. Clear the partial state so Terraform knows
+			// there is no resource and can retry the create cleanly.
+			resp.State.RemoveResource(ctx)
+		}
+		// For all failures (terminal or indeterminate): surface the error.
+		// When indeterminate, partial state is retained above so the next apply
+		// does not duplicate-enable.
+		resp.Diagnostics.AddError("Rescue enable task failed", pollErr.Error())
 		return
 	}
 
@@ -259,10 +274,21 @@ func (r *rescueResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	idStr := state.ID.ValueString()
+
+	// Thread 3 fix: after `terraform import` only `id` is populated; `wait` is
+	// null. If the resource is then destroyed before any update, Delete evaluates
+	// state.Wait.ValueBool() as false (null→false in Go) and skips polling,
+	// silently ignoring disable-task failures. Normalize null→true here (the
+	// documented default) so Delete's wait behavior matches user expectations.
+	waitVal := state.Wait
+	if waitVal.IsNull() || waitVal.IsUnknown() {
+		waitVal = types.BoolValue(true)
+	}
+
 	next := rescueResourceModel{
 		ServerID: types.StringValue(idStr),
 		Active:   types.BoolValue(status.Active),
-		Wait:     state.Wait,
+		Wait:     waitVal,
 		ID:       types.StringValue(idStr),
 	}
 	if status.Password != nil {

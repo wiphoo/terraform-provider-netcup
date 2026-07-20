@@ -706,6 +706,158 @@ func TestIsAlreadyDeactivated(t *testing.T) {
 	}
 }
 
+// TestRescueResource_CreateTerminalTaskFailClearsState verifies Thread 2 fix:
+// when WaitForTask returns a *TaskError (confirmed terminal failure such as
+// ERROR/CANCELED/ROLLBACK), Create must error AND clear the partial state so
+// that Terraform can retry the create cleanly without hitting duplicate-enable.
+func TestRescueResource_CreateTerminalTaskFailClearsState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-fail","name":"EnableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-fail":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			// Task reaches a confirmed terminal error state.
+			_, _ = w.Write([]byte(`{"uuid":"task-fail","name":"EnableRescue","state":"ERROR","message":"hardware failure"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() should error when the enable task reaches a terminal failure state")
+	}
+	// State must be empty (RemoveResource called) because a confirmed TaskError
+	// means rescue is definitively NOT enabled — no partial state should be kept.
+	if !resp.State.Raw.IsNull() {
+		t.Error("State should be cleared (null) after a confirmed terminal enable-task failure")
+	}
+}
+
+// TestRescueResource_CreateIndeterminateTaskFailRetainsState verifies Thread 2
+// fix: when WaitForTask exits for an indeterminate reason (e.g. context
+// deadline, permanent poll error such as 401) — NOT a confirmed *TaskError —
+// Create must error but retain the partial state (id + server_id) so the next
+// apply does not re-submit a duplicate enable that the API would reject.
+func TestRescueResource_CreateIndeterminateTaskFailRetainsState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-auth","name":"EnableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-auth":
+			// Simulate a permanent poll error (401 Unauthorized) — WaitForTask
+			// returns the *APIError directly (not a *TaskError), which is
+			// indeterminate: the task may still complete.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"token expired"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() should error when WaitForTask fails")
+	}
+
+	// Partial state must be retained — the task outcome is unknown.
+	var state rescueResourceModel
+	resp.Diagnostics = nil
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.ID.IsNull() || state.ID.IsUnknown() || state.ID.ValueString() == "" {
+		t.Error("ID should be retained in state for an indeterminate poll failure (not a *TaskError)")
+	}
+	if state.ServerID.ValueString() != "12345" {
+		t.Errorf("ServerID = %q, want 12345", state.ServerID.ValueString())
+	}
+}
+
+// TestRescueResource_ReadNormalizesNullWait verifies Thread 3 fix: after
+// `terraform import`, the state has only id set and wait is null. Read must
+// normalize null wait → true so that a subsequent Delete polls the disable task
+// (the documented default) instead of silently skipping polling.
+func TestRescueResource_ReadNormalizesNullWait(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/servers/99999/rescuesystem" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":true,"password":"import-pw"}`))
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	// Simulate the state that ImportState sets: only id is populated; all other
+	// attributes are null/unknown as set by ImportStatePassthroughID.
+	objType := schemaResp.Schema.Type().TerraformType(ctx)
+	importedState := tfsdk.State{
+		Raw: tftypes.NewValue(objType, map[string]tftypes.Value{
+			"id":        tftypes.NewValue(tftypes.String, "99999"),
+			"server_id": tftypes.NewValue(tftypes.String, nil), // null
+			"active":    tftypes.NewValue(tftypes.Bool, nil),   // null
+			"password":  tftypes.NewValue(tftypes.String, nil), // null
+			"wait":      tftypes.NewValue(tftypes.Bool, nil),   // null — the case under test
+		}),
+		Schema: schemaResp.Schema,
+	}
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: importedState}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+
+	var result rescueResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("State.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	// wait must be normalized to true, not left null, so Delete polls by default.
+	if result.Wait.IsNull() || result.Wait.IsUnknown() {
+		t.Error("Read() should normalize null wait to true after import")
+	}
+	if !result.Wait.ValueBool() {
+		t.Errorf("Wait = false after import normalization, want true")
+	}
+}
+
 // TestParseServerID verifies the parseServerID helper handles valid and invalid
 // inputs correctly.
 func TestParseServerID(t *testing.T) {
