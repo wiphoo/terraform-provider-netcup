@@ -109,7 +109,8 @@ machine-readable output.
 netcupctl server rescue status <id>
 
 # Enable rescue mode — REBOOTS into the rescue environment (prompts to confirm).
-# --wait polls to completion, then reads back and prints the rescue password.
+# --wait polls to completion, then attempts to read back the rescue password
+# (best-effort; re-run 'rescue status' if it is not available yet).
 netcupctl server rescue enable <id> --wait
 
 # Disable rescue mode — REBOOTS back into the normal OS (prompts to confirm).
@@ -117,8 +118,11 @@ netcupctl server rescue disable <id> --wait
 ```
 
 The rescue password is only available while rescue mode is active. With
-`enable --wait` it is printed once activation finishes; otherwise read it later
-with `netcupctl server rescue status <id>`.
+`enable --wait` netcupctl reads it back once activation finishes and prints it
+when the API already has it ready. The API may only expose the password a moment
+later, so this readback is best-effort: if it is not yet available netcupctl
+prints a hint to re-run `netcupctl server rescue status <id>`, which returns the
+password once it is set.
 
 ### Images and snapshots (read-only)
 

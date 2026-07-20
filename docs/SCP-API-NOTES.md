@@ -235,6 +235,7 @@ install), `servers/{id}/iso`/`isoimages`, `servers/{id}/interfaces*/firewall`,
 `servers/{id}/metrics/*`, `users/{userId}/failoverips/*`, `ssh-keys`, `vlans`.
 Not in scope through v0.3.0.
 
-> Async task polling (`GET /v1/tasks/{uuid}`, `:cancel`) shipped in v0.3.0 as the
+> Async task polling (`GET /v1/tasks/{uuid}`) shipped in v0.3.0 as the
 > foundation for `--wait` on the power/rescue commands; see `TaskInfo` /
-> `GetTask` / `WaitForTask` in `pkg/netcup/tasks.go`.
+> `GetTask` / `WaitForTask` in `pkg/netcup/tasks.go`. Task cancellation
+> (the `:cancel` endpoint / a `CancelTask` method) is not implemented yet.
