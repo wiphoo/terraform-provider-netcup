@@ -419,9 +419,16 @@ func TestRescueResource_ImportState(t *testing.T) {
 	}
 }
 
-// TestRescueResource_CreateWaitFalse verifies Thread 1 fix: when wait=false the
-// Create succeeds with unknown active/password rather than committing the
-// pre-task active:false, which would cause a spurious re-enable on next apply.
+// TestRescueResource_CreateWaitFalse verifies Thread A fix: when wait=false the
+// Create succeeds with KNOWN placeholder values for active/password. The
+// Terraform plugin protocol requires every attribute that was unknown in the
+// plan to become a known value in the final state — returning Unknown() causes
+// "Provider produced inconsistent result after apply". The placeholders are:
+//
+//	active=true  — we just submitted an enable; the intended managed state is
+//	               active; the next refresh reconciles to the live value.
+//	password=null — not yet available; null is a valid known value; it becomes
+//	                populated on the next refresh via Read.
 func TestRescueResource_CreateWaitFalse(t *testing.T) {
 	// The test server only handles the POST enable; it must NOT receive a GET
 	// rescuesystem call because we skip the read-back when wait=false.
@@ -464,13 +471,19 @@ func TestRescueResource_CreateWaitFalse(t *testing.T) {
 	if state.ID.ValueString() != "12345" {
 		t.Errorf("ID = %q, want 12345", state.ID.ValueString())
 	}
-	// active and password must NOT be committed as false/null from the
-	// pre-task-completion status — they should be unknown.
-	if !state.Active.IsUnknown() {
-		t.Errorf("Active should be unknown when wait=false, got %v", state.Active)
+	// Thread A fix: active and password must be KNOWN placeholder values, not
+	// Unknown(). Returning Unknown() from Create violates the Terraform protocol.
+	if state.Active.IsUnknown() {
+		t.Errorf("Active must be a known value when wait=false (got Unknown); use BoolValue(true) as placeholder")
 	}
-	if !state.Password.IsUnknown() {
-		t.Errorf("Password should be unknown when wait=false, got %v", state.Password)
+	if !state.Active.ValueBool() {
+		t.Errorf("Active = false when wait=false, want true (placeholder for intended active state)")
+	}
+	if state.Password.IsUnknown() {
+		t.Errorf("Password must be a known value when wait=false (got Unknown); use StringNull() as placeholder")
+	}
+	if !state.Password.IsNull() {
+		t.Errorf("Password = %q when wait=false, want null (placeholder until refresh populates it)", state.Password.ValueString())
 	}
 }
 
@@ -628,6 +641,43 @@ func TestRescueResource_DeleteAlreadyDeactivated(t *testing.T) {
 	}
 }
 
+// TestRescueResource_DeleteAlreadyPending verifies Thread B fix: a 400 whose
+// body contains "already" but NOT "deactivat" (e.g. "operation already
+// pending") must be treated as a hard error — NOT as a successful deactivation.
+// Prior to Thread B fix, the "already" substring clause in isAlreadyDeactivated
+// would have silently swallowed this, dropping the resource from state while
+// rescue mode was still active.
+func TestRescueResource_DeleteAlreadyPending(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/12345/rescuesystem" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"operation already pending"}`))
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "s3cr3t-rescue-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.DeleteResponse
+	r.Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Delete() should error on 'operation already pending' 400 — must not be treated as deactivation success")
+	}
+}
+
 // TestRescueResource_DeleteUnrelated400 verifies that an unrelated 400 error
 // during Delete is still treated as a hard error (i.e. we only swallow the
 // specific "already deactivated" case).
@@ -664,6 +714,11 @@ func TestRescueResource_DeleteUnrelated400(t *testing.T) {
 
 // TestIsAlreadyDeactivated verifies the helper correctly distinguishes
 // deactivation errors from other API errors.
+//
+// Thread B fix: the "already" substring was dropped because it is too broad —
+// "operation already pending" or "server already locked" would be incorrectly
+// treated as a successful deactivation. Only the documented "deactivat"
+// substring is matched now. Tests updated accordingly.
 func TestIsAlreadyDeactivated(t *testing.T) {
 	tests := []struct {
 		name string
@@ -671,14 +726,33 @@ func TestIsAlreadyDeactivated(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "deactivated body",
+			name: "deactivated body — documented API message",
 			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"rescue system currently deactivated"}`},
 			want: true,
 		},
 		{
-			name: "already body",
-			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"already disabled"}`},
+			name: "deactivated body — alternate wording",
+			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"rescue system is deactivated"}`},
 			want: true,
+		},
+		// Thread B fix: bare "already" without "deactivat" must NOT match.
+		// Prior versions matched "already" as a substring, which could cause
+		// "operation already pending" or "server already locked" 400s to be
+		// silently swallowed as deactivation success.
+		{
+			name: "already body without deactivat — must NOT match (thread B fix)",
+			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"already disabled"}`},
+			want: false,
+		},
+		{
+			name: "already pending — must NOT match (thread B fix)",
+			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"operation already pending"}`},
+			want: false,
+		},
+		{
+			name: "already locked — must NOT match (thread B fix)",
+			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"server already locked"}`},
+			want: false,
 		},
 		{
 			name: "unrelated 400",

@@ -142,18 +142,26 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 	// rescue status would reflect pre-task state (active:false, no password).
 	// Committing that would cause the next plan/refresh to remove the resource
 	// from state and attempt a re-enable, which the API rejects because a task
-	// is already pending/active. Instead, persist only the known identity and
-	// leave active/password as unknown (computed) to be resolved on the next
-	// refresh.
+	// is already pending/active.
+	//
+	// Thread A fix: the Terraform plugin protocol requires every attribute that
+	// was unknown in the plan to become a KNOWN value in the final state after
+	// apply. Returning types.BoolUnknown()/types.StringUnknown() here causes
+	// Terraform to reject the apply with "Provider produced inconsistent result
+	// after apply". Instead, return known placeholder values:
+	//   active=true  — we just submitted an enable; the intended managed state
+	//                  is active. The next refresh reconciles to live value.
+	//   password=null — not yet available; null is a known value. It becomes
+	//                   populated on the next refresh via Read.
 	if !plan.Wait.ValueBool() {
-		partialState := rescueResourceModel{
+		placeholderState := rescueResourceModel{
 			ServerID: types.StringValue(idStr),
-			Active:   types.BoolUnknown(),
-			Password: types.StringUnknown(),
+			Active:   types.BoolValue(true),
+			Password: types.StringNull(),
 			Wait:     plan.Wait,
 			ID:       types.StringValue(idStr),
 		}
-		resp.Diagnostics.Append(resp.State.Set(ctx, &partialState)...)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &placeholderState)...)
 		// Store the task UUID as a warning so the operator can track it.
 		resp.Diagnostics.AddWarning(
 			"Rescue enable task not awaited",
@@ -397,7 +405,14 @@ func parseServerID(s string) (int32, error) {
 // already deactivated. The netcup SCP API returns HTTP 400 with a body
 // containing "deactivat" (e.g. "rescue system currently deactivated") when
 // DisableRescueSystem is called on an already-inactive server. We match on the
-// status code and body substring to avoid swallowing unrelated 400s.
+// status code and the documented "deactivat" substring only.
+//
+// Thread B fix: the previous implementation also matched "already", which is
+// too broad — a 400 for "operation already pending" or "server already locked"
+// would be silently treated as success, dropping the resource from state while
+// rescue mode was still active. Restrict to the documented deactivated status
+// message only: match "deactivat" (covers "deactivated"/"currently deactivated")
+// and do NOT match generic "already".
 func isAlreadyDeactivated(err error) bool {
 	var apiErr *netcup.APIError
 	if !errors.As(err, &apiErr) {
@@ -407,5 +422,5 @@ func isAlreadyDeactivated(err error) bool {
 		return false
 	}
 	body := strings.ToLower(apiErr.Body)
-	return strings.Contains(body, "deactivat") || strings.Contains(body, "already")
+	return strings.Contains(body, "deactivat")
 }
