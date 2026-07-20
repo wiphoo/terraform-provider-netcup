@@ -308,27 +308,50 @@ func (r *serverPowerResource) ImportState(ctx context.Context, req resource.Impo
 
 // liveStateToDesiredPower maps a live ServerInfo.State value (as returned by
 // the SCP GET /v1/servers/{id} endpoint) to a desired PowerState suitable for
-// storing in Terraform state. Returns an empty string for transitional or
-// unknown states, indicating the caller should leave the desired state unchanged.
+// storing in Terraform state. Returns an empty string only for genuinely
+// short-lived transitional states, indicating the caller should leave the
+// desired state unchanged to avoid spurious plan diffs during transitions.
 //
-// Known live states from the SCP API:
+// Persistent non-running states are always mapped to a concrete PowerState so
+// that Terraform detects drift and proposes a corrective apply:
 //
-//	RUNNING   → ON
-//	SHUTOFF   → OFF
-//	SUSPENDED → SUSPENDED
-//	PAUSED    → SUSPENDED (paused is effectively suspended)
-//	others    → "" (transitional: keep current desired state)
+//   - RUNNING     → ON
+//   - SHUTOFF     → OFF
+//   - CRASHED     → OFF  (guest crashed; persistent non-running; surfaces drift)
+//   - SUSPENDED   → SUSPENDED
+//   - PAUSED      → SUSPENDED (hypervisor-paused; effectively suspended)
+//   - PMSUSPENDED → SUSPENDED (guest PM suspend; persistent; surfaces drift for
+//     configs targeting ON — mapping to SUSPENDED rather than OFF
+//     because the guest is still in memory, analogous to SUSPENDED)
+//
+// Genuinely short-lived transitions preserve the prior desired state (return ""):
+//
+//   - SHUTDOWN     → "" (ACPI shutdown in progress; resolves to SHUTOFF within seconds)
+//   - SAVE_RESTORE → "" (live-migration / snapshot save-restore in flight)
+//   - unknown      → "" (future state names; avoid incorrect mapping)
 func liveStateToDesiredPower(liveState string) netcup.PowerState {
 	switch strings.ToUpper(liveState) {
 	case "RUNNING":
 		return netcup.PowerOn
-	case "SHUTOFF":
+	case "SHUTOFF", "CRASHED":
+		// SHUTOFF is the normal off state.
+		// CRASHED is a persistent failure state (guest domain crashed); surface
+		// as OFF so Terraform detects drift for any config targeting ON or SUSPENDED.
 		return netcup.PowerOff
-	case "SUSPENDED", "PAUSED":
+	case "SUSPENDED", "PAUSED", "PMSUSPENDED":
+		// SUSPENDED: normal hypervisor suspend.
+		// PAUSED: hypervisor-level pause (effectively suspended).
+		// PMSUSPENDED: guest triggered PM suspend (suspend-to-RAM); persistent,
+		// mapped to SUSPENDED (not OFF) because the guest is still in memory.
 		return netcup.PowerSuspended
+	case "SHUTDOWN", "SAVE_RESTORE":
+		// Genuinely short-lived transitions: ACPI shutdown in progress or
+		// live-migration/save-restore in flight. Return "" to preserve the
+		// prior desired state and avoid plan thrash during these brief windows.
+		return ""
 	default:
-		// Transitional states (SHUTDOWN, SAVE_RESTORE, PMSUSPENDED, …) or unknown:
-		// return empty to signal "no change" so we don't create a spurious diff.
+		// Unknown future state: preserve current desired state to avoid
+		// mapping to an incorrect PowerState.
 		return ""
 	}
 }

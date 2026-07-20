@@ -447,6 +447,99 @@ func TestServerPowerResource_Read_Transitional(t *testing.T) {
 	}
 }
 
+// TestServerPowerResource_Read_PMSuspended verifies that PMSUSPENDED (guest PM
+// suspend) is treated as a persistent non-running state and mapped to SUSPENDED,
+// so that Terraform detects drift when the desired state is ON.
+func TestServerPowerResource_Read_PMSuspended(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		out, _ := json.Marshal(map[string]interface{}{
+			"id":             123,
+			"name":           "vps01",
+			"serverLiveInfo": map[string]interface{}{"state": "PMSUSPENDED"},
+		})
+		_, _ = w.Write(out)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired state is ON; server is in PMSUSPENDED (guest PM suspend).
+	// PMSUSPENDED is persistent, not transitional: state must flip to SUSPENDED
+	// so Terraform detects drift and proposes a corrective apply.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+		"id":           tftypes.NewValue(tftypes.String, "123"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Must map to SUSPENDED so drift is detected (not preserve ON).
+	if result.State.ValueString() != "SUSPENDED" {
+		t.Errorf("State = %q, want SUSPENDED (PMSUSPENDED is persistent, must surface drift)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_Crashed verifies that CRASHED (guest domain
+// crashed) is treated as a persistent non-running state and mapped to OFF,
+// so that Terraform detects drift when the desired state is ON.
+func TestServerPowerResource_Read_Crashed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		out, _ := json.Marshal(map[string]interface{}{
+			"id":             123,
+			"name":           "vps01",
+			"serverLiveInfo": map[string]interface{}{"state": "CRASHED"},
+		})
+		_, _ = w.Write(out)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired state is ON; server has crashed. CRASHED is persistent:
+	// state must flip to OFF so Terraform detects drift and repairs.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+		"id":           tftypes.NewValue(tftypes.String, "123"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Must map to OFF so drift is detected (not preserve ON).
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (CRASHED is persistent, must surface drift)", result.State.ValueString())
+	}
+}
+
 // TestServerPowerResource_Read_NoLiveInfo verifies Read handles a server with no
 // serverLiveInfo (state remains unchanged).
 func TestServerPowerResource_Read_NoLiveInfo(t *testing.T) {
@@ -820,23 +913,35 @@ func TestServerPowerResource_PowerStateValidator(t *testing.T) {
 }
 
 // TestLiveStateToDesiredPower verifies the state mapping function covers all
-// known cases.
+// known cases, including persistent non-running states that must produce drift.
 func TestLiveStateToDesiredPower(t *testing.T) {
 	tests := []struct {
 		liveState string
 		want      netcup.PowerState
+		comment   string
 	}{
-		{"RUNNING", netcup.PowerOn},
-		{"running", netcup.PowerOn}, // case-insensitive
-		{"SHUTOFF", netcup.PowerOff},
-		{"SUSPENDED", netcup.PowerSuspended},
-		{"PAUSED", netcup.PowerSuspended},
-		{"paused", netcup.PowerSuspended},
-		{"SHUTDOWN", ""},       // transitional
-		{"PMSUSPENDED", ""},    // transitional
-		{"SAVE_RESTORE", ""},   // transitional
-		{"", ""},               // unknown
-		{"UNKNOWN_FUTURE", ""}, // unknown future state
+		// Persistent running state.
+		{"RUNNING", netcup.PowerOn, "running server → ON"},
+		{"running", netcup.PowerOn, "case-insensitive"},
+
+		// Persistent non-running states: must produce concrete values so Terraform
+		// detects drift when the desired state diverges from the live state.
+		{"SHUTOFF", netcup.PowerOff, "normal off state"},
+		{"CRASHED", netcup.PowerOff, "guest crashed; persistent non-running → OFF surfaces drift"},
+
+		// Persistent suspended states.
+		{"SUSPENDED", netcup.PowerSuspended, "hypervisor suspend"},
+		{"PAUSED", netcup.PowerSuspended, "hypervisor-level pause → SUSPENDED"},
+		{"paused", netcup.PowerSuspended, "case-insensitive"},
+		{"PMSUSPENDED", netcup.PowerSuspended, "guest PM suspend; persistent → SUSPENDED (not transitional)"},
+
+		// Genuinely short-lived transitions: preserve prior desired state.
+		{"SHUTDOWN", "", "ACPI shutdown in progress; resolves to SHUTOFF within seconds"},
+		{"SAVE_RESTORE", "", "live-migration/snapshot in flight"},
+
+		// Unknown states: preserve to avoid incorrect mapping.
+		{"", "", "empty/unknown"},
+		{"UNKNOWN_FUTURE", "", "unknown future state"},
 	}
 
 	for _, tt := range tests {
