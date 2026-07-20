@@ -2,8 +2,10 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -134,11 +136,53 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	if plan.Wait.ValueBool() {
-		if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
-			resp.Diagnostics.AddError("Rescue enable task failed", err.Error())
-			return
+	// Thread 1 fix: when wait=false, the enable task has not yet completed so a
+	// read-back of rescue status would reflect pre-task state (active:false,
+	// no password). Committing that would cause the next plan/refresh to remove
+	// the resource from state and attempt a re-enable, which the API rejects
+	// because a task is already pending/active. Instead, persist only the known
+	// identity and leave active/password as unknown (computed) to be resolved on
+	// the next refresh.
+	if !plan.Wait.ValueBool() {
+		idStr := plan.ServerID.ValueString()
+		partialState := rescueResourceModel{
+			ServerID: types.StringValue(idStr),
+			Active:   types.BoolUnknown(),
+			Password: types.StringUnknown(),
+			Wait:     plan.Wait,
+			ID:       types.StringValue(idStr),
 		}
+		resp.Diagnostics.Append(resp.State.Set(ctx, &partialState)...)
+		// Store the task UUID as a warning so the operator can track it.
+		resp.Diagnostics.AddWarning(
+			"Rescue enable task not awaited",
+			fmt.Sprintf("Task %s was submitted but not awaited (wait=false). "+
+				"Run terraform refresh once the task completes to update active/password.", task.UUID),
+		)
+		return
+	}
+
+	if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
+		resp.Diagnostics.AddError("Rescue enable task failed", err.Error())
+		return
+	}
+
+	// Thread 2 fix: persist the resource identity into state BEFORE the
+	// fallible GetRescueSystem read-back. If GetRescueSystem returns a transient
+	// error, the resource ID is already in state so Terraform knows the server
+	// is in rescue mode; the next refresh/apply will re-read and fill
+	// active/password rather than attempting a duplicate enable.
+	idStr := plan.ServerID.ValueString()
+	partialState := rescueResourceModel{
+		ServerID: types.StringValue(idStr),
+		Active:   types.BoolUnknown(),
+		Password: types.StringUnknown(),
+		Wait:     plan.Wait,
+		ID:       types.StringValue(idStr),
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &partialState)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	// Read back active state and password.
@@ -146,10 +190,11 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 	if err != nil {
 		d, _ := apiErrorToDiag(err, true)
 		resp.Diagnostics.Append(d)
+		// Identity is already persisted above; return without overwriting state
+		// so the next refresh can fill in active/password.
 		return
 	}
 
-	idStr := plan.ServerID.ValueString()
 	state := rescueResourceModel{
 		ServerID: types.StringValue(idStr),
 		Active:   types.BoolValue(status.Active),
@@ -229,14 +274,33 @@ func (r *rescueResource) Read(ctx context.Context, req resource.ReadRequest, res
 	resp.Diagnostics.Append(resp.State.Set(ctx, &next)...)
 }
 
-// Update is not supported: all mutable attributes either require replacement
-// (server_id) or are computed. The framework will never call Update for this
-// resource; this method satisfies the resource.Resource interface.
+// Update handles in-place changes to the rescue resource. The only mutable
+// non-computed attribute is `wait` (server_id requires replacement). Changing
+// `wait` does not require any API call — it only controls whether future
+// Create/Delete operations block until the async task completes.
+//
+// Thread 3 fix: previously Update always returned an error, which meant
+// changing wait=true to wait=false (or any plan that dispatched to Update)
+// permanently failed. Now we copy the planned `wait` value into state so the
+// change is accepted without an unnecessary reboot/replacement.
 func (r *rescueResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	resp.Diagnostics.AddError(
-		"Update not supported",
-		"netcup_server_rescue does not support in-place updates. All changes require resource replacement.",
-	)
+	var state rescueResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	var plan rescueResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Copy the planned wait value into state; all other attributes are either
+	// computed (active, password, id) or require replacement (server_id).
+	state.Wait = plan.Wait
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 func (r *rescueResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -262,6 +326,16 @@ func (r *rescueResource) Delete(ctx context.Context, req resource.DeleteRequest,
 
 	task, err := r.client.DisableRescueSystem(ctx, serverID)
 	if err != nil {
+		// Thread 4 fix: if DisableRescueSystem returns a 400 whose body indicates
+		// the rescue system is already deactivated, treat it as success — the
+		// desired state (rescue off) is already reached. This handles the case
+		// where the rescue system was deactivated outside Terraform between the
+		// last refresh and the destroy. Only match the specific "already
+		// deactivated" 400; other 400s (and all other status codes) are still
+		// treated as hard errors.
+		if isAlreadyDeactivated(err) {
+			return
+		}
 		d, gone := apiErrorToDiag(err, false)
 		if gone {
 			return
@@ -291,4 +365,21 @@ func parseServerID(s string) (int32, error) {
 		return 0, fmt.Errorf("server_id %q is not a valid numeric server ID: %w", s, err)
 	}
 	return int32(n), nil
+}
+
+// isAlreadyDeactivated reports whether err indicates that the rescue system is
+// already deactivated. The netcup SCP API returns HTTP 400 with a body
+// containing "deactivat" (e.g. "rescue system currently deactivated") when
+// DisableRescueSystem is called on an already-inactive server. We match on the
+// status code and body substring to avoid swallowing unrelated 400s.
+func isAlreadyDeactivated(err error) bool {
+	var apiErr *netcup.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode != 400 {
+		return false
+	}
+	body := strings.ToLower(apiErr.Body)
+	return strings.Contains(body, "deactivat") || strings.Contains(body, "already")
 }
