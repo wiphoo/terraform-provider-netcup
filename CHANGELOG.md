@@ -26,6 +26,27 @@ This file is the human-curated companion to those release notes:
 
 ### Added
 
+- **netcupctl operations (v0.3.0 milestone).** New `server` subcommands and the
+  SDK methods behind them:
+  - `server power status|on|off|suspend|reboot` (`SetPowerState`) — change a
+    server's power state via `PATCH /v1/servers/{id}`. `off`/`suspend`/`reboot`
+    warn and confirm before causing downtime (`--force`/`--yes` to skip);
+    `--hard` selects the forced variants (`POWEROFF`/`RESET`).
+  - `server rescue status|enable|disable` (`GetRescueSystem` /
+    `EnableRescueSystem` / `DisableRescueSystem`) — control the rescue system.
+    `enable`/`disable` reboot the server and confirm first; `enable --wait`
+    attempts to read back the rescue password once activation finishes
+    (best-effort — the API may expose it a moment later, so re-run
+    `server rescue status` if it is not yet available).
+  - `server images` (`ListImageFlavours`) — list installable OS image flavours.
+  - `server snapshots` (`ListSnapshots`) — list a server's snapshots (read-only).
+  - Async task polling foundation (`GetTask` / `WaitForTask`, `TaskInfo`) powering
+    `--wait` on the power and rescue commands.
+  - go-vcr replay cassettes covering the new SDK methods with deterministic PII
+    redaction.
+  - Documented downtime/operational-risk guidance for the power and rescue
+    commands (README) and the power/rescue/image-flavour/snapshot endpoint shapes
+    in `docs/SCP-API-NOTES.md`.
 - `GOVERNANCE.md` documenting the project's governance model.
 - CodeQL code-scanning workflow for Go analysis.
 - Stale-issue/PR automation workflow.

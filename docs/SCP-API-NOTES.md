@@ -183,10 +183,59 @@ and back into the normal OS, respectively).
   ("Rescue system currently deactivated."); unknown server → `404`. All non-2xx
   surface as `*APIError`.
 
+## Image flavours
+
+List the installable OS images (image flavours) for a server — the input
+identifiers for the OS-reinstall flows (v0.5.0/v0.6.0). Pure read, **no downtime
+risk**. The SDK exposes this as `ListImageFlavours` and the CLI as
+`netcupctl server images <id>`.
+
+### List — `GET /v1/servers/{serverId}/imageflavours` → `[]ImageFlavour`
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | int32 | flavour id |
+| `name` | string | machine name |
+| `alias` | string | short human-facing alias |
+| `text` | string | human-facing description |
+| `image` | object? | `ImageMinimal { id int32, name string }` — the underlying base image; nullable |
+
+- An **empty list is valid** (no error); non-2xx → `*APIError`.
+- Companion `GET /v1/servers/{serverId}/isoimages` exists but is **out of scope**
+  for v0.3.0. User images (`GET /v1/users/{userId}/images`) are deferred to the
+  provisioning milestones.
+
+## Snapshots
+
+List a server's snapshots. Pure read, **no downtime risk**. Snapshot
+create/delete/restore/export are **v0.7.0** (Snapshot Management) and stay out of
+scope here. The SDK exposes this as `ListSnapshots` and the CLI as
+`netcupctl server snapshots <id>`.
+
+### List — `GET /v1/servers/{serverId}/snapshots` → `[]SnapshotMinimal`
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `uuid` | string | snapshot id |
+| `name` | string | |
+| `description` | string? | nullable |
+| `disks` | []string | may be empty |
+| `creationTime` | time | RFC 3339; parsed as `time.Time` and rendered readably in the table |
+| `state` | string | `ServerState` (`RUNNING`, `SHUTOFF`, …) |
+| `online` | bool | taken while the server was running |
+| `exported` | bool | |
+| `exportedSizeInKiB` | int64? | nullable; set once exported |
+
+- An **empty list is valid** (no error); non-2xx → `*APIError`.
+
 ## Other endpoints (for later milestones)
 
-The spec also exposes (v0.3.0+ territory): `servers/{id}/snapshots*`,
-`servers/{id}/image` + `imageflavours` (OS install),
-`servers/{id}/iso`/`isoimages`, `servers/{id}/interfaces*/firewall`,
-`servers/{id}/metrics/*`, `tasks/{uuid}` (async operations + `:cancel`),
-`users/{userId}/failoverips/*`, `ssh-keys`, `vlans`. Not in scope for v0.1.0/v0.2.0.
+The spec also exposes (later-milestone territory): `servers/{id}/image` (OS
+install), `servers/{id}/iso`/`isoimages`, `servers/{id}/interfaces*/firewall`,
+`servers/{id}/metrics/*`, `users/{userId}/failoverips/*`, `ssh-keys`, `vlans`.
+Not in scope through v0.3.0.
+
+> Async task polling (`GET /v1/tasks/{uuid}`) shipped in v0.3.0 as the
+> foundation for `--wait` on the power/rescue commands; see `TaskInfo` /
+> `GetTask` / `WaitForTask` in `pkg/netcup/tasks.go`. Task cancellation
+> (the `:cancel` endpoint / a `CancelTask` method) is not implemented yet.
