@@ -224,6 +224,13 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
+	// Read prior state so we can detect wait-only changes.
+	var prior serverPowerResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	id, err := strconv.ParseInt(plan.ServerID.ValueString(), 10, 32)
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -233,21 +240,30 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	state := netcup.PowerState(plan.State.ValueString())
-	stateOption := plan.StateOption.ValueString()
+	// Only issue a power command when state or state_option actually changed.
+	// Changing only `wait` (which controls task-polling behaviour) must NOT
+	// reissue the power operation — doing so would cause unexpected downtime
+	// for destructive state_options like RESET or POWERCYCLE.
+	stateChanged := plan.State.ValueString() != prior.State.ValueString()
+	optionChanged := plan.StateOption.ValueString() != prior.StateOption.ValueString()
 
-	task, err := r.client.SetPowerState(ctx, int32(id), state, stateOption)
-	if err != nil {
-		diag, _ := apiErrorToDiag(err, true)
-		resp.Diagnostics.Append(diag)
-		return
-	}
+	if stateChanged || optionChanged {
+		powerState := netcup.PowerState(plan.State.ValueString())
+		stateOption := plan.StateOption.ValueString()
 
-	if plan.Wait.ValueBool() && task != nil {
-		if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
+		task, err := r.client.SetPowerState(ctx, int32(id), powerState, stateOption)
+		if err != nil {
 			diag, _ := apiErrorToDiag(err, true)
 			resp.Diagnostics.Append(diag)
 			return
+		}
+
+		if plan.Wait.ValueBool() && task != nil {
+			if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
+				diag, _ := apiErrorToDiag(err, true)
+				resp.Diagnostics.Append(diag)
+				return
+			}
 		}
 	}
 
@@ -272,7 +288,22 @@ func (r *serverPowerResource) Delete(_ context.Context, _ resource.DeleteRequest
 }
 
 func (r *serverPowerResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	// Validate that the import ID is a numeric server ID.
+	if _, err := strconv.ParseInt(req.ID, 10, 32); err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid import ID",
+			fmt.Sprintf("The import ID must be a numeric server ID; got %q.", req.ID),
+		)
+		return
+	}
+
+	// Set both `id` (the computed Terraform resource identifier) and
+	// `server_id` (the required attribute) from the import ID so that the
+	// subsequent Read refresh can parse server_id without encountering an empty
+	// string. Without this, ImportStatePassthroughID would only populate `id`,
+	// leaving server_id null and causing ParseInt to fail in Read.
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), req.ID)...)
 }
 
 // liveStateToDesiredPower maps a live ServerInfo.State value (as returned by

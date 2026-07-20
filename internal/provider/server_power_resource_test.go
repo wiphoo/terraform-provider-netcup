@@ -541,6 +541,14 @@ func TestServerPowerResource_Update_Async(t *testing.T) {
 	r, schemaResp := configureServerPowerResource(t, client)
 
 	ctx := context.Background()
+	// Prior state has state=ON so that plan's state=OFF is a real change.
+	priorState := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+		"id":           tftypes.NewValue(tftypes.String, "123"),
+	})
 	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
 		"server_id":    tftypes.NewValue(tftypes.String, "123"),
 		"state":        tftypes.NewValue(tftypes.String, "OFF"),
@@ -550,7 +558,7 @@ func TestServerPowerResource_Update_Async(t *testing.T) {
 
 	var resp resource.UpdateResponse
 	resp.State = tfsdk.State{Schema: schemaResp.Schema}
-	r.Update(ctx, resource.UpdateRequest{Plan: plan}, &resp)
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Update() unexpected diagnostics: %v", resp.Diagnostics.Errors())
@@ -593,8 +601,9 @@ func TestServerPowerResource_Delete_IsNoop(t *testing.T) {
 	}
 }
 
-// TestServerPowerResource_ImportState verifies ImportState sets id from the
-// import ID string.
+// TestServerPowerResource_ImportState verifies ImportState sets both id and
+// server_id from the import ID string so that the subsequent Read refresh can
+// parse server_id without encountering an empty string.
 func TestServerPowerResource_ImportState(t *testing.T) {
 	r := NewServerPowerResource().(interface {
 		resource.ResourceWithImportState
@@ -628,10 +637,149 @@ func TestServerPowerResource_ImportState(t *testing.T) {
 	var id types.String
 	resp.Diagnostics.Append(resp.State.GetAttribute(ctx, path.Root("id"), &id)...)
 	if resp.Diagnostics.HasError() {
-		t.Fatalf("GetAttribute() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+		t.Fatalf("GetAttribute(id) unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
 	if id.ValueString() != "42" {
 		t.Errorf("id = %q, want 42", id.ValueString())
+	}
+
+	// server_id must also be populated so Read can ParseInt it without error.
+	var serverID types.String
+	resp.Diagnostics.Append(resp.State.GetAttribute(ctx, path.Root("server_id"), &serverID)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("GetAttribute(server_id) unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if serverID.ValueString() != "42" {
+		t.Errorf("server_id = %q, want 42 (must be set so Read can parse it)", serverID.ValueString())
+	}
+}
+
+// TestServerPowerResource_ImportState_InvalidID verifies that a non-numeric
+// import ID is rejected with an error diagnostic.
+func TestServerPowerResource_ImportState_InvalidID(t *testing.T) {
+	r := NewServerPowerResource().(interface {
+		resource.ResourceWithImportState
+		resource.ResourceWithConfigure
+	})
+
+	client := netcup.New(netcup.WithAccessToken("tok"))
+	ctx := context.Background()
+
+	var configResp resource.ConfigureResponse
+	r.Configure(ctx, resource.ConfigureRequest{ProviderData: client}, &configResp)
+	if configResp.Diagnostics.HasError() {
+		t.Fatalf("Configure() unexpected diagnostics: %v", configResp.Diagnostics.Errors())
+	}
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+
+	var resp resource.ImportStateResponse
+	objType := schemaResp.Schema.Type().TerraformType(ctx)
+	resp.State = tfsdk.State{
+		Raw:    tftypes.NewValue(objType, nil),
+		Schema: schemaResp.Schema,
+	}
+	r.ImportState(ctx, resource.ImportStateRequest{ID: "not-a-number"}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("ImportState() expected error diagnostic for non-numeric ID, got none")
+	}
+}
+
+// TestServerPowerResource_Update_WaitOnlyChange verifies that changing only
+// `wait` does NOT reissue the SetPowerState command. This is critical for
+// destructive state_options like RESET or POWERCYCLE where reissuing the
+// command would cause unexpected downtime.
+func TestServerPowerResource_Update_WaitOnlyChange(t *testing.T) {
+	powerCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			powerCalled = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Prior state: ON with RESET state_option.
+	priorState := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":         tftypes.NewValue(tftypes.Bool, false),
+		"id":           tftypes.NewValue(tftypes.String, "123"),
+	})
+	// Plan: same state + state_option, only wait changed to true.
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.UpdateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if powerCalled {
+		t.Error("SetPowerState (PATCH) should NOT be called when only wait changed, but it was")
+	}
+
+	// The new wait value must be persisted in state.
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.Wait.ValueBool() != true {
+		t.Errorf("wait = %v, want true after wait-only update", result.Wait.ValueBool())
+	}
+}
+
+// TestServerPowerResource_Update_StateChange verifies that changing `state`
+// DOES issue a SetPowerState call even when wait is unchanged.
+func TestServerPowerResource_Update_StateChange(t *testing.T) {
+	powerCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			powerCalled = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	priorState := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+		"id":           tftypes.NewValue(tftypes.String, "123"),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.UpdateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !powerCalled {
+		t.Error("SetPowerState (PATCH) SHOULD be called when state changes, but it was not")
 	}
 }
 
