@@ -175,6 +175,7 @@ func (p *netcupProvider) DataSources(_ context.Context) []func() datasource.Data
 	return []func() datasource.DataSource{
 		NewServersDataSource,
 		NewServerDataSource,
+		NewServerImagesDataSource,
 	}
 }
 
