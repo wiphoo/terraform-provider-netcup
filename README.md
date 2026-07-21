@@ -10,10 +10,11 @@ and other Netcup APIs planned in later releases.
 
 ## Status
 
-**v0.2.0 — Terraform provider is available.**
+**v0.3.0 — netcupctl operations are available.**
 
 The `netcupctl` CLI, shared Go SDK, CI, and release automation shipped in v0.1.0.
-The Terraform provider (data sources, rDNS resource, examples, and docs) ships in v0.2.0 on top of the same SDK.
+The Terraform provider (data sources, rDNS resource, examples, and docs) shipped in v0.2.0 on top of the same SDK.
+v0.3.0 adds `netcupctl` operations: power state management, rescue mode, and image/snapshot listing.
 
 See the [Roadmap](docs/ROADMAP.md) for the full release plan.
 
@@ -70,11 +71,10 @@ Beyond listing servers, `netcupctl` can control a server's power state and rescu
 system and list its installable images and snapshots. All commands take a numeric
 server `<id>` (from `netcupctl server list`) and support `--json` for scripting.
 
-> ℹ️ **Availability:** these operations ship in **v0.3.0**. Until the v0.3.0
-> release is published they live only in the source tree — build from source
-> (`make build`, or `go install github.com/wiphoo/terraform-provider-netcup/cmd/netcupctl@main`).
-> The latest tagged release (v0.2.0) does **not** include these subcommands, so
-> installing it and running them fails with an unknown-subcommand error.
+> ℹ️ **Availability:** these operations require `netcupctl` **v0.3.0 or newer**.
+> Earlier releases (v0.2.0 and before) do **not** include these subcommands, so
+> running them there fails with an unknown-subcommand error — download the latest
+> release or build from source (`make build`).
 
 > ⚠️ **Some of these commands cause downtime.** Read
 > [Operational risk & downtime](#operational-risk--downtime) before running the
