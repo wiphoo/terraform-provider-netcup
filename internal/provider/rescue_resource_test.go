@@ -1008,6 +1008,15 @@ func TestRescueResource_CreateIndeterminateEnableRetainsState(t *testing.T) {
 	if state.Password.IsUnknown() || !state.Password.IsNull() {
 		t.Error("Password must be a known null placeholder after indeterminate enable")
 	}
+	// Thread A (round 8) fix: no TaskInfo/UUID came back, so pending_task_id is set
+	// to the pendingTaskIDIndeterminate sentinel (NOT null) so Read retains the
+	// resource through the activation window instead of dropping it.
+	if state.PendingTaskID.IsNull() || state.PendingTaskID.IsUnknown() {
+		t.Fatal("pending_task_id must be the indeterminate sentinel (known, non-null) after an indeterminate enable")
+	}
+	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("pending_task_id = %q, want sentinel %q", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
+	}
 }
 
 // TestRescueResource_CreateIndeterminateTransportRetainsState verifies Thread B
@@ -1930,6 +1939,153 @@ func TestRescueResource_ReadActiveClearsPendingTaskID(t *testing.T) {
 	}
 	if !result.PendingTaskID.IsNull() {
 		t.Errorf("pending_task_id must be cleared on an active read, got %q", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestRescueResource_ReadInactiveIndeterminateSentinelRetained verifies thread A
+// (round 8): when Create could not obtain a task UUID for an indeterminate enable
+// POST it stored the pendingTaskIDIndeterminate sentinel. An inactive Read that
+// sees the sentinel must RETAIN the resource (keeping the marker + active=false)
+// and MUST NOT call GetTask — there is no real task to query. The test server
+// fails if any /tasks/ request arrives.
+func TestRescueResource_ReadInactiveIndeterminateSentinelRetained(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+			return
+		}
+		// A GetTask (/v1/tasks/...) call here would be a bug — the sentinel is not
+		// a real task UUID and must never be looked up.
+		t.Errorf("unexpected request (GetTask must NOT run for the indeterminate sentinel): %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, pendingTaskIDIndeterminate),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("resource must be RETAINED when tracking the indeterminate sentinel and rescue reads inactive")
+	}
+	result := readRescueModel(t, ctx, resp.State)
+	if result.Active.ValueBool() {
+		t.Error("active should be a known false during the indeterminate window")
+	}
+	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("pending_task_id must remain the sentinel, got %q", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestRescueResource_ReadActiveIndeterminateSentinelCleared verifies thread A
+// (round 8): once a Read observes active==true, the pendingTaskIDIndeterminate
+// sentinel is cleared via the normal active branch (no GetTask call).
+func TestRescueResource_ReadActiveIndeterminateSentinelCleared(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":true,"password":"pw"}`))
+			return
+		}
+		t.Errorf("unexpected request (GetTask must NOT run for the indeterminate sentinel): %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, false),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, pendingTaskIDIndeterminate),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("resource must be retained on an active read")
+	}
+	result := readRescueModel(t, ctx, resp.State)
+	if !result.Active.ValueBool() {
+		t.Error("active should be true")
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("the indeterminate sentinel must be cleared once rescue reads active, got %q", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestRescueResource_DeleteNullWaitAwaitsTask verifies thread B (round 8): state
+// created by ImportState leaves `wait` null. An immediate destroy -refresh=false
+// reaches Delete with wait still null; Delete must normalize null→true (the
+// documented default) and therefore AWAIT the disable task (call WaitForTask)
+// rather than skipping it and hiding a disable-task failure. The test asserts the
+// disable task IS polled by requiring the /tasks/ GET to occur.
+func TestRescueResource_DeleteNullWaitAwaitsTask(t *testing.T) {
+	taskPolled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del-null","name":"DisableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-del-null":
+			taskPolled = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-del-null","name":"DisableRescue","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	// Mirror ImportState-then-immediate-destroy: only id/server_id populated;
+	// wait is null (never normalized by a Read).
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, nil), // null — the case under test
+		"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+	})
+
+	var resp resource.DeleteResponse
+	r.Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Delete() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !taskPolled {
+		t.Error("Delete with null wait must normalize to true and AWAIT the disable task (WaitForTask should have polled /tasks/)")
 	}
 }
 

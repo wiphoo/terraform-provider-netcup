@@ -35,6 +35,21 @@ import (
 // can be made configurable later without changing this default.
 const defaultTaskTimeout = 15 * time.Minute
 
+// pendingTaskIDIndeterminate is a sentinel stored in pending_task_id when Create
+// submitted an enable but never received a usable TaskInfo/UUID back (an
+// indeterminate POST failure — truncated 202, transport error mid-response, or a
+// 5xx that the server may have accepted). There is no real task UUID to query,
+// so this marker keeps the resource tracked through the activation-reconciliation
+// window instead of dropping it.
+//
+// Thread A (round 8) fix: it MUST NOT collide with a real SCP task UUID. SCP task
+// UUIDs are RFC 4122 UUIDs (36-char, hyphenated hex); the literal string
+// "indeterminate" cannot be one, so the sentinel is unambiguous. Read special-
+// cases this value BEFORE calling GetTask (there is no task to look up) and
+// RETAINS the resource; a later Read that observes active==true clears it via the
+// normal active branch.
+const pendingTaskIDIndeterminate = "indeterminate"
+
 var _ resource.Resource = &rescueResource{}
 
 var _ resource.ResourceWithConfigure = &rescueResource{}
@@ -198,19 +213,30 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 			return
 		}
 
-		// Residual limitation (thread P1): this indeterminate POST failure returned
-		// no usable TaskInfo, so there is no enable-task UUID to persist. We keep
-		// pending_task_id null; a refresh that reads active:false while the enable
-		// may still be running cannot consult a task here and will fall back to the
-		// genuine-absence path. This is the one Create branch where the P1
-		// reconciliation cannot help — the SCP API gave us no task handle to track.
+		// Thread A (round 8) fix: this indeterminate POST failure returned no usable
+		// TaskInfo, so there is no enable-task UUID to persist. Previously we kept
+		// pending_task_id null and a refresh that read active:false while the enable
+		// may still be running fell into the genuine-absence path and removed the
+		// resource — the next apply could then submit a DUPLICATE enable while the
+		// original task was still activating (extra reboot / already-pending 400).
+		//
+		// Instead, persist the pendingTaskIDIndeterminate sentinel. Read's
+		// inactive+pending branch special-cases it (no GetTask — there is no task to
+		// query) and RETAINS the resource through the reconciliation window; a later
+		// Read that observes active==true clears the marker via the active branch.
+		//
+		// Residual tradeoff (deliberate): a genuinely-failed indeterminate enable
+		// stays tracked under the sentinel until an operator intervenes (e.g.
+		// terraform state rm, or a manual enable that a later refresh observes
+		// active). That is safer than dropping a resource whose rescue may in fact
+		// be activating and then double-enabling it.
 		indeterminateState := rescueResourceModel{
 			ServerID:      types.StringValue(idStr),
 			Active:        types.BoolValue(true),
 			Password:      types.StringNull(),
 			Wait:          plan.Wait,
 			ID:            types.StringValue(idStr),
-			PendingTaskID: types.StringNull(),
+			PendingTaskID: types.StringValue(pendingTaskIDIndeterminate),
 		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &indeterminateState)...)
 		d, _ := apiErrorToDiag(err, true)
@@ -440,6 +466,32 @@ func (r *rescueResource) Read(ctx context.Context, req resource.ReadRequest, res
 		}
 
 		uuid := state.PendingTaskID.ValueString()
+
+		// Thread A (round 8) fix: the pendingTaskIDIndeterminate sentinel is NOT a
+		// real task UUID — Create stored it because the indeterminate enable POST
+		// returned no TaskInfo to query. Do NOT call GetTask (there is nothing to
+		// look up). RETAIN the resource with the marker and a known active=false;
+		// a later Read that observes active==true clears the marker via the active
+		// branch below. This keeps the resource tracked through the activation
+		// window so the next apply does not submit a duplicate enable.
+		//
+		// Residual tradeoff (deliberate): if that indeterminate enable genuinely
+		// failed, the resource stays tracked under the sentinel until an operator
+		// intervenes — safer than dropping a possibly-active resource and
+		// double-enabling it.
+		if uuid == pendingTaskIDIndeterminate {
+			kept := rescueResourceModel{
+				ServerID:      types.StringValue(idStr),
+				Active:        types.BoolValue(false),
+				Password:      types.StringNull(),
+				Wait:          waitVal,
+				ID:            types.StringValue(idStr),
+				PendingTaskID: types.StringValue(pendingTaskIDIndeterminate),
+			}
+			resp.Diagnostics.Append(resp.State.Set(ctx, &kept)...)
+			return
+		}
+
 		task, err := r.client.GetTask(ctx, uuid)
 		if err != nil {
 			// A 404 (or otherwise "gone") means the task record no longer exists —
@@ -586,6 +638,18 @@ func (r *rescueResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		return
 	}
 
+	// Thread B (round 8) fix: for state created by ImportState, `wait` stays null
+	// until a Read normalizes it. An immediate `terraform destroy -refresh=false`
+	// reaches Delete with wait still null, so state.Wait.ValueBool() returns false
+	// (null→false in Go) and Delete would skip WaitForTask despite the documented
+	// default wait=true — silently removing the resource and hiding a disable-task
+	// failure. Normalize null/unknown → true here, exactly as Read does, and use
+	// that normalized value to decide whether to await the disable task.
+	waitVal := state.Wait
+	if waitVal.IsNull() || waitVal.IsUnknown() {
+		waitVal = types.BoolValue(true)
+	}
+
 	task, err := r.client.DisableRescueSystem(ctx, serverID)
 	if err != nil {
 		// Thread 4 fix: if DisableRescueSystem returns a 400 whose body indicates
@@ -606,7 +670,7 @@ func (r *rescueResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		return
 	}
 
-	if state.Wait.ValueBool() {
+	if waitVal.ValueBool() {
 		// Thread C fix: bound the disable poll with defaultTaskTimeout so a
 		// stalled disable task surfaces a deadline-exceeded diagnostic instead
 		// of blocking `terraform destroy` indefinitely.
