@@ -221,6 +221,18 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 	}
 
 	state.ID = types.StringValue(state.ServerID.ValueString())
+
+	// Normalize a null/unknown `wait` to the schema default (true). ImportState
+	// only sets id + server_id, leaving `wait` null; without this, the null value
+	// is written straight back to state and — because the schema proposes the
+	// default `wait = true` whenever config omits it — the first plan after an
+	// otherwise-successful import contains a spurious wait-only update instead of
+	// being empty. Coercing null/unknown to the default here makes imported state
+	// match normal resource state so the post-import plan is clean.
+	if state.Wait.IsNull() || state.Wait.IsUnknown() {
+		state.Wait = types.BoolValue(true)
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 

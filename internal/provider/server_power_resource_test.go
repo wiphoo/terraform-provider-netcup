@@ -750,6 +750,63 @@ func TestServerPowerResource_Read_NoLiveInfo(t *testing.T) {
 	}
 }
 
+// TestServerPowerResource_ReadNormalizesNullWait verifies that a post-import
+// Read normalizes a null `wait` to the schema default (true). After ImportState
+// sets only id + server_id, `wait` is null; without normalization Read would
+// write that null back, and because the schema proposes the default wait=true
+// when config omits it, the first post-import plan would contain a spurious
+// wait-only update. Read must coerce null → true so the post-import plan is clean.
+func TestServerPowerResource_ReadNormalizesNullWait(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/servers/123" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		out, _ := json.Marshal(map[string]interface{}{
+			"id":             123,
+			"name":           "vps01",
+			"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+		})
+		_, _ = w.Write(out)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Simulate post-import state: ImportState sets only id + server_id; state and
+	// wait are null. Read must normalize the null wait to the schema default true.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, nil),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, nil),
+		"id":           tftypes.NewValue(tftypes.String, "123"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("State.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if result.Wait.IsNull() || result.Wait.IsUnknown() {
+		t.Fatalf("wait = %v, want a known value (default true) after post-import Read", result.Wait)
+	}
+	if result.Wait.ValueBool() != true {
+		t.Errorf("wait = %v, want true (null must normalize to schema default)", result.Wait.ValueBool())
+	}
+}
+
 // TestServerPowerResource_Read_404 verifies Read on a missing server removes
 // the resource from state (no error).
 func TestServerPowerResource_Read_404(t *testing.T) {
