@@ -66,7 +66,7 @@ Scope:
 - go-vcr replay tests for SDK and provider
 - Provider release automation (goreleaser + cosign)
 
-## v0.3.0 - Operations (CLI)
+## v0.3.0 - Operations (CLI) (shipped)
 
 Scope:
 
