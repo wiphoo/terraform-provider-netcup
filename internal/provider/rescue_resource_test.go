@@ -549,6 +549,15 @@ func TestRescueResource_CreateReadBackFailRetainsID(t *testing.T) {
 	if state.ServerID.ValueString() != "12345" {
 		t.Errorf("ServerID = %q, want 12345", state.ServerID.ValueString())
 	}
+	// Thread C fix: retained partial state must use KNOWN placeholders, not
+	// Unknown() — Terraform rejects a stored NewState containing unknown values
+	// after an errored apply.
+	if state.Active.IsUnknown() {
+		t.Error("Active must be a known placeholder (not Unknown) in retained partial state when read-back fails")
+	}
+	if state.Password.IsUnknown() {
+		t.Error("Password must be a known placeholder (not Unknown) in retained partial state when read-back fails")
+	}
 }
 
 // TestRescueResource_UpdateWait verifies Thread 3 fix: changing the wait
@@ -876,6 +885,15 @@ func TestRescueResource_CreateIndeterminateTaskFailRetainsState(t *testing.T) {
 	}
 	if state.ServerID.ValueString() != "12345" {
 		t.Errorf("ServerID = %q, want 12345", state.ServerID.ValueString())
+	}
+	// Thread C fix: retained partial state must use KNOWN placeholders, not
+	// Unknown() — Terraform rejects a stored NewState containing unknown values
+	// after an errored apply.
+	if state.Active.IsUnknown() {
+		t.Error("Active must be a known placeholder (not Unknown) in retained partial state after an errored apply")
+	}
+	if state.Password.IsUnknown() {
+		t.Error("Password must be a known placeholder (not Unknown) in retained partial state after an errored apply")
 	}
 }
 

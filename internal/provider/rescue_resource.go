@@ -181,10 +181,21 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 	// Conversely, if WaitForTask returns a *TaskError we have confirmed the task
 	// reached a terminal failure state — rescue is definitely NOT enabled, so we
 	// clear state and let Terraform re-try the create.
+	//
+	// Thread C fix: use KNOWN placeholder values (active=true, password=null),
+	// not types.BoolUnknown()/types.StringUnknown(). When WaitForTask or the
+	// read-back below fails, this partial state becomes the final NewState that
+	// Terraform stores for the errored apply. The provider protocol does not
+	// permit unknown values in stored state — Terraform rejects a NewState that
+	// still contains unknowns after apply ("Provider returned invalid result
+	// object after apply"), which would defeat the whole point of persisting
+	// identity here. Mirror the wait=false path: active=true is the intended
+	// managed state (we just submitted an enable), password=null is a valid
+	// known value; the next refresh reconciles both to live values.
 	partialState := rescueResourceModel{
 		ServerID: types.StringValue(idStr),
-		Active:   types.BoolUnknown(),
-		Password: types.StringUnknown(),
+		Active:   types.BoolValue(true),
+		Password: types.StringNull(),
 		Wait:     plan.Wait,
 		ID:       types.StringValue(idStr),
 	}
