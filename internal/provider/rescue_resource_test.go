@@ -1292,6 +1292,123 @@ func TestUseStateForUnknownUnlessReplacing_Bool_Replacement(t *testing.T) {
 	}
 }
 
+// TestUseStateForUnknownUnlessReplacing_String_UnknownServerID verifies the
+// round-5 fix: when the planned server_id is UNKNOWN (e.g. derived from another
+// resource's not-yet-known output), RequiresReplace treats it as a replacement
+// but the modifier cannot prove the target is the same server. It must leave
+// id/password UNKNOWN rather than copying the prior state, so Create can return
+// the new server's values without "inconsistent result after apply".
+func TestUseStateForUnknownUnlessReplacing_String_UnknownServerID(t *testing.T) {
+	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+	ctx := context.Background()
+
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"server_id": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), // UNKNOWN → maybe replacement
+		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	req := planmodifier.StringRequest{
+		State:      state,
+		Plan:       plan,
+		StateValue: types.StringValue("12345"),
+		PlanValue:  types.StringUnknown(),
+	}
+	var resp planmodifier.StringResponse
+	resp.PlanValue = req.PlanValue
+	useStateForUnknownUnlessReplacingString{}.PlanModifyString(ctx, req, &resp)
+
+	if !resp.PlanValue.IsUnknown() {
+		t.Errorf("when planned server_id is unknown, id/password must stay unknown (known after apply), got %q", resp.PlanValue.ValueString())
+	}
+}
+
+// TestUseStateForUnknownUnlessReplacing_Bool_UnknownServerID verifies the bool
+// variant of the round-5 fix: an unknown planned server_id must leave active
+// unknown rather than carrying the prior server's value.
+func TestUseStateForUnknownUnlessReplacing_Bool_UnknownServerID(t *testing.T) {
+	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+	ctx := context.Background()
+
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"server_id": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), // UNKNOWN
+		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	req := planmodifier.BoolRequest{
+		State:      state,
+		Plan:       plan,
+		StateValue: types.BoolValue(true),
+		PlanValue:  types.BoolUnknown(),
+	}
+	var resp planmodifier.BoolResponse
+	resp.PlanValue = req.PlanValue
+	useStateForUnknownUnlessReplacingBool{}.PlanModifyBool(ctx, req, &resp)
+
+	if !resp.PlanValue.IsUnknown() {
+		t.Errorf("when planned server_id is unknown, active must stay unknown, got %v", resp.PlanValue.ValueBool())
+	}
+}
+
+// TestUseStateForUnknownUnlessReplacing_Bool_NoReplacement verifies the bool
+// variant reuses the prior active value on a stable, unchanged known server_id
+// (plan stability for in-place updates such as toggling wait).
+func TestUseStateForUnknownUnlessReplacing_Bool_NoReplacement(t *testing.T) {
+	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+	ctx := context.Background()
+
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"), // unchanged
+		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"wait":      tftypes.NewValue(tftypes.Bool, false),
+	})
+
+	req := planmodifier.BoolRequest{
+		State:      state,
+		Plan:       plan,
+		StateValue: types.BoolValue(true),
+		PlanValue:  types.BoolUnknown(),
+	}
+	var resp planmodifier.BoolResponse
+	resp.PlanValue = req.PlanValue
+	useStateForUnknownUnlessReplacingBool{}.PlanModifyBool(ctx, req, &resp)
+
+	if resp.PlanValue.IsUnknown() {
+		t.Error("without a replacement, the unknown active should reuse the prior state value (stable plan)")
+	}
+	if !resp.PlanValue.ValueBool() {
+		t.Errorf("PlanValue = %v, want prior state true", resp.PlanValue.ValueBool())
+	}
+}
+
 // TestParseServerID verifies the parseServerID helper handles valid and invalid
 // inputs correctly.
 func TestParseServerID(t *testing.T) {

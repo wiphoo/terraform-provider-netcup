@@ -28,12 +28,22 @@ type attributeReader interface {
 // after apply".
 //
 // These modifiers behave exactly like UseStateForUnknown EXCEPT they leave the
-// value UNKNOWN (i.e. "known after apply") when a replacement is planned. A
-// replacement is detected by comparing the plan's server_id against the state's
-// server_id: when they differ (and both are known), server_id's RequiresReplace
-// will force a destroy+create, so id/password must be recomputed. For every
-// other plan (in-place updates such as toggling wait, or a no-op refresh) the
-// prior state value is reused, preserving plan stability.
+// value UNKNOWN (i.e. "known after apply") whenever a replacement is (or might
+// be) planned. The prior state value is reused ONLY when the plan can be proven
+// to target the same server: plan server_id known AND prior-state server_id
+// known AND the two are equal. In every other case the value is left unknown.
+//
+// This conservative rule matters when the plan's server_id is UNKNOWN (e.g. it
+// is derived from another resource's not-yet-known output). stringplanmodifier's
+// RequiresReplace() treats an unknown-changed server_id as a replacement and
+// schedules a destroy+create, but we cannot prove the target is the same server.
+// If we copied the old id/password/active into the plan as known values and
+// server_id then resolved to a DIFFERENT server, Create would return new
+// id/password after the disruptive enable and Terraform would reject them as
+// "Provider produced inconsistent result after apply". Leaving the value unknown
+// mirrors stock UseStateForUnknown's own guard, which does nothing when the
+// relevant value is unknown. For a genuine no-op (unchanged known server_id) the
+// prior state value is still reused, preserving plan stability.
 
 // useStateForUnknownUnlessReplacingString is the types.String variant.
 type useStateForUnknownUnlessReplacingString struct{}
@@ -59,8 +69,10 @@ func (m useStateForUnknownUnlessReplacingString) PlanModifyString(ctx context.Co
 	if !req.PlanValue.IsUnknown() {
 		return
 	}
-	if isRescueReplacement(ctx, req.State, req.Plan) {
-		// Replacement: leave the value unknown so it is recomputed by Create.
+	if !rescueServerIDStableAndEqual(ctx, req.State, req.Plan) {
+		// The plan cannot be proven to target the same server (server_id
+		// changed, or is unknown/null on either side). A replacement is (or may
+		// be) planned, so leave the value unknown for Create to recompute.
 		return
 	}
 	resp.PlanValue = req.StateValue
@@ -87,20 +99,26 @@ func (m useStateForUnknownUnlessReplacingBool) PlanModifyBool(ctx context.Contex
 	if !req.PlanValue.IsUnknown() {
 		return
 	}
-	if isRescueReplacement(ctx, req.State, req.Plan) {
+	if !rescueServerIDStableAndEqual(ctx, req.State, req.Plan) {
 		return
 	}
 	resp.PlanValue = req.StateValue
 }
 
-// isRescueReplacement reports whether the current plan is a replacement of the
-// rescue resource, i.e. server_id differs between prior state and plan. When the
-// two server_id values are both known and unequal, server_id's RequiresReplace()
-// forces a destroy+create, so computed attributes (id/password) must NOT be
-// carried over from the old state. Any read/type error is treated conservatively
-// as "not a replacement" so the fallback is the stable UseStateForUnknown
-// behavior rather than spuriously churning the plan.
-func isRescueReplacement(ctx context.Context, state, plan attributeReader) bool {
+// rescueServerIDStableAndEqual reports whether the plan can be proven to target
+// the SAME server as the prior state: plan server_id is known AND prior-state
+// server_id is known AND the two are equal. Only in that case is it safe to
+// carry the prior computed value (id/password/active) into an unknown plan
+// value.
+//
+// It returns false in every ambiguous case — a changed server_id (RequiresReplace
+// forces destroy+create), an unknown plan server_id (derived from another
+// resource's not-yet-known output, which RequiresReplace also treats as a
+// replacement), a null/unknown prior-state server_id, or any read/type error.
+// Returning false there leaves the computed value unknown ("known after apply"),
+// mirroring stock UseStateForUnknown's guard and avoiding "Provider produced
+// inconsistent result after apply" if server_id resolves to a different server.
+func rescueServerIDStableAndEqual(ctx context.Context, state, plan attributeReader) bool {
 	var stateServerID types.String
 	if diags := state.GetAttribute(ctx, path.Root("server_id"), &stateServerID); diags.HasError() {
 		return false
@@ -115,5 +133,5 @@ func isRescueReplacement(ctx context.Context, state, plan attributeReader) bool 
 	if planServerID.IsNull() || planServerID.IsUnknown() {
 		return false
 	}
-	return stateServerID.ValueString() != planServerID.ValueString()
+	return stateServerID.ValueString() == planServerID.ValueString()
 }
