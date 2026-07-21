@@ -67,7 +67,6 @@ func (d *serverSnapshotsDataSource) Schema(_ context.Context, _ datasource.Schem
 						},
 						"description": schema.StringAttribute{
 							Computed:    true,
-							Optional:    true,
 							Description: "The description of the snapshot. Null when not set.",
 						},
 						"disks": schema.ListAttribute{
@@ -93,7 +92,6 @@ func (d *serverSnapshotsDataSource) Schema(_ context.Context, _ datasource.Schem
 						},
 						"exported_size_in_kib": schema.Int64Attribute{
 							Computed:    true,
-							Optional:    true,
 							Description: "The size of the exported snapshot in KiB. Null when the snapshot has not been exported.",
 						},
 					},
