@@ -274,6 +274,180 @@ func TestServerPowerResource_Create_TaskError(t *testing.T) {
 	}
 }
 
+// TestServerPowerResource_Create_TaskError_StateNotPersisted verifies that when
+// the async task ends in a confirmed terminal failure (*netcup.TaskError), Create
+// returns an ERROR diagnostic AND does NOT persist the desired state — so a retry
+// safely re-issues the (recoverable) power command.
+func TestServerPowerResource_Create_TaskError_StateNotPersisted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-term","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-term":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-term","state":"ERROR","message":"power op failed"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "2"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() expected error from failed task, got none")
+	}
+	if resp.Diagnostics.WarningsCount() != 0 {
+		t.Errorf("Create() expected no warnings on terminal failure, got %d", resp.Diagnostics.WarningsCount())
+	}
+	// State must NOT be persisted so a retry re-issues the recoverable command.
+	if !resp.State.Raw.IsNull() {
+		t.Error("State should NOT be persisted on a confirmed terminal task failure")
+	}
+}
+
+// TestServerPowerResource_Create_IndeterminateWait verifies that when
+// SetPowerState is accepted (202) but WaitForTask returns an INDETERMINATE error
+// (here a permanent non-*TaskError API error on the task poll — e.g. a 400 that
+// is not a confirmed task-failure terminal), Create persists the full desired
+// state and emits a WARNING (not an error) — so a later apply reconciles rather
+// than blindly re-issuing the (possibly destructive) power command. A ctx.Err()
+// from a canceled apply is handled identically (also non-*TaskError).
+func TestServerPowerResource_Create_IndeterminateWait(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-ind","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-ind":
+			// A permanent client error on the poll (400) surfaces as an *APIError,
+			// which is NOT a *netcup.TaskError → indeterminate. WaitForTask returns
+			// it immediately (no retry loop), keeping the test fast.
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":"BAD","message":"transient poll failure"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "77"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, "POWEROFF"),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	// Indeterminate wait must NOT error (erroring would taint → recreate → re-issue).
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() should not error on indeterminate wait, got: %v", resp.Diagnostics.Errors())
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Error("Create() expected a WARNING diagnostic on indeterminate wait, got none")
+	}
+
+	// Desired state must be persisted so the next apply sees no diff.
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Desired state must be persisted on an indeterminate wait")
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (desired state persisted)", state.State.ValueString())
+	}
+	if state.StateOption.ValueString() != "POWEROFF" {
+		t.Errorf("StateOption = %q, want POWEROFF (full desired state persisted)", state.StateOption.ValueString())
+	}
+	if state.ID.ValueString() != "77" {
+		t.Errorf("ID = %q, want 77", state.ID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Update_IndeterminateWait verifies that when an Update
+// changes the power state, SetPowerState is accepted (202), but WaitForTask
+// returns an INDETERMINATE error, the NEW desired state is persisted with a
+// WARNING (not an error) — fixing the old behaviour that retained prior state and
+// caused the next apply to re-issue the command.
+func TestServerPowerResource_Update_IndeterminateWait(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/servers/123":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-upd-ind","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-upd-ind":
+			// Permanent non-*TaskError poll error → indeterminate (returns fast).
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":"BAD","message":"transient poll failure"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Prior state ON; plan flips to OFF (a real state change → SetPowerState).
+	priorState := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+		"id":           tftypes.NewValue(tftypes.String, "123"),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.UpdateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update() should not error on indeterminate wait, got: %v", resp.Diagnostics.Errors())
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Error("Update() expected a WARNING diagnostic on indeterminate wait, got none")
+	}
+
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	// The NEW desired state (OFF) must be persisted — not the prior state (ON).
+	if state.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (new desired state persisted, not prior ON)", state.State.ValueString())
+	}
+}
+
 // TestServerPowerResource_Read_Running verifies Read maps RUNNING → ON.
 func TestServerPowerResource_Read_Running(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

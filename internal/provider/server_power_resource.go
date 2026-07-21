@@ -2,10 +2,12 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -13,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
@@ -139,22 +142,34 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
-	if plan.Wait.ValueBool() && task != nil {
-		if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
-			diag, _ := apiErrorToDiag(err, true)
-			resp.Diagnostics.Append(diag)
-			return
-		}
-	}
-
-	newState := serverPowerResourceModel{
+	desired := serverPowerResourceModel{
 		ServerID:    plan.ServerID,
 		State:       plan.State,
 		StateOption: plan.StateOption,
 		Wait:        plan.Wait,
 		ID:          types.StringValue(plan.ServerID.ValueString()),
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
+
+	if plan.Wait.ValueBool() && task != nil {
+		if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
+			if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, task.UUID); persist {
+				// INDETERMINATE wait (context canceled/deadline, transport error):
+				// SetPowerState was already accepted (202) and may have taken
+				// effect. Persist the desired state + a warning so a later apply
+				// does not blindly re-issue the (possibly destructive) command.
+				persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
+				return
+			} else {
+				// Confirmed terminal FAILURE: the operation definitively failed and
+				// the server state was not changed, so retrying is safe. Return an
+				// error without persisting desired state.
+				resp.Diagnostics.Append(terminalDiag)
+				return
+			}
+		}
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 }
 
 func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -247,6 +262,14 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 	stateChanged := plan.State.ValueString() != prior.State.ValueString()
 	optionChanged := plan.StateOption.ValueString() != prior.StateOption.ValueString()
 
+	desired := serverPowerResourceModel{
+		ServerID:    plan.ServerID,
+		State:       plan.State,
+		StateOption: plan.StateOption,
+		Wait:        plan.Wait,
+		ID:          types.StringValue(plan.ServerID.ValueString()),
+	}
+
 	if stateChanged || optionChanged {
 		powerState := netcup.PowerState(plan.State.ValueString())
 		stateOption := plan.StateOption.ValueString()
@@ -260,21 +283,25 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 
 		if plan.Wait.ValueBool() && task != nil {
 			if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
-				diag, _ := apiErrorToDiag(err, true)
-				resp.Diagnostics.Append(diag)
-				return
+				if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, task.UUID); persist {
+					// INDETERMINATE wait: the new power command was accepted (202)
+					// and may have taken effect. Persist the NEW desired state + a
+					// warning so a later apply does not re-issue the command. (The
+					// old behaviour retained prior state, which caused a re-issue.)
+					persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
+					return
+				} else {
+					// Confirmed terminal FAILURE: the operation failed and the
+					// server state was not changed; return an error without
+					// persisting the new desired state.
+					resp.Diagnostics.Append(terminalDiag)
+					return
+				}
 			}
 		}
 	}
 
-	newState := serverPowerResourceModel{
-		ServerID:    plan.ServerID,
-		State:       plan.State,
-		StateOption: plan.StateOption,
-		Wait:        plan.Wait,
-		ID:          types.StringValue(plan.ServerID.ValueString()),
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 }
 
 // Delete is intentionally a no-op: destroying this resource should never
@@ -304,6 +331,60 @@ func (r *serverPowerResource) ImportState(ctx context.Context, req resource.Impo
 	// leaving server_id null and causing ParseInt to fail in Read.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), req.ID)...)
+}
+
+// classifyTaskWaitError classifies a non-nil error returned by WaitForTask
+// (after SetPowerState has already returned 202, i.e. the task was accepted)
+// into one of two categories, so Create and Update stay consistent:
+//
+//   - Confirmed terminal FAILURE (persist == false): WaitForTask returned a
+//     *netcup.TaskError, meaning the task reached a failure terminal state
+//     (ERROR/CANCELED/ROLLBACK). The power operation definitively failed and the
+//     server state was not changed, so retrying is safe. terminalDiag is an
+//     ERROR diagnostic the caller should append (without persisting state).
+//
+//   - INDETERMINATE (persist == true): any non-*TaskError (ctx.Err() from a
+//     canceled apply or exceeded deadline, a transport error, etc.). The task
+//     was ACCEPTED and may have taken effect, but its completion could not be
+//     confirmed. indeterminateDiag is a WARNING diagnostic; the caller must
+//     PERSIST the desired state (so a later apply sees no diff and does not
+//     re-issue a possibly destructive command) and append the warning instead
+//     of erroring — because netcup_server_power's Delete is a no-op, an errored
+//     Create that persists partial state would taint the resource and trigger
+//     destroy+recreate, re-issuing SetPowerState, which is exactly what we must
+//     avoid.
+func classifyTaskWaitError(err error, taskUUID string) (terminalDiag diag.Diagnostic, indeterminateDiag diag.Diagnostic, persist bool) {
+	var taskErr *netcup.TaskError
+	if errors.As(err, &taskErr) {
+		// Confirmed terminal failure — safe to error and let a retry re-issue.
+		d, _ := apiErrorToDiag(err, true)
+		return d, nil, false
+	}
+
+	// Indeterminate — the task was accepted and may have completed. Do not error
+	// (that would taint → recreate → re-issue); persist desired state + warn.
+	warning := diag.NewWarningDiagnostic(
+		"netcup power task acceptance could not be confirmed",
+		fmt.Sprintf(
+			"The power operation was accepted by netcup (task %s), but waiting for it to reach a "+
+				"terminal state was interrupted (%s). Canceling the wait does NOT cancel the remote "+
+				"task, so the operation may still have taken effect or may still be running.\n\n"+
+				"The desired state has been recorded in Terraform state to avoid re-issuing the "+
+				"(possibly destructive) power command on the next apply. The next `terraform refresh` "+
+				"or apply will reconcile the actual power state (Read maps the live server state back "+
+				"to the desired state).",
+			taskUUID, err.Error(),
+		),
+	)
+	return nil, warning, true
+}
+
+// persistDesiredStateWithWarning writes the full desired model to Terraform
+// state and appends the given (warning) diagnostic. It is shared by Create and
+// Update so the indeterminate-wait handling stays identical in both.
+func persistDesiredStateWithWarning(ctx context.Context, state *tfsdk.State, diags *diag.Diagnostics, desired *serverPowerResourceModel, warning diag.Diagnostic) {
+	diags.Append(state.Set(ctx, desired)...)
+	diags.Append(warning)
 }
 
 // liveStateToDesiredPower maps a live ServerInfo.State value (as returned by
