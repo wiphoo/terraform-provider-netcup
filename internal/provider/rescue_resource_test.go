@@ -927,11 +927,12 @@ func TestRescueResource_ReadNormalizesNullWait(t *testing.T) {
 	objType := schemaResp.Schema.Type().TerraformType(ctx)
 	importedState := tfsdk.State{
 		Raw: tftypes.NewValue(objType, map[string]tftypes.Value{
-			"id":        tftypes.NewValue(tftypes.String, "99999"),
-			"server_id": tftypes.NewValue(tftypes.String, nil), // null
-			"active":    tftypes.NewValue(tftypes.Bool, nil),   // null
-			"password":  tftypes.NewValue(tftypes.String, nil), // null
-			"wait":      tftypes.NewValue(tftypes.Bool, nil),   // null — the case under test
+			"id":              tftypes.NewValue(tftypes.String, "99999"),
+			"server_id":       tftypes.NewValue(tftypes.String, nil), // null
+			"active":          tftypes.NewValue(tftypes.Bool, nil),   // null
+			"password":        tftypes.NewValue(tftypes.String, nil), // null
+			"wait":            tftypes.NewValue(tftypes.Bool, nil),   // null — the case under test
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil), // null
 		}),
 		Schema: schemaResp.Schema,
 	}
@@ -1406,6 +1407,461 @@ func TestUseStateForUnknownUnlessReplacing_Bool_NoReplacement(t *testing.T) {
 	}
 	if !resp.PlanValue.ValueBool() {
 		t.Errorf("PlanValue = %v, want prior state true", resp.PlanValue.ValueBool())
+	}
+}
+
+// pendingTaskIDFromState reads the pending_task_id attribute from a resource
+// state/model, returning the model for P1 reconciliation assertions.
+func readRescueModel(t *testing.T, ctx context.Context, s tfsdk.State) rescueResourceModel {
+	t.Helper()
+	var m rescueResourceModel
+	diags := s.Get(ctx, &m)
+	if diags.HasError() {
+		t.Fatalf("State.Get() unexpected diagnostics: %v", diags.Errors())
+	}
+	return m
+}
+
+// TestRescueResource_CreateWaitFalseSetsPendingTaskID verifies thread P1: when
+// wait=false, Create stores the enable task UUID in pending_task_id so a later
+// refresh can reconcile a still-pending activation instead of removing the
+// resource.
+func TestRescueResource_CreateWaitFalseSetsPendingTaskID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"enable-task-77","name":"EnableRescue","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request with wait=false: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, false),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create(wait=false) unexpected error: %v", resp.Diagnostics.Errors())
+	}
+
+	state := readRescueModel(t, ctx, resp.State)
+	if state.PendingTaskID.IsNull() || state.PendingTaskID.IsUnknown() {
+		t.Fatal("pending_task_id must be set (known, non-null) when wait=false")
+	}
+	if state.PendingTaskID.ValueString() != "enable-task-77" {
+		t.Errorf("pending_task_id = %q, want enable-task-77", state.PendingTaskID.ValueString())
+	}
+}
+
+// TestRescueResource_CreateWaitTrueClearsPendingTaskID verifies thread P1: on a
+// successful bounded wait (task FINISHED), pending_task_id is cleared to null —
+// there is no in-flight task to reconcile.
+func TestRescueResource_CreateWaitTrueClearsPendingTaskID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"enable-ok","name":"EnableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/enable-ok":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"enable-ok","name":"EnableRescue","state":"FINISHED"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":true,"password":"pw"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected error: %v", resp.Diagnostics.Errors())
+	}
+	state := readRescueModel(t, ctx, resp.State)
+	if !state.PendingTaskID.IsNull() {
+		t.Errorf("pending_task_id must be null after a successful wait, got %q", state.PendingTaskID.ValueString())
+	}
+}
+
+// TestRescueResource_CreateIndeterminateWaitRetainsPendingTaskID verifies thread
+// P1: when the bounded wait exits indeterminately (context deadline — NOT a
+// *TaskError), the retained partial state carries the enable task UUID so the
+// next refresh can reconcile.
+func TestRescueResource_CreateIndeterminateWaitRetainsPendingTaskID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"enable-stall","name":"EnableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/enable-stall":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"enable-stall","name":"EnableRescue","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() should error when the enable task never reaches terminal within the deadline")
+	}
+	resp.Diagnostics = nil
+	state := readRescueModel(t, ctx, resp.State)
+	if state.PendingTaskID.ValueString() != "enable-stall" {
+		t.Errorf("pending_task_id should be retained as enable-stall after an indeterminate wait, got %v", state.PendingTaskID)
+	}
+}
+
+// TestRescueResource_ReadInactivePendingNonTerminalRetained verifies thread P1:
+// an inactive read while the pending enable task is still non-terminal must KEEP
+// the resource (do NOT remove) so the next apply does not re-enable.
+func TestRescueResource_ReadInactivePendingNonTerminalRetained(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/pending-77":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"pending-77","name":"EnableRescue","state":"RUNNING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "pending-77"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("resource must NOT be removed while the pending enable task is non-terminal")
+	}
+	result := readRescueModel(t, ctx, resp.State)
+	if result.Active.ValueBool() {
+		t.Error("active should be false during the pending window")
+	}
+	if result.PendingTaskID.ValueString() != "pending-77" {
+		t.Errorf("pending_task_id should be retained, got %q", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestRescueResource_ReadInactivePendingTerminalFailureRemoved verifies thread
+// P1: an inactive read whose pending enable task is in a terminal FAILURE state
+// (ERROR/CANCELED/ROLLBACK) removes the resource.
+func TestRescueResource_ReadInactivePendingTerminalFailureRemoved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/failed-9":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"failed-9","name":"EnableRescue","state":"ERROR","message":"boom"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "failed-9"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("resource must be removed when the pending enable task failed terminally")
+	}
+}
+
+// TestRescueResource_ReadInactivePendingTerminalSuccessRemoved verifies thread
+// P1: an inactive read whose pending enable task FINISHED (success, but rescue
+// then went inactive externally) is a genuine absence — remove the resource and
+// clear pending.
+func TestRescueResource_ReadInactivePendingTerminalSuccessRemoved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/done-3":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"done-3","name":"EnableRescue","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "done-3"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("resource must be removed when the pending enable task FINISHED but rescue is inactive (genuine absence)")
+	}
+}
+
+// TestRescueResource_ReadInactivePendingTask404Removed verifies thread P1: if the
+// pending task UUID 404s (task record gone), the resource is removed.
+func TestRescueResource_ReadInactivePendingTask404Removed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/gone-1":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"task not found"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "gone-1"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("resource must be removed when the pending task 404s (task record gone)")
+	}
+}
+
+// TestRescueResource_ReadInactivePendingTaskTransientErrorKept verifies thread
+// P1: a transient (non-404) error while consulting the pending task must NOT
+// remove the resource; it surfaces a diagnostic and leaves state intact.
+func TestRescueResource_ReadInactivePendingTaskTransientErrorKept(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/blip-5":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"temporary failure"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "blip-5"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Read() should surface a diagnostic on a transient task-poll error")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Error("resource must NOT be removed on a transient task-poll error")
+	}
+}
+
+// TestRescueResource_ReadInactiveNoPendingRemoved verifies thread P1: an inactive
+// read with NO pending_task_id is a genuine absence and removes the resource
+// (unchanged pre-P1 behavior, no GetTask call).
+func TestRescueResource_ReadInactiveNoPendingRemoved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+			return
+		}
+		// A GetTask call here would be a bug — no pending task is tracked.
+		t.Errorf("unexpected request (GetTask must NOT run when no pending task): %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, "old-pw"),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, nil), // no pending task
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("resource must be removed on an inactive read with no pending task")
+	}
+}
+
+// TestRescueResource_ReadActiveClearsPendingTaskID verifies thread P1: an active
+// read clears pending_task_id (the enable has taken effect; nothing to
+// reconcile) and does NOT call GetTask.
+func TestRescueResource_ReadActiveClearsPendingTaskID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":true,"password":"pw"}`))
+			return
+		}
+		t.Errorf("unexpected request (GetTask must NOT run on an active read): %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, false),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "still-set"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("resource must be retained on an active read")
+	}
+	result := readRescueModel(t, ctx, resp.State)
+	if !result.Active.ValueBool() {
+		t.Error("active should be true")
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("pending_task_id must be cleared on an active read, got %q", result.PendingTaskID.ValueString())
 	}
 }
 

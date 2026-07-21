@@ -46,11 +46,12 @@ type rescueResource struct {
 }
 
 type rescueResourceModel struct {
-	ServerID types.String `tfsdk:"server_id"`
-	Active   types.Bool   `tfsdk:"active"`
-	Password types.String `tfsdk:"password"`
-	Wait     types.Bool   `tfsdk:"wait"`
-	ID       types.String `tfsdk:"id"`
+	ServerID      types.String `tfsdk:"server_id"`
+	Active        types.Bool   `tfsdk:"active"`
+	Password      types.String `tfsdk:"password"`
+	Wait          types.Bool   `tfsdk:"wait"`
+	ID            types.String `tfsdk:"id"`
+	PendingTaskID types.String `tfsdk:"pending_task_id"`
 }
 
 func NewRescueResource() resource.Resource {
@@ -111,6 +112,21 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 					// server_id replacement the new server_id becomes the new id,
 					// so the old id must be recomputed (known after apply) rather
 					// than copied from the prior state.
+					useStateForUnknownUnlessReplacingString{},
+				},
+			},
+			"pending_task_id": schema.StringAttribute{
+				Computed: true,
+				Description: "The UUID of an in-flight asynchronous enable task, used to " +
+					"reconcile a pending rescue activation on refresh. When Create submits " +
+					"an enable but the task has not confirmed terminally (wait=false, or a " +
+					"bounded/indeterminate wait), this holds the task UUID so a refresh that " +
+					"reads active:false consults the task before treating the resource as " +
+					"absent. Null once the task is terminal or rescue is active.",
+				PlanModifiers: []planmodifier.String{
+					// Thread P1 fix: replacement-safe UseStateForUnknown so a
+					// server_id replacement recomputes pending_task_id for the new
+					// server instead of carrying the old server's value.
 					useStateForUnknownUnlessReplacingString{},
 				},
 			},
@@ -182,12 +198,19 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 			return
 		}
 
+		// Residual limitation (thread P1): this indeterminate POST failure returned
+		// no usable TaskInfo, so there is no enable-task UUID to persist. We keep
+		// pending_task_id null; a refresh that reads active:false while the enable
+		// may still be running cannot consult a task here and will fall back to the
+		// genuine-absence path. This is the one Create branch where the P1
+		// reconciliation cannot help — the SCP API gave us no task handle to track.
 		indeterminateState := rescueResourceModel{
-			ServerID: types.StringValue(idStr),
-			Active:   types.BoolValue(true),
-			Password: types.StringNull(),
-			Wait:     plan.Wait,
-			ID:       types.StringValue(idStr),
+			ServerID:      types.StringValue(idStr),
+			Active:        types.BoolValue(true),
+			Password:      types.StringNull(),
+			Wait:          plan.Wait,
+			ID:            types.StringValue(idStr),
+			PendingTaskID: types.StringNull(),
 		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &indeterminateState)...)
 		d, _ := apiErrorToDiag(err, true)
@@ -211,12 +234,18 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 	//   password=null — not yet available; null is a known value. It becomes
 	//                   populated on the next refresh via Read.
 	if !plan.Wait.ValueBool() {
+		// Thread P1 fix: persist the enable task UUID so a refresh that reads
+		// active:false while this async enable is still running can consult the
+		// task (via GetTask) instead of treating the resource as absent and
+		// re-enabling it. Cleared to null once the task is terminal / rescue is
+		// active (see Read).
 		placeholderState := rescueResourceModel{
-			ServerID: types.StringValue(idStr),
-			Active:   types.BoolValue(true),
-			Password: types.StringNull(),
-			Wait:     plan.Wait,
-			ID:       types.StringValue(idStr),
+			ServerID:      types.StringValue(idStr),
+			Active:        types.BoolValue(true),
+			Password:      types.StringNull(),
+			Wait:          plan.Wait,
+			ID:            types.StringValue(idStr),
+			PendingTaskID: types.StringValue(task.UUID),
 		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &placeholderState)...)
 		// Store the task UUID as a warning so the operator can track it.
@@ -249,12 +278,21 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 	// identity here. Mirror the wait=false path: active=true is the intended
 	// managed state (we just submitted an enable), password=null is a valid
 	// known value; the next refresh reconciles both to live values.
+	//
+	// Thread P1 fix: persist the enable task UUID in this pre-poll partial state.
+	// If WaitForTask exits INDETERMINATE (deadline-exceeded or a transient/
+	// permanent poll error that is NOT a *TaskError), this state is retained and
+	// pending_task_id lets a subsequent refresh consult the still-running task
+	// before treating active:false as absence. On WaitForTask SUCCESS it is
+	// cleared to null in the read-back below; on a terminal *TaskError the whole
+	// resource is removed.
 	partialState := rescueResourceModel{
-		ServerID: types.StringValue(idStr),
-		Active:   types.BoolValue(true),
-		Password: types.StringNull(),
-		Wait:     plan.Wait,
-		ID:       types.StringValue(idStr),
+		ServerID:      types.StringValue(idStr),
+		Active:        types.BoolValue(true),
+		Password:      types.StringNull(),
+		Wait:          plan.Wait,
+		ID:            types.StringValue(idStr),
+		PendingTaskID: types.StringValue(task.UUID),
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &partialState)...)
 	if resp.Diagnostics.HasError() {
@@ -294,11 +332,14 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	// Thread P1 fix: the enable task reached FINISHED (WaitForTask returned
+	// success), so there is no in-flight task to reconcile — clear pending_task_id.
 	state := rescueResourceModel{
-		ServerID: types.StringValue(idStr),
-		Active:   types.BoolValue(status.Active),
-		Wait:     plan.Wait,
-		ID:       types.StringValue(idStr),
+		ServerID:      types.StringValue(idStr),
+		Active:        types.BoolValue(status.Active),
+		Wait:          plan.Wait,
+		ID:            types.StringValue(idStr),
+		PendingTaskID: types.StringNull(),
 	}
 
 	// Password may be nil immediately after enable (the API surfaces it shortly
@@ -350,13 +391,6 @@ func (r *rescueResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
-	// If rescue is no longer active, remove from state so Terraform plans a
-	// re-enable if the resource is still declared.
-	if !status.Active {
-		resp.State.RemoveResource(ctx)
-		return
-	}
-
 	idStr := state.ID.ValueString()
 
 	// Thread 3 fix: after `terraform import` only `id` is populated; `wait` is
@@ -369,11 +403,94 @@ func (r *rescueResource) Read(ctx context.Context, req resource.ReadRequest, res
 		waitVal = types.BoolValue(true)
 	}
 
+	// Thread P1 fix: reconcile a possibly-pending enable task before treating an
+	// inactive read as absence.
+	//
+	// When Create submitted an enable but could not confirm it terminally
+	// (wait=false, or a bounded/indeterminate WaitForTask), it stored the enable
+	// task UUID in pending_task_id. The async enable reboots the server into the
+	// rescue environment; during that transitional window a refresh legitimately
+	// reads active:false even though rescue activation is still in progress. The
+	// pre-P1 behavior removed the resource here, so the next apply re-submitted an
+	// enable — causing an extra reboot / already-pending / already-active failure.
+	//
+	// So: if rescue is inactive AND we are tracking a pending task, consult that
+	// task (GetTask) and only remove the resource once the task is terminal (the
+	// enable truly finished/failed and rescue is genuinely off) or gone (404). A
+	// non-terminal task means activation is still in flight — keep the resource.
+	//
+	// GetTask is called ONLY on this inactive+pending path (a short transitional
+	// window), NOT on every refresh: an active read, or an inactive read with no
+	// pending task, skips it entirely.
+	if !status.Active {
+		if state.PendingTaskID.IsNull() || state.PendingTaskID.IsUnknown() || state.PendingTaskID.ValueString() == "" {
+			// No pending enable task to reconcile: genuine absence. Remove so
+			// Terraform plans a re-enable if the resource is still declared.
+			resp.State.RemoveResource(ctx)
+			return
+		}
+
+		uuid := state.PendingTaskID.ValueString()
+		task, err := r.client.GetTask(ctx, uuid)
+		if err != nil {
+			// A 404 (or otherwise "gone") means the task record no longer exists —
+			// treat as genuine absence and remove, mirroring apiErrorToDiag's gone
+			// handling for a missing object.
+			d, gone := apiErrorToDiag(err, false)
+			if gone {
+				resp.State.RemoveResource(ctx)
+				return
+			}
+			// Any other (transient) error: do NOT remove the resource — we cannot
+			// tell whether the enable is still pending. Surface a diagnostic and
+			// re-persist the prior state (including pending_task_id) so it stays
+			// intact for the next refresh to retry.
+			resp.Diagnostics.Append(d)
+			kept := rescueResourceModel{
+				ServerID:      types.StringValue(idStr),
+				Active:        types.BoolValue(false),
+				Password:      types.StringNull(),
+				Wait:          waitVal,
+				ID:            types.StringValue(idStr),
+				PendingTaskID: types.StringValue(uuid),
+			}
+			resp.Diagnostics.Append(resp.State.Set(ctx, &kept)...)
+			return
+		}
+
+		if !task.State.IsTerminal() {
+			// The enable task is still running (PENDING/RUNNING/WAITING_FOR_CANCEL):
+			// activation is in flight. Keep the resource and retain pending_task_id
+			// so the next refresh re-checks. active stays a known false.
+			pending := rescueResourceModel{
+				ServerID:      types.StringValue(idStr),
+				Active:        types.BoolValue(false),
+				Password:      types.StringNull(),
+				Wait:          waitVal,
+				ID:            types.StringValue(idStr),
+				PendingTaskID: types.StringValue(uuid),
+			}
+			resp.Diagnostics.Append(resp.State.Set(ctx, &pending)...)
+			return
+		}
+
+		// The task is terminal. Whether it FINISHED (success then rescue went
+		// inactive externally) or failed (ERROR/CANCELED/ROLLBACK), rescue is now
+		// genuinely inactive and there is nothing left to reconcile: clear the
+		// pending task and remove the resource so Terraform plans a re-enable if
+		// the resource is still declared.
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
+	// Rescue is active: normal path. Clear any pending_task_id — the enable has
+	// taken effect, so there is no in-flight task to reconcile.
 	next := rescueResourceModel{
-		ServerID: types.StringValue(idStr),
-		Active:   types.BoolValue(status.Active),
-		Wait:     waitVal,
-		ID:       types.StringValue(idStr),
+		ServerID:      types.StringValue(idStr),
+		Active:        types.BoolValue(status.Active),
+		Wait:          waitVal,
+		ID:            types.StringValue(idStr),
+		PendingTaskID: types.StringNull(),
 	}
 	if status.Password != nil {
 		next.Password = types.StringValue(*status.Password)
