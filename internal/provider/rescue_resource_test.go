@@ -1509,6 +1509,64 @@ func TestRescueResource_CreateWaitTrueClearsPendingTaskID(t *testing.T) {
 	}
 }
 
+// TestRescueResource_CreateWaitTrueReadBackInactiveRetainsPendingTaskID verifies
+// thread A (round 7): when WaitForTask reports FINISHED but the immediately
+// following GetRescueSystem read-back still returns active:false (SCP status
+// propagation delay), Create must RETAIN pending_task_id = task.UUID and commit
+// active=false + pending — NOT clear pending and commit an inactive resource.
+// Clearing pending here would let the next Read hit the inactive+no-pending
+// branch, RemoveResource, and trigger a re-enable against an already-active
+// server (400).
+func TestRescueResource_CreateWaitTrueReadBackInactiveRetainsPendingTaskID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"enable-lag","name":"EnableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/enable-lag":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"enable-lag","name":"EnableRescue","state":"FINISHED"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			// Status propagation lag: the enable task FINISHED but the rescuesystem
+			// endpoint has not caught up yet, so the read-back still reports inactive.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected error: %v", resp.Diagnostics.Errors())
+	}
+	state := readRescueModel(t, ctx, resp.State)
+	if state.Active.ValueBool() {
+		t.Error("active should be committed as false when the read-back still reads inactive")
+	}
+	if state.PendingTaskID.IsNull() || state.PendingTaskID.IsUnknown() {
+		t.Fatal("pending_task_id must be RETAINED (not cleared) when the read-back is still inactive after FINISHED")
+	}
+	if state.PendingTaskID.ValueString() != "enable-lag" {
+		t.Errorf("pending_task_id = %q, want enable-lag", state.PendingTaskID.ValueString())
+	}
+}
+
 // TestRescueResource_CreateIndeterminateWaitRetainsPendingTaskID verifies thread
 // P1: when the bounded wait exits indeterminately (context deadline — NOT a
 // *TaskError), the retained partial state carries the enable task UUID so the
@@ -1649,11 +1707,14 @@ func TestRescueResource_ReadInactivePendingTerminalFailureRemoved(t *testing.T) 
 	}
 }
 
-// TestRescueResource_ReadInactivePendingTerminalSuccessRemoved verifies thread
-// P1: an inactive read whose pending enable task FINISHED (success, but rescue
-// then went inactive externally) is a genuine absence — remove the resource and
-// clear pending.
-func TestRescueResource_ReadInactivePendingTerminalSuccessRemoved(t *testing.T) {
+// TestRescueResource_ReadInactivePendingTerminalSuccessRetained verifies thread
+// A (round 7): an inactive read whose pending enable task FINISHED (success) is
+// the status-propagation window — the enable finished, so rescue should become
+// active shortly. Read must RETAIN the resource (keep pending_task_id) rather
+// than removing it. Removing here would let Terraform re-enable an already-active
+// server (400) and leave rescue untracked. pending_task_id is only cleared once
+// a Read observes active==true (the active branch handles that).
+func TestRescueResource_ReadInactivePendingTerminalSuccessRetained(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
@@ -1689,8 +1750,15 @@ func TestRescueResource_ReadInactivePendingTerminalSuccessRemoved(t *testing.T) 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
-	if !resp.State.Raw.IsNull() {
-		t.Error("resource must be removed when the pending enable task FINISHED but rescue is inactive (genuine absence)")
+	if resp.State.Raw.IsNull() {
+		t.Fatal("resource must be RETAINED when the pending enable task FINISHED but rescue read-back is still inactive (propagation window)")
+	}
+	result := readRescueModel(t, ctx, resp.State)
+	if result.Active.ValueBool() {
+		t.Error("active should be false during the propagation window")
+	}
+	if result.PendingTaskID.ValueString() != "done-3" {
+		t.Errorf("pending_task_id must be retained during the propagation window, got %q", result.PendingTaskID.ValueString())
 	}
 }
 

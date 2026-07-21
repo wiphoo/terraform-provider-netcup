@@ -332,14 +332,23 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	// Thread P1 fix: the enable task reached FINISHED (WaitForTask returned
-	// success), so there is no in-flight task to reconcile — clear pending_task_id.
+	// Thread A (round 7) fix: the enable task reached FINISHED, but SCP status
+	// propagation can lag — the immediately-following GetRescueSystem may still
+	// report active:false for a short window. Clear pending_task_id ONLY when the
+	// read-back actually observes active==true. If it still reads active==false
+	// (propagation delay), RETAIN pending_task_id = task.UUID and commit
+	// active=false + pending, so a later Read can reconcile via GetTask instead of
+	// treating the resource as absent and re-enabling an already-active server.
+	pendingTaskID := types.StringNull()
+	if !status.Active {
+		pendingTaskID = types.StringValue(task.UUID)
+	}
 	state := rescueResourceModel{
 		ServerID:      types.StringValue(idStr),
 		Active:        types.BoolValue(status.Active),
 		Wait:          plan.Wait,
 		ID:            types.StringValue(idStr),
-		PendingTaskID: types.StringNull(),
+		PendingTaskID: pendingTaskID,
 	}
 
 	// Password may be nil immediately after enable (the API surfaces it shortly
@@ -474,11 +483,37 @@ func (r *rescueResource) Read(ctx context.Context, req resource.ReadRequest, res
 			return
 		}
 
-		// The task is terminal. Whether it FINISHED (success then rescue went
-		// inactive externally) or failed (ERROR/CANCELED/ROLLBACK), rescue is now
-		// genuinely inactive and there is nothing left to reconcile: clear the
-		// pending task and remove the resource so Terraform plans a re-enable if
-		// the resource is still declared.
+		// The task is terminal.
+		//
+		// Thread A (round 7) fix: split terminal SUCCESS from terminal FAILURE.
+		//
+		// Terminal SUCCESS (FINISHED) while active:false is the status-propagation
+		// window: the enable task finished, so rescue should become active shortly,
+		// but the rescuesystem endpoint has not caught up yet. RETAIN the resource
+		// and keep pending_task_id so a later Read observes active==true (the active
+		// branch below then clears pending). Removing here would let Terraform
+		// re-enable an already-active server (400) and leave rescue untracked.
+		//
+		// This retain-on-terminal-success only affects the pre-active-observation
+		// (propagation) window: once any Read ever sees active==true, pending_task_id
+		// is cleared, so a subsequent external disable correctly falls into
+		// inactive+no-pending ⇒ RemoveResource below.
+		//
+		// Terminal FAILURE (ERROR/CANCELED/ROLLBACK): the enable definitively did
+		// not activate rescue — remove so Terraform plans a re-enable.
+		if task.State == netcup.TaskStateFinished {
+			kept := rescueResourceModel{
+				ServerID:      types.StringValue(idStr),
+				Active:        types.BoolValue(false),
+				Password:      types.StringNull(),
+				Wait:          waitVal,
+				ID:            types.StringValue(idStr),
+				PendingTaskID: types.StringValue(uuid),
+			}
+			resp.Diagnostics.Append(resp.State.Set(ctx, &kept)...)
+			return
+		}
+
 		resp.State.RemoveResource(ctx)
 		return
 	}
