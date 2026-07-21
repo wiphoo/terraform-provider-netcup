@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -184,6 +185,11 @@ func TestRescueResource_CreateEnableError(t *testing.T) {
 
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("Create() should return error on API 400")
+	}
+	// Thread B fix: a definitive 4xx rejection means no enable task was created
+	// and rescue is NOT active — no state should be persisted.
+	if !resp.State.Raw.IsNull() {
+		t.Error("State should be null after a definitive 4xx enable rejection")
 	}
 }
 
@@ -949,6 +955,340 @@ func TestRescueResource_ReadNormalizesNullWait(t *testing.T) {
 	}
 	if !result.Wait.ValueBool() {
 		t.Errorf("Wait = false after import normalization, want true")
+	}
+}
+
+// TestRescueResource_CreateIndeterminateEnableRetainsState verifies Thread B
+// fix: when EnableRescueSystem fails with an INDETERMINATE error (here a 5xx —
+// the POST may have been accepted server-side even though no usable TaskInfo
+// came back), Create must persist the partial identity (id + server_id, with
+// known placeholders active=true/password=null) BEFORE returning the error, so
+// Terraform tracks the resource and the next refresh/Delete can reconcile.
+func TestRescueResource_CreateIndeterminateEnableRetainsState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem" {
+			// 5xx → indeterminate: the enable may still take effect.
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"upstream timeout"}`))
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() should error on an indeterminate (5xx) enable failure")
+	}
+
+	var state rescueResourceModel
+	resp.Diagnostics = nil
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.ID.IsNull() || state.ID.IsUnknown() || state.ID.ValueString() != "12345" {
+		t.Errorf("ID should be retained as 12345 after indeterminate enable, got %v", state.ID)
+	}
+	if state.ServerID.ValueString() != "12345" {
+		t.Errorf("ServerID = %q, want 12345", state.ServerID.ValueString())
+	}
+	if state.Active.IsUnknown() || !state.Active.ValueBool() {
+		t.Error("Active must be a known placeholder true after indeterminate enable")
+	}
+	if state.Password.IsUnknown() || !state.Password.IsNull() {
+		t.Error("Password must be a known null placeholder after indeterminate enable")
+	}
+}
+
+// TestRescueResource_CreateIndeterminateTransportRetainsState verifies Thread B
+// fix for the transport-error case: if the enable connection is dropped (no HTTP
+// response at all), EnableRescueSystem returns a non-*APIError transport error,
+// which is indeterminate — the request may have reached the server. Create must
+// retain identity.
+func TestRescueResource_CreateIndeterminateTransportRetainsState(t *testing.T) {
+	// Start a server, capture its URL, then close it so the POST fails at the
+	// transport layer (connection refused) — a non-*APIError error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(url))
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() should error on a transport failure during enable")
+	}
+
+	var state rescueResourceModel
+	resp.Diagnostics = nil
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.ID.IsNull() || state.ID.ValueString() != "12345" {
+		t.Errorf("ID should be retained as 12345 after a transport-error enable, got %v", state.ID)
+	}
+	if state.ServerID.ValueString() != "12345" {
+		t.Errorf("ServerID = %q, want 12345", state.ServerID.ValueString())
+	}
+}
+
+// TestIsDefinitiveEnableRejection verifies the Thread B classifier: only a *APIError
+// with a 4xx status is a definitive rejection; 5xx, non-API (transport) errors,
+// and decode errors are indeterminate.
+func TestIsDefinitiveEnableRejection(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"400 already active", &netcup.APIError{StatusCode: 400}, true},
+		{"401 auth", &netcup.APIError{StatusCode: 401}, true},
+		{"404 unknown server", &netcup.APIError{StatusCode: 404}, true},
+		{"429 rate limited (still definitive 4xx)", &netcup.APIError{StatusCode: 429}, true},
+		{"500 server error is indeterminate", &netcup.APIError{StatusCode: 500}, false},
+		{"502 gateway is indeterminate", &netcup.APIError{StatusCode: 502}, false},
+		{"transport error is indeterminate", fmt.Errorf("connection reset"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDefinitiveEnableRejection(tt.err); got != tt.want {
+				t.Errorf("isDefinitiveEnableRejection() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRescueResource_CreateTaskTimeoutRetainsState verifies Thread C fix: when
+// WaitForTask cannot reach a terminal state within defaultTaskTimeout, the poll
+// is bounded and returns a deadline-exceeded error (NOT a *TaskError). Create
+// must treat this as indeterminate: surface the error AND retain partial state.
+//
+// The test forces the deadline by overriding defaultTaskTimeout is not possible
+// (const), so instead it cancels the incoming context — WaitForTask observes the
+// shorter of the two deadlines. A canceled parent context produces the same
+// indeterminate (non-*TaskError) outcome the timeout wrapper guards against.
+func TestRescueResource_CreateTaskTimeoutRetainsState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-stall","name":"EnableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-stall":
+			// Never terminal — always PENDING, forcing the poll to run until the
+			// context deadline/cancel bounds it.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-stall","name":"EnableRescue","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	// Bound the incoming context so the test does not wait defaultTaskTimeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() should error when the enable task never reaches terminal within the deadline")
+	}
+
+	// Deadline-exceeded is indeterminate (not a *TaskError): partial state must
+	// be retained so the next apply does not duplicate-enable.
+	var state rescueResourceModel
+	resp.Diagnostics = nil
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.ID.IsNull() || state.ID.ValueString() != "12345" {
+		t.Errorf("ID should be retained after a bounded-poll timeout, got %v", state.ID)
+	}
+	if state.ServerID.ValueString() != "12345" {
+		t.Errorf("ServerID = %q, want 12345", state.ServerID.ValueString())
+	}
+}
+
+// TestRescueResource_DeleteTaskTimeout verifies Thread C fix: a disable task that
+// never reaches terminal is bounded by the poll deadline and surfaces a
+// diagnostic instead of hanging. The incoming context is bounded here to force
+// the deadline without waiting defaultTaskTimeout.
+func TestRescueResource_DeleteTaskTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del-stall","name":"DisableRescue","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-del-stall":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-del-stall","name":"DisableRescue","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "s3cr3t-rescue-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.DeleteResponse
+	r.Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Delete() should error when the disable task never reaches terminal within the deadline")
+	}
+}
+
+// TestUseStateForUnknownUnlessReplacing_String_NoReplacement verifies Thread A
+// fix: when server_id is unchanged between state and plan (an in-place update
+// such as toggling wait), the modifier copies the prior state value into an
+// unknown plan value — preserving plan stability (no spurious "known after
+// apply").
+func TestUseStateForUnknownUnlessReplacing_String_NoReplacement(t *testing.T) {
+	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+	ctx := context.Background()
+
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"), // unchanged
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"wait":      tftypes.NewValue(tftypes.Bool, false),
+	})
+
+	req := planmodifier.StringRequest{
+		State:      state,
+		Plan:       plan,
+		StateValue: types.StringValue("12345"),
+		PlanValue:  types.StringUnknown(),
+	}
+	var resp planmodifier.StringResponse
+	resp.PlanValue = req.PlanValue
+	useStateForUnknownUnlessReplacingString{}.PlanModifyString(ctx, req, &resp)
+
+	if resp.PlanValue.IsUnknown() {
+		t.Error("without a replacement, the unknown id/password should reuse the prior state value (stable plan)")
+	}
+	if resp.PlanValue.ValueString() != "12345" {
+		t.Errorf("PlanValue = %q, want prior state 12345", resp.PlanValue.ValueString())
+	}
+}
+
+// TestUseStateForUnknownUnlessReplacing_String_Replacement verifies Thread A fix:
+// when server_id changes (a replacement), the modifier leaves the value UNKNOWN
+// so Create recomputes it for the new server, avoiding "Provider produced
+// inconsistent result after apply".
+func TestUseStateForUnknownUnlessReplacing_String_Replacement(t *testing.T) {
+	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+	ctx := context.Background()
+
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"server_id": tftypes.NewValue(tftypes.String, "67890"), // CHANGED → replacement
+		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	req := planmodifier.StringRequest{
+		State:      state,
+		Plan:       plan,
+		StateValue: types.StringValue("12345"),
+		PlanValue:  types.StringUnknown(),
+	}
+	var resp planmodifier.StringResponse
+	resp.PlanValue = req.PlanValue
+	useStateForUnknownUnlessReplacingString{}.PlanModifyString(ctx, req, &resp)
+
+	if !resp.PlanValue.IsUnknown() {
+		t.Errorf("on a server_id replacement, id/password must stay unknown (known after apply), got %q", resp.PlanValue.ValueString())
+	}
+}
+
+// TestUseStateForUnknownUnlessReplacing_Bool_Replacement verifies the bool
+// variant of the Thread A fix for the active attribute on a server_id change.
+func TestUseStateForUnknownUnlessReplacing_Bool_Replacement(t *testing.T) {
+	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+	ctx := context.Background()
+
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, "12345"),
+		"server_id": tftypes.NewValue(tftypes.String, "12345"),
+		"active":    tftypes.NewValue(tftypes.Bool, true),
+		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"server_id": tftypes.NewValue(tftypes.String, "67890"), // CHANGED
+		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	req := planmodifier.BoolRequest{
+		State:      state,
+		Plan:       plan,
+		StateValue: types.BoolValue(true),
+		PlanValue:  types.BoolUnknown(),
+	}
+	var resp planmodifier.BoolResponse
+	resp.PlanValue = req.PlanValue
+	useStateForUnknownUnlessReplacingBool{}.PlanModifyBool(ctx, req, &resp)
+
+	if !resp.PlanValue.IsUnknown() {
+		t.Errorf("on a server_id replacement, active must stay unknown, got %v", resp.PlanValue.ValueBool())
 	}
 }
 

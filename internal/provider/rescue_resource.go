@@ -6,18 +6,34 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
+
+// defaultTaskTimeout bounds how long Create (wait=true) and Delete block while
+// polling an asynchronous SCP enable/disable task via WaitForTask.
+//
+// Thread C fix: previously the incoming framework context was passed straight to
+// WaitForTask, so a task that never reached a terminal state — or an endless run
+// of retryable poll errors (5xx/429) — would block `terraform apply`/`destroy`
+// indefinitely. Wrapping the context with this deadline guarantees a stalled
+// task eventually surfaces a clear deadline-exceeded diagnostic instead of
+// hanging. netcup enable/disable reboots typically finish within a few minutes;
+// 15m leaves generous headroom for a slow reboot while still bounding the wait.
+//
+// Follow-up (#83 "optional timeout knob"): a configurable per-resource `timeout`
+// attribute is a nice-to-have; this bounded default is the required minimum and
+// can be made configurable later without changing this default.
+const defaultTaskTimeout = 15 * time.Minute
 
 var _ resource.Resource = &rescueResource{}
 
@@ -63,7 +79,10 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:    true,
 				Description: "Whether the rescue system is currently active.",
 				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.UseStateForUnknown(),
+					// Thread A fix: replacement-safe UseStateForUnknown so a
+					// server_id replacement recomputes active for the new server
+					// instead of carrying the old server's value.
+					useStateForUnknownUnlessReplacingBool{},
 				},
 			},
 			"password": schema.StringAttribute{
@@ -71,7 +90,11 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Sensitive:   true,
 				Description: "The rescue system password. Populated after enable completes. May be null if the API has not yet surfaced it.",
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
+					// Thread A fix: replacement-safe UseStateForUnknown. When
+					// server_id changes (RequiresReplace), the new server has a
+					// fresh rescue password, so the old one must NOT be carried
+					// into the plan.
+					useStateForUnknownUnlessReplacingString{},
 				},
 			},
 			"wait": schema.BoolAttribute{
@@ -84,7 +107,11 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:    true,
 				Description: "The server ID (resource identifier, same as server_id).",
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
+					// Thread A fix: replacement-safe UseStateForUnknown. During a
+					// server_id replacement the new server_id becomes the new id,
+					// so the old id must be recomputed (known after apply) rather
+					// than copied from the prior state.
+					useStateForUnknownUnlessReplacingString{},
 				},
 			},
 		},
@@ -129,14 +156,44 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	idStr := plan.ServerID.ValueString()
+
 	task, err := r.client.EnableRescueSystem(ctx, serverID)
 	if err != nil {
+		// Thread B fix: distinguish a DEFINITIVE rejection from an INDETERMINATE
+		// failure, mirroring the terminal-vs-indeterminate philosophy already
+		// applied to WaitForTask below.
+		//
+		//   - Definitive (a *netcup.APIError with a 4xx status): the SCP API
+		//     rejected the request outright — no task was created and rescue was
+		//     NOT enabled. Write no state and surface the error; the resource
+		//     genuinely does not exist.
+		//   - Indeterminate (transport error, response-body decode error, or a
+		//     5xx): the POST may have been accepted server-side and an async
+		//     enable task may already be activating rescue, even though we never
+		//     got a usable TaskInfo back. Persist the partial identity (known
+		//     placeholders: active=true, password=null) BEFORE returning the
+		//     error so Terraform tracks the resource. The next refresh/Delete can
+		//     then reconcile — otherwise a retried Create would hit the
+		//     already-active 400 and leave the resource untracked.
+		if isDefinitiveEnableRejection(err) {
+			d, _ := apiErrorToDiag(err, true)
+			resp.Diagnostics.Append(d)
+			return
+		}
+
+		indeterminateState := rescueResourceModel{
+			ServerID: types.StringValue(idStr),
+			Active:   types.BoolValue(true),
+			Password: types.StringNull(),
+			Wait:     plan.Wait,
+			ID:       types.StringValue(idStr),
+		}
+		resp.Diagnostics.Append(resp.State.Set(ctx, &indeterminateState)...)
 		d, _ := apiErrorToDiag(err, true)
 		resp.Diagnostics.Append(d)
 		return
 	}
-
-	idStr := plan.ServerID.ValueString()
 
 	// when wait=false, the enable task has not yet completed so a read-back of
 	// rescue status would reflect pre-task state (active:false, no password).
@@ -204,7 +261,15 @@ func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	if _, pollErr := r.client.WaitForTask(ctx, task.UUID); pollErr != nil {
+	// Thread C fix: bound the poll with defaultTaskTimeout so a stalled task
+	// eventually returns a deadline-exceeded diagnostic instead of hanging the
+	// apply. A deadline-exceeded error is NOT a *netcup.TaskError, so it falls
+	// into the indeterminate branch below and the partial identity persisted
+	// above is retained (the enable may still complete).
+	waitCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
+	defer cancel()
+
+	if _, pollErr := r.client.WaitForTask(waitCtx, task.UUID); pollErr != nil {
 		var taskErr *netcup.TaskError
 		if errors.As(pollErr, &taskErr) {
 			// Confirmed terminal failure: the task is in ERROR/CANCELED/ROLLBACK.
@@ -390,7 +455,12 @@ func (r *rescueResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	if state.Wait.ValueBool() {
-		if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
+		// Thread C fix: bound the disable poll with defaultTaskTimeout so a
+		// stalled disable task surfaces a deadline-exceeded diagnostic instead
+		// of blocking `terraform destroy` indefinitely.
+		waitCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
+		defer cancel()
+		if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
 			resp.Diagnostics.AddError("Rescue disable task failed", err.Error())
 			return
 		}
@@ -424,6 +494,27 @@ func parseServerID(s string) (int32, error) {
 // rescue mode was still active. Restrict to the documented deactivated status
 // message only: match "deactivat" (covers "deactivated"/"currently deactivated")
 // and do NOT match generic "already".
+// isDefinitiveEnableRejection reports whether an EnableRescueSystem error is a
+// definitive rejection by the SCP API — a *netcup.APIError carrying a 4xx status
+// code. A 4xx means the request was understood and refused (e.g. 400 already
+// active, 404 unknown server, 401/403 auth): no enable task was created, so
+// rescue is definitively NOT enabled and no state should be written.
+//
+// Everything else is treated as INDETERMINATE:
+//   - a transport error (connection reset, timeout mid-request),
+//   - a response-body decode error (truncated 202), or
+//   - a 5xx (the server may have accepted the POST before failing).
+//
+// In those cases the enable may still take effect asynchronously, so the caller
+// persists partial identity state before returning the error.
+func isDefinitiveEnableRejection(err error) bool {
+	var apiErr *netcup.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
+}
+
 func isAlreadyDeactivated(err error) bool {
 	var apiErr *netcup.APIError
 	if !errors.As(err, &apiErr) {
