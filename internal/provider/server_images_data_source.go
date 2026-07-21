@@ -78,7 +78,6 @@ func (d *serverImagesDataSource) Schema(_ context.Context, _ datasource.SchemaRe
 						},
 						"image": schema.SingleNestedAttribute{
 							Computed:    true,
-							Optional:    true,
 							Description: "The underlying base image (nil when not set by the API).",
 							Attributes: map[string]schema.Attribute{
 								"id": schema.Int64Attribute{
