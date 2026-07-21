@@ -10,7 +10,6 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -729,13 +728,15 @@ func TestRescueResource_DeleteUnrelated400(t *testing.T) {
 	}
 }
 
-// TestIsAlreadyDeactivated verifies the helper correctly distinguishes
-// deactivation errors from other API errors.
+// TestIsAlreadyDeactivated verifies the helper correctly distinguishes the
+// already-deactivated response from other API errors.
 //
-// Thread B fix: the "already" substring was dropped because it is too broad —
-// "operation already pending" or "server already locked" would be incorrectly
-// treated as a successful deactivation. Only the documented "deactivat"
-// substring is matched now. Tests updated accordingly.
+// Thread C (round 9) fix: matching the bare stem "deactivat" also matched a
+// DIFFERENT rejection ("rescue cannot be deactivated while another operation is
+// pending"), where rescue is still active — wrongly reporting Delete success.
+// The helper now matches only a current-state phrase ("currently/already/is
+// deactivated") and rejects negations ("cannot be deactivated") and
+// pending-operation rejections ("pending").
 func TestIsAlreadyDeactivated(t *testing.T) {
 	tests := []struct {
 		name string
@@ -751,6 +752,25 @@ func TestIsAlreadyDeactivated(t *testing.T) {
 			name: "deactivated body — alternate wording",
 			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"rescue system is deactivated"}`},
 			want: true,
+		},
+		{
+			name: "already deactivated wording",
+			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"rescue system already deactivated"}`},
+			want: true,
+		},
+		// Thread C (round 9) fix: the bare "deactivat" stem also matched this
+		// DIFFERENT rejection, where rescue is still ACTIVE and disable was refused
+		// because another operation is in flight. Treating it as success would drop
+		// the resource while rescue was still on. It must be a HARD ERROR.
+		{
+			name: "cannot be deactivated while pending — must NOT match (thread C fix)",
+			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"rescue cannot be deactivated while another operation is pending"}`},
+			want: false,
+		},
+		{
+			name: "cannot be deactivated — must NOT match (thread C fix)",
+			err:  &netcup.APIError{StatusCode: 400, Status: "400 Bad Request", Body: `{"message":"rescue system cannot be deactivated"}`},
+			want: false,
 		},
 		// Thread B fix: bare "already" without "deactivat" must NOT match.
 		// Prior versions matched "already" as a substring, which could cause
@@ -1186,236 +1206,198 @@ func TestRescueResource_DeleteTaskTimeout(t *testing.T) {
 	}
 }
 
-// TestUseStateForUnknownUnlessReplacing_String_NoReplacement verifies Thread A
-// fix: when server_id is unchanged between state and plan (an in-place update
-// such as toggling wait), the modifier copies the prior state value into an
-// unknown plan value — preserving plan stability (no spurious "known after
-// apply").
-func TestUseStateForUnknownUnlessReplacing_String_NoReplacement(t *testing.T) {
-	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+// TestRescueResource_ModifyPlan_InPlaceUpdateStable verifies Thread A (round 9):
+// on an in-place update (server_id unchanged and known — e.g. a wait-only
+// change) ModifyPlan must NOT force the computed values unknown. Combined with
+// stock UseStateForUnknown (which copies prior state into the unknown planned
+// values), this keeps the plan stable — no spurious "(known after apply)".
+func TestRescueResource_ModifyPlan_InPlaceUpdateStable(t *testing.T) {
+	rr, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
 	ctx := context.Background()
 
-	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, "12345"),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"),
-		"active":    tftypes.NewValue(tftypes.Bool, true),
-		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"), // unchanged
-		"active":    tftypes.NewValue(tftypes.Bool, true),
-		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"wait":      tftypes.NewValue(tftypes.Bool, false),
-	})
-
-	req := planmodifier.StringRequest{
-		State:      state,
-		Plan:       plan,
-		StateValue: types.StringValue("12345"),
-		PlanValue:  types.StringUnknown(),
+	req := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"active":          tftypes.NewValue(tftypes.Bool, true),
+			"password":        tftypes.NewValue(tftypes.String, "old-pw"),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+		// Plan for a wait-only change: server_id unchanged; computed values are
+		// still known (stock UseStateForUnknown already reused prior state).
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"active":          tftypes.NewValue(tftypes.Bool, true),
+			"password":        tftypes.NewValue(tftypes.String, "old-pw"),
+			"wait":            tftypes.NewValue(tftypes.Bool, false),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
 	}
-	var resp planmodifier.StringResponse
-	resp.PlanValue = req.PlanValue
-	useStateForUnknownUnlessReplacingString{}.PlanModifyString(ctx, req, &resp)
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	rr.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, req, &resp)
 
-	if resp.PlanValue.IsUnknown() {
-		t.Error("without a replacement, the unknown id/password should reuse the prior state value (stable plan)")
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
-	if resp.PlanValue.ValueString() != "12345" {
-		t.Errorf("PlanValue = %q, want prior state 12345", resp.PlanValue.ValueString())
+	var planned rescueResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Plan.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if planned.ID.IsUnknown() || planned.Password.IsUnknown() || planned.Active.IsUnknown() {
+		t.Error("in-place update must keep computed values known (no forced unknown / no plan churn)")
+	}
+	if planned.Password.ValueString() != "old-pw" || planned.ID.ValueString() != "12345" || !planned.Active.ValueBool() {
+		t.Error("in-place update must preserve the prior computed values")
 	}
 }
 
-// TestUseStateForUnknownUnlessReplacing_String_Replacement verifies Thread A fix:
-// when server_id changes (a replacement), the modifier leaves the value UNKNOWN
-// so Create recomputes it for the new server, avoiding "Provider produced
-// inconsistent result after apply".
-func TestUseStateForUnknownUnlessReplacing_String_Replacement(t *testing.T) {
-	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+// TestRescueResource_ModifyPlan_ServerIDChangeForcesUnknown verifies Thread A
+// (round 9): when server_id changes (a replacement), ModifyPlan must force
+// id/password/active/pending_task_id to unknown so Create recomputes them for
+// the new server — avoiding "Provider produced inconsistent result after apply".
+func TestRescueResource_ModifyPlan_ServerIDChangeForcesUnknown(t *testing.T) {
+	rr, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
 	ctx := context.Background()
 
-	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, "12345"),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"),
-		"active":    tftypes.NewValue(tftypes.Bool, true),
-		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"server_id": tftypes.NewValue(tftypes.String, "67890"), // CHANGED → replacement
-		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
-		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-
-	req := planmodifier.StringRequest{
-		State:      state,
-		Plan:       plan,
-		StateValue: types.StringValue("12345"),
-		PlanValue:  types.StringUnknown(),
+	req := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"active":          tftypes.NewValue(tftypes.Bool, true),
+			"password":        tftypes.NewValue(tftypes.String, "old-pw"),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+		// Simulate what stock UseStateForUnknown would produce for a server_id
+		// change: the prior computed values copied into the plan (the bug this
+		// ModifyPlan corrects). server_id is the new value.
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"server_id":       tftypes.NewValue(tftypes.String, "67890"),
+			"active":          tftypes.NewValue(tftypes.Bool, true),
+			"password":        tftypes.NewValue(tftypes.String, "old-pw"),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
 	}
-	var resp planmodifier.StringResponse
-	resp.PlanValue = req.PlanValue
-	useStateForUnknownUnlessReplacingString{}.PlanModifyString(ctx, req, &resp)
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	rr.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, req, &resp)
 
-	if !resp.PlanValue.IsUnknown() {
-		t.Errorf("on a server_id replacement, id/password must stay unknown (known after apply), got %q", resp.PlanValue.ValueString())
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var planned rescueResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Plan.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !planned.ID.IsUnknown() {
+		t.Errorf("id must be unknown on a server_id replacement, got %q", planned.ID.ValueString())
+	}
+	if !planned.Password.IsUnknown() {
+		t.Errorf("password must be unknown on a server_id replacement, got %q", planned.Password.ValueString())
+	}
+	if !planned.Active.IsUnknown() {
+		t.Errorf("active must be unknown on a server_id replacement, got %v", planned.Active.ValueBool())
+	}
+	if !planned.PendingTaskID.IsUnknown() {
+		t.Errorf("pending_task_id must be unknown on a server_id replacement, got %q", planned.PendingTaskID.ValueString())
+	}
+	// server_id itself is the trigger and must remain the new known value.
+	if planned.ServerID.ValueString() != "67890" {
+		t.Errorf("server_id = %q, want 67890", planned.ServerID.ValueString())
 	}
 }
 
-// TestUseStateForUnknownUnlessReplacing_Bool_Replacement verifies the bool
-// variant of the Thread A fix for the active attribute on a server_id change.
-func TestUseStateForUnknownUnlessReplacing_Bool_Replacement(t *testing.T) {
-	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+// TestRescueResource_ModifyPlan_UnknownServerIDForcesUnknown verifies Thread A
+// (round 9): when the planned server_id is UNKNOWN (derived from another
+// resource's not-yet-known output), the target cannot be proven equal, so
+// ModifyPlan treats it as a potential replacement and forces the computed values
+// unknown rather than carrying the prior server's stale values.
+func TestRescueResource_ModifyPlan_UnknownServerIDForcesUnknown(t *testing.T) {
+	rr, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
 	ctx := context.Background()
 
-	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, "12345"),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"),
-		"active":    tftypes.NewValue(tftypes.Bool, true),
-		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"server_id": tftypes.NewValue(tftypes.String, "67890"), // CHANGED
-		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
-		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-
-	req := planmodifier.BoolRequest{
-		State:      state,
-		Plan:       plan,
-		StateValue: types.BoolValue(true),
-		PlanValue:  types.BoolUnknown(),
+	req := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"active":          tftypes.NewValue(tftypes.Bool, true),
+			"password":        tftypes.NewValue(tftypes.String, "old-pw"),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"server_id":       tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+			"active":          tftypes.NewValue(tftypes.Bool, true),
+			"password":        tftypes.NewValue(tftypes.String, "old-pw"),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
 	}
-	var resp planmodifier.BoolResponse
-	resp.PlanValue = req.PlanValue
-	useStateForUnknownUnlessReplacingBool{}.PlanModifyBool(ctx, req, &resp)
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	rr.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, req, &resp)
 
-	if !resp.PlanValue.IsUnknown() {
-		t.Errorf("on a server_id replacement, active must stay unknown, got %v", resp.PlanValue.ValueBool())
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var planned rescueResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Plan.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !planned.ID.IsUnknown() || !planned.Password.IsUnknown() || !planned.Active.IsUnknown() || !planned.PendingTaskID.IsUnknown() {
+		t.Error("an unknown planned server_id must force all computed values unknown (potential replacement)")
 	}
 }
 
-// TestUseStateForUnknownUnlessReplacing_String_UnknownServerID verifies the
-// round-5 fix: when the planned server_id is UNKNOWN (e.g. derived from another
-// resource's not-yet-known output), RequiresReplace treats it as a replacement
-// but the modifier cannot prove the target is the same server. It must leave
-// id/password UNKNOWN rather than copying the prior state, so Create can return
-// the new server's values without "inconsistent result after apply".
-func TestUseStateForUnknownUnlessReplacing_String_UnknownServerID(t *testing.T) {
-	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
+// TestRescueResource_ModifyPlan_CreateAndDestroyNoop verifies Thread A (round 9):
+// ModifyPlan does nothing on create (null prior state) or destroy (null plan),
+// leaving the framework's own create/destroy planning intact.
+func TestRescueResource_ModifyPlan_CreateAndDestroyNoop(t *testing.T) {
+	rr, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
 	ctx := context.Background()
+	objType := schemaResp.Schema.Type().TerraformType(ctx)
 
-	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, "12345"),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"),
-		"active":    tftypes.NewValue(tftypes.Bool, true),
-		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	// Create: null prior state, known plan — ModifyPlan must not touch the plan.
+	createPlan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+		"password":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
 	})
-	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"server_id": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), // UNKNOWN → maybe replacement
-		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
-		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-
-	req := planmodifier.StringRequest{
-		State:      state,
-		Plan:       plan,
-		StateValue: types.StringValue("12345"),
-		PlanValue:  types.StringUnknown(),
+	createReq := resource.ModifyPlanRequest{
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, nil), Schema: schemaResp.Schema},
+		Plan:  createPlan,
 	}
-	var resp planmodifier.StringResponse
-	resp.PlanValue = req.PlanValue
-	useStateForUnknownUnlessReplacingString{}.PlanModifyString(ctx, req, &resp)
-
-	if !resp.PlanValue.IsUnknown() {
-		t.Errorf("when planned server_id is unknown, id/password must stay unknown (known after apply), got %q", resp.PlanValue.ValueString())
+	createResp := resource.ModifyPlanResponse{Plan: createReq.Plan}
+	rr.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, createReq, &createResp)
+	if createResp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan(create) unexpected diagnostics: %v", createResp.Diagnostics.Errors())
 	}
-}
 
-// TestUseStateForUnknownUnlessReplacing_Bool_UnknownServerID verifies the bool
-// variant of the round-5 fix: an unknown planned server_id must leave active
-// unknown rather than carrying the prior server's value.
-func TestUseStateForUnknownUnlessReplacing_Bool_UnknownServerID(t *testing.T) {
-	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
-	ctx := context.Background()
-
-	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, "12345"),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"),
-		"active":    tftypes.NewValue(tftypes.Bool, true),
-		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"server_id": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), // UNKNOWN
-		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
-		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-
-	req := planmodifier.BoolRequest{
-		State:      state,
-		Plan:       plan,
-		StateValue: types.BoolValue(true),
-		PlanValue:  types.BoolUnknown(),
+	// Destroy: known prior state, null plan — ModifyPlan must not panic or error.
+	destroyReq := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"active":          tftypes.NewValue(tftypes.Bool, true),
+			"password":        tftypes.NewValue(tftypes.String, "pw"),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+		Plan: tfsdk.Plan{Raw: tftypes.NewValue(objType, nil), Schema: schemaResp.Schema},
 	}
-	var resp planmodifier.BoolResponse
-	resp.PlanValue = req.PlanValue
-	useStateForUnknownUnlessReplacingBool{}.PlanModifyBool(ctx, req, &resp)
-
-	if !resp.PlanValue.IsUnknown() {
-		t.Errorf("when planned server_id is unknown, active must stay unknown, got %v", resp.PlanValue.ValueBool())
-	}
-}
-
-// TestUseStateForUnknownUnlessReplacing_Bool_NoReplacement verifies the bool
-// variant reuses the prior active value on a stable, unchanged known server_id
-// (plan stability for in-place updates such as toggling wait).
-func TestUseStateForUnknownUnlessReplacing_Bool_NoReplacement(t *testing.T) {
-	_, schemaResp := configureRescueResource(t, rescueClient("http://example.invalid"))
-	ctx := context.Background()
-
-	state := resourceState(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, "12345"),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"),
-		"active":    tftypes.NewValue(tftypes.Bool, true),
-		"password":  tftypes.NewValue(tftypes.String, "old-pw"),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"id":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"server_id": tftypes.NewValue(tftypes.String, "12345"), // unchanged
-		"active":    tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
-		"password":  tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
-		"wait":      tftypes.NewValue(tftypes.Bool, false),
-	})
-
-	req := planmodifier.BoolRequest{
-		State:      state,
-		Plan:       plan,
-		StateValue: types.BoolValue(true),
-		PlanValue:  types.BoolUnknown(),
-	}
-	var resp planmodifier.BoolResponse
-	resp.PlanValue = req.PlanValue
-	useStateForUnknownUnlessReplacingBool{}.PlanModifyBool(ctx, req, &resp)
-
-	if resp.PlanValue.IsUnknown() {
-		t.Error("without a replacement, the unknown active should reuse the prior state value (stable plan)")
-	}
-	if !resp.PlanValue.ValueBool() {
-		t.Errorf("PlanValue = %v, want prior state true", resp.PlanValue.ValueBool())
+	destroyResp := resource.ModifyPlanResponse{Plan: destroyReq.Plan}
+	rr.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, destroyReq, &destroyResp)
+	if destroyResp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan(destroy) unexpected diagnostics: %v", destroyResp.Diagnostics.Errors())
 	}
 }
 
@@ -1717,13 +1699,17 @@ func TestRescueResource_ReadInactivePendingTerminalFailureRemoved(t *testing.T) 
 }
 
 // TestRescueResource_ReadInactivePendingTerminalSuccessRetained verifies thread
-// A (round 7): an inactive read whose pending enable task FINISHED (success) is
-// the status-propagation window — the enable finished, so rescue should become
-// active shortly. Read must RETAIN the resource (keep pending_task_id) rather
-// than removing it. Removing here would let Terraform re-enable an already-active
-// server (400) and leave rescue untracked. pending_task_id is only cleared once
-// a Read observes active==true (the active branch handles that).
+// A (round 7) + thread B (round 9): an inactive read whose pending enable task
+// FINISHED (success) RECENTLY (within rescuePropagationWindow, measured from the
+// task's FinishedAt) is the status-propagation window — the enable finished, so
+// rescue should become active shortly. Read must RETAIN the resource (keep
+// pending_task_id) rather than removing it. Removing here would let Terraform
+// re-enable an already-active server (400) and leave rescue untracked.
+// pending_task_id is only cleared once a Read observes active==true (the active
+// branch handles that).
 func TestRescueResource_ReadInactivePendingTerminalSuccessRetained(t *testing.T) {
+	// FinishedAt is "just now" so time.Since(FinishedAt) is well within the window.
+	finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
@@ -1733,7 +1719,7 @@ func TestRescueResource_ReadInactivePendingTerminalSuccessRetained(t *testing.T)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/done-3":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"uuid":"done-3","name":"EnableRescue","state":"FINISHED"}`))
+			_, _ = fmt.Fprintf(w, `{"uuid":"done-3","name":"EnableRescue","state":"FINISHED","finishedAt":%q}`, finishedAt)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -1768,6 +1754,103 @@ func TestRescueResource_ReadInactivePendingTerminalSuccessRetained(t *testing.T)
 	}
 	if result.PendingTaskID.ValueString() != "done-3" {
 		t.Errorf("pending_task_id must be retained during the propagation window, got %q", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestRescueResource_ReadInactivePendingTerminalSuccessPastWindowRemoved verifies
+// thread B (round 9): an inactive read whose pending enable task FINISHED but
+// whose FinishedAt is OLDER than rescuePropagationWindow is treated as genuine
+// absence — the propagation window has elapsed and rescue is still off (e.g. it
+// was disabled externally). Read must clear pending_task_id and RemoveResource so
+// the next apply restores the declared state, instead of retaining forever.
+func TestRescueResource_ReadInactivePendingTerminalSuccessPastWindowRemoved(t *testing.T) {
+	// FinishedAt well beyond the 2-minute window.
+	finishedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/old-done":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"uuid":"old-done","name":"EnableRescue","state":"FINISHED","finishedAt":%q}`, finishedAt)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "old-done"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("resource must be REMOVED once the FINISHED+inactive propagation window has elapsed")
+	}
+}
+
+// TestRescueResource_ReadInactivePendingTerminalSuccessNoTimestampRemoved verifies
+// thread B (round 9) fallback: a FINISHED enable task with NO usable FinishedAt
+// timestamp cannot be time-bounded, so Read treats FINISHED+inactive as genuine
+// absence on the first post-finish refresh and removes the resource (documented
+// tradeoff — favors reconciling a truly-off rescue system over an unbounded
+// retain).
+func TestRescueResource_ReadInactivePendingTerminalSuccessNoTimestampRemoved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/12345/rescuesystem":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"active":false,"password":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/no-ts":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			// FINISHED but finishedAt absent/null.
+			_, _ = w.Write([]byte(`{"uuid":"no-ts","name":"EnableRescue","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	r, schemaResp := configureRescueResource(t, rescueClient(srv.URL))
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":              tftypes.NewValue(tftypes.String, "12345"),
+		"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+		"active":          tftypes.NewValue(tftypes.Bool, true),
+		"password":        tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "no-ts"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("resource must be removed when a FINISHED task carries no FinishedAt to bound the retain window")
 	}
 }
 

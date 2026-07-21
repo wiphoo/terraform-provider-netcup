@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -50,11 +51,34 @@ const defaultTaskTimeout = 15 * time.Minute
 // normal active branch.
 const pendingTaskIDIndeterminate = "indeterminate"
 
+// rescuePropagationWindow bounds how long Read keeps re-persisting
+// pending_task_id after the enable task has reached terminal SUCCESS (FINISHED)
+// while GetRescueSystem still reports active:false.
+//
+// Thread B (round 9) fix: that FINISHED+inactive branch exists to ride out the
+// short SCP status-propagation lag between "enable task finished" and
+// "rescuesystem endpoint reports active". Previously it retained the resource
+// with no deadline, so if rescue was disabled EXTERNALLY before any refresh ever
+// observed it active, Read re-persisted the same pending_task_id on every
+// refresh forever — the resource stayed active=false in state indefinitely and
+// Terraform never recreated the missing rescue system.
+//
+// TaskInfo exposes the task's own completion timestamp (FinishedAt), so we bound
+// the retain window by wall-clock time since the task finished: within the
+// window we treat active:false as propagation lag and retain; once it elapses we
+// treat active:false as genuine absence, clear pending_task_id and
+// RemoveResource so the next apply restores the declared state. 2 minutes
+// comfortably covers real SCP propagation (seconds) while ensuring a truly
+// disabled rescue system is reconciled promptly.
+const rescuePropagationWindow = 2 * time.Minute
+
 var _ resource.Resource = &rescueResource{}
 
 var _ resource.ResourceWithConfigure = &rescueResource{}
 
 var _ resource.ResourceWithImportState = &rescueResource{}
+
+var _ resource.ResourceWithModifyPlan = &rescueResource{}
 
 type rescueResource struct {
 	client *netcup.Client
@@ -95,10 +119,13 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:    true,
 				Description: "Whether the rescue system is currently active.",
 				PlanModifiers: []planmodifier.Bool{
-					// Thread A fix: replacement-safe UseStateForUnknown so a
-					// server_id replacement recomputes active for the new server
-					// instead of carrying the old server's value.
-					useStateForUnknownUnlessReplacingBool{},
+					// Thread A (round 9): stock UseStateForUnknown keeps the prior
+					// value stable across in-place updates (e.g. a wait-only change)
+					// so the plan does not churn to "(known after apply)". The
+					// resource-level ModifyPlan (see below) overrides this to unknown
+					// whenever a replacement is planned, so a destroy/create cycle
+					// recomputes active for the (possibly regenerated) rescue system.
+					boolplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"password": schema.StringAttribute{
@@ -106,11 +133,11 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Sensitive:   true,
 				Description: "The rescue system password. Populated after enable completes. May be null if the API has not yet surfaced it.",
 				PlanModifiers: []planmodifier.String{
-					// Thread A fix: replacement-safe UseStateForUnknown. When
-					// server_id changes (RequiresReplace), the new server has a
-					// fresh rescue password, so the old one must NOT be carried
-					// into the plan.
-					useStateForUnknownUnlessReplacingString{},
+					// Thread A (round 9): stock UseStateForUnknown for plan
+					// stability on in-place updates; ModifyPlan forces this unknown
+					// on any planned replacement so the freshly generated rescue
+					// password is recomputed rather than copied from prior state.
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"wait": schema.BoolAttribute{
@@ -123,11 +150,10 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:    true,
 				Description: "The server ID (resource identifier, same as server_id).",
 				PlanModifiers: []planmodifier.String{
-					// Thread A fix: replacement-safe UseStateForUnknown. During a
-					// server_id replacement the new server_id becomes the new id,
-					// so the old id must be recomputed (known after apply) rather
-					// than copied from the prior state.
-					useStateForUnknownUnlessReplacingString{},
+					// Thread A (round 9): stock UseStateForUnknown for plan
+					// stability; ModifyPlan forces this unknown on any planned
+					// replacement so the new server_id becomes the new id.
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"pending_task_id": schema.StringAttribute{
@@ -139,10 +165,10 @@ func (r *rescueResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 					"reads active:false consults the task before treating the resource as " +
 					"absent. Null once the task is terminal or rescue is active.",
 				PlanModifiers: []planmodifier.String{
-					// Thread P1 fix: replacement-safe UseStateForUnknown so a
-					// server_id replacement recomputes pending_task_id for the new
-					// server instead of carrying the old server's value.
-					useStateForUnknownUnlessReplacingString{},
+					// Thread A (round 9): stock UseStateForUnknown for plan
+					// stability; ModifyPlan forces this unknown on any planned
+					// replacement so pending_task_id is recomputed for the new server.
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 		},
@@ -164,6 +190,78 @@ func (r *rescueResource) Configure(_ context.Context, req resource.ConfigureRequ
 	}
 
 	r.client = client
+}
+
+// ModifyPlan forces the computed attributes (id, password, active,
+// pending_task_id) to UNKNOWN ("known after apply") whenever a replacement is
+// planned, so the destroy/create cycle recomputes them for the (re)created
+// rescue system instead of copying stale prior-state values into the plan.
+//
+// Thread A (round 9) fix — WHY this replaces the custom
+// useStateForUnknownUnlessReplacing* attribute modifiers:
+//
+// The stock stringplanmodifier.UseStateForUnknown() (now used on these four
+// attributes) copies the prior state value into any unknown planned value while
+// prior state exists. That is exactly what we want for an in-place UPDATE (e.g.
+// a wait-only change) — the plan stays stable, no spurious "(known after
+// apply)". But on a REPLACEMENT it would copy the OLD rescue system's
+// id/password/active into the plan; Create then destroys+recreates and returns
+// a freshly generated password, so Terraform rejects the apply with "Provider
+// produced inconsistent result after apply" — AFTER the two disruptive reboots
+// already ran.
+//
+// The previous custom modifiers guessed "replacement planned" by comparing
+// plan vs prior-state server_id. That misses a replacement FORCED WITHOUT a
+// server_id change (`terraform apply -replace=ADDRESS` or a replace_triggered_by
+// reference): the equality test sees server_id unchanged, treats it as an
+// in-place update, and copies the stale computed values.
+//
+// This resource-level ModifyPlan fixes the server_id-CHANGE case authoritatively
+// (no heuristic — it compares the two server_ids and clears the computed values
+// to unknown when they differ). For a FORCED replace with an unchanged
+// server_id the provider has no in-plan signal (Terraform core applies the
+// -replace decision AFTER PlanResourceChange returns), but that path is already
+// correct: Terraform re-plans the create half of the replace with a NULL prior
+// state, where stock UseStateForUnknown does nothing (its own null-state guard)
+// and the framework marks the computed nils unknown — so Create fills the real
+// values and the result is consistent.
+func (r *rescueResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	// Nothing to do on create (no prior state) or destroy (null plan).
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	var stateServerID types.String
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("server_id"), &stateServerID)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	var planServerID types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("server_id"), &planServerID)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// A replacement is planned when the target server changes. An unknown planned
+	// server_id (derived from another resource's not-yet-known output) is also a
+	// potential replacement whose target cannot be proven to match — treat it as
+	// a replacement so the computed values are recomputed rather than copied. A
+	// null/unknown prior-state server_id likewise cannot be proven equal.
+	sameServer := !planServerID.IsNull() && !planServerID.IsUnknown() &&
+		!stateServerID.IsNull() && !stateServerID.IsUnknown() &&
+		stateServerID.ValueString() == planServerID.ValueString()
+	if sameServer {
+		// In-place update (server_id unchanged and known): leave the plan as-is so
+		// stock UseStateForUnknown keeps the computed values stable.
+		return
+	}
+
+	// Replacement planned: force the computed values unknown so Create recomputes
+	// them for the (re)created rescue system.
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("id"), types.StringUnknown())...)
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("password"), types.StringUnknown())...)
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("active"), types.BoolUnknown())...)
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("pending_task_id"), types.StringUnknown())...)
 }
 
 func (r *rescueResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -553,16 +651,35 @@ func (r *rescueResource) Read(ctx context.Context, req resource.ReadRequest, res
 		//
 		// Terminal FAILURE (ERROR/CANCELED/ROLLBACK): the enable definitively did
 		// not activate rescue — remove so Terraform plans a re-enable.
+		//
+		// Thread B (round 9) fix: BOUND the FINISHED+inactive retain window. The
+		// enable task FINISHED, but rescue reads inactive. This is legitimately the
+		// status-propagation window ONLY for a short time after the task finished;
+		// if rescue was disabled externally before any refresh observed it active,
+		// retaining forever would strand the resource at active=false. Use the
+		// task's own FinishedAt timestamp: within rescuePropagationWindow, treat
+		// inactive as propagation lag and RETAIN (keep pending_task_id); once the
+		// window elapses (or the API did not supply FinishedAt and we fall through
+		// to the elapsed branch), treat inactive as genuine absence — clear
+		// pending_task_id and RemoveResource so the next apply restores the
+		// declared state.
 		if task.State == netcup.TaskStateFinished {
-			kept := rescueResourceModel{
-				ServerID:      types.StringValue(idStr),
-				Active:        types.BoolValue(false),
-				Password:      types.StringNull(),
-				Wait:          waitVal,
-				ID:            types.StringValue(idStr),
-				PendingTaskID: types.StringValue(uuid),
+			withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= rescuePropagationWindow
+			if withinWindow {
+				kept := rescueResourceModel{
+					ServerID:      types.StringValue(idStr),
+					Active:        types.BoolValue(false),
+					Password:      types.StringNull(),
+					Wait:          waitVal,
+					ID:            types.StringValue(idStr),
+					PendingTaskID: types.StringValue(uuid),
+				}
+				resp.Diagnostics.Append(resp.State.Set(ctx, &kept)...)
+				return
 			}
-			resp.Diagnostics.Append(resp.State.Set(ctx, &kept)...)
+			// Past the propagation window (or no usable FinishedAt): the enable
+			// finished long ago yet rescue is still off — genuine absence.
+			resp.State.RemoveResource(ctx)
 			return
 		}
 
@@ -699,17 +816,19 @@ func parseServerID(s string) (int32, error) {
 }
 
 // isAlreadyDeactivated reports whether err indicates that the rescue system is
-// already deactivated. The netcup SCP API returns HTTP 400 with a body
-// containing "deactivat" (e.g. "rescue system currently deactivated") when
-// DisableRescueSystem is called on an already-inactive server. We match on the
-// status code and the documented "deactivat" substring only.
+// ALREADY deactivated — the one case Delete may treat as success (the desired
+// end state, rescue off, is already reached). The netcup SCP API returns HTTP
+// 400 with the documented body "Rescue system currently deactivated." (see
+// docs/SCP-API-NOTES.md).
 //
-// Thread B fix: the previous implementation also matched "already", which is
-// too broad — a 400 for "operation already pending" or "server already locked"
-// would be silently treated as success, dropping the resource from state while
-// rescue mode was still active. Restrict to the documented deactivated status
-// message only: match "deactivat" (covers "deactivated"/"currently deactivated")
-// and do NOT match generic "already".
+// Thread C (round 9) fix: the previous implementation matched the bare stem
+// "deactivat", which ALSO matches a DIFFERENT rejection such as "rescue cannot
+// be deactivated while another operation is pending" — a case where rescue is
+// still active. Treating that as success would make Delete silently drop the
+// resource while rescue mode was still on. Match only a phrase that asserts the
+// CURRENT deactivated STATE ("currently deactivated" / "already deactivated" /
+// "is deactivated", case-insensitive), and explicitly reject negations
+// ("cannot be deactivated") and pending-operation rejections ("pending").
 // isDefinitiveEnableRejection reports whether an EnableRescueSystem error is a
 // definitive rejection by the SCP API — a *netcup.APIError carrying a 4xx status
 // code. A 4xx means the request was understood and refused (e.g. 400 already
@@ -740,5 +859,19 @@ func isAlreadyDeactivated(err error) bool {
 		return false
 	}
 	body := strings.ToLower(apiErr.Body)
-	return strings.Contains(body, "deactivat")
+
+	// Guard against negations and unrelated pending-operation rejections that
+	// happen to contain "deactivated" (e.g. "rescue cannot be deactivated while
+	// another operation is pending"). These mean rescue is still active, NOT that
+	// it is already off.
+	if strings.Contains(body, "cannot be deactivated") || strings.Contains(body, "pending") {
+		return false
+	}
+
+	// Match only phrases asserting the CURRENT deactivated state. The documented
+	// SCP message is "Rescue system currently deactivated."; accept close
+	// variants for resilience to minor wording changes.
+	return strings.Contains(body, "currently deactivated") ||
+		strings.Contains(body, "already deactivated") ||
+		strings.Contains(body, "is deactivated")
 }
