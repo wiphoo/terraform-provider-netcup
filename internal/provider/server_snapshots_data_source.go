@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -80,7 +81,7 @@ func (d *serverSnapshotsDataSource) Schema(_ context.Context, _ datasource.Schem
 						},
 						"state": schema.StringAttribute{
 							Computed:    true,
-							Description: "The current state of the snapshot (e.g. available, creating).",
+							Description: "The state of the server when the snapshot was taken, as the SCP `ServerState` enum in UPPERCASE (e.g. RUNNING, SHUTOFF, PAUSED, PMSUSPENDED).",
 						},
 						"online": schema.BoolAttribute{
 							Computed:    true,
@@ -157,9 +158,11 @@ func (d *serverSnapshotsDataSource) Read(ctx context.Context, req datasource.Rea
 
 	for _, s := range snapshots {
 		model := snapshotMinimalModel{
-			UUID:         types.StringValue(s.UUID),
-			Name:         types.StringValue(s.Name),
-			CreationTime: types.StringValue(s.CreationTime.Format("2006-01-02T15:04:05Z07:00")),
+			UUID: types.StringValue(s.UUID),
+			Name: types.StringValue(s.Name),
+			// RFC3339Nano preserves fractional seconds when the API returns them
+			// and omits them when absent, avoiding silent precision loss.
+			CreationTime: types.StringValue(s.CreationTime.Format(time.RFC3339Nano)),
 			State:        types.StringValue(s.State),
 			Online:       types.BoolValue(s.Online),
 			Exported:     types.BoolValue(s.Exported),

@@ -150,9 +150,10 @@ func TestServerSnapshotsDataSource_Success(t *testing.T) {
 		t.Errorf("s1.Disks = %v, want [disk-a disk-b]", disks)
 	}
 
-	// Verify creation_time is non-empty.
-	if s1.CreationTime.ValueString() == "" {
-		t.Error("s1.CreationTime is empty, want non-empty")
+	// Verify creation_time is non-empty and that a timestamp without fractional
+	// seconds is rendered without a spurious fraction.
+	if s1.CreationTime.ValueString() != "2024-01-15T10:30:00Z" {
+		t.Errorf("s1.CreationTime = %q, want 2024-01-15T10:30:00Z", s1.CreationTime.ValueString())
 	}
 
 	// Second snapshot: null description and null exported size.
@@ -180,6 +181,60 @@ func TestServerSnapshotsDataSource_Success(t *testing.T) {
 	}
 	if len(disks2) != 0 {
 		t.Errorf("s2.Disks = %v, want empty", disks2)
+	}
+}
+
+func TestServerSnapshotsDataSource_CreationTimeSubsecond(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[
+			{
+				"uuid": "snap-frac",
+				"name": "frac",
+				"description": null,
+				"disks": [],
+				"creationTime": "2026-07-16T13:34:04.123Z",
+				"state": "RUNNING",
+				"online": true,
+				"exported": false,
+				"exportedSizeInKiB": null
+			}
+		]`))
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	ds := newSnapshotsDSClient(t, srv)
+
+	var schemaResp datasource.SchemaResponse
+	ds.Schema(ctx, datasource.SchemaRequest{}, &schemaResp)
+
+	req := snapshotsReadRequest(t, schemaResp, "42")
+
+	var resp datasource.ReadResponse
+	resp.State.Schema = schemaResp.Schema
+
+	ds.Read(ctx, req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+
+	var state serverSnapshotsDataSourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("State.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+
+	if len(state.Snapshots) != 1 {
+		t.Fatalf("got %d snapshots, want 1", len(state.Snapshots))
+	}
+
+	// Fractional seconds from the API must survive into Terraform state so the
+	// exposed creation instant matches the source exactly (no truncation).
+	if got := state.Snapshots[0].CreationTime.ValueString(); got != "2026-07-16T13:34:04.123Z" {
+		t.Errorf("CreationTime = %q, want 2026-07-16T13:34:04.123Z (subsecond precision preserved)", got)
 	}
 }
 
