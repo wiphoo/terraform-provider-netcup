@@ -457,10 +457,12 @@ func TestRescueResource_CreateWaitFalse(t *testing.T) {
 	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
 
 	// Should not have errors (warnings are OK for the task-UUID notice).
-	for _, d := range resp.Diagnostics {
-		if d.Severity() == 0 { // diag.SeverityError == 0 in the framework
-			t.Fatalf("Create(wait=false) unexpected error: %s: %s", d.Summary(), d.Detail())
-		}
+	// Note: use HasError()/Errors() rather than comparing Severity() to a
+	// literal — in terraform-plugin-framework diag.SeverityError == 1 (0 is
+	// SeverityInvalid), so a `Severity() == 0` guard would never catch a real
+	// error and let a failing Create slip through silently.
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create(wait=false) unexpected error: %v", resp.Diagnostics.Errors())
 	}
 
 	var state rescueResourceModel
