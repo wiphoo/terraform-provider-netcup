@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -384,6 +385,98 @@ func TestServerPowerResource_Create_IndeterminateWait(t *testing.T) {
 	}
 	if state.ID.ValueString() != "77" {
 		t.Errorf("ID = %q, want 77", state.ID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Create_TaskTimeout verifies that when SetPowerState is
+// accepted (202) but the task never reaches a terminal state, task polling is
+// bounded by a finite deadline instead of hanging forever. When the deadline
+// fires, WaitForTask returns context.DeadlineExceeded (NOT a *netcup.TaskError),
+// which classifyTaskWaitError treats as INDETERMINATE: Create returns promptly,
+// persists the full desired state, and emits a WARNING (not an error) so a later
+// apply reconciles rather than re-issuing the (possibly destructive) command.
+//
+// The production deadline is defaultTaskTimeout (15m); here the caller ctx
+// carries a short deadline that context.WithTimeout preserves (it takes the
+// earlier of the two), keeping the test fast while exercising the exact same
+// deadline→indeterminate→persist+warn path.
+func TestServerPowerResource_Create_TaskTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-hang","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-hang":
+			// Never terminal: always PENDING, forcing WaitForTask to poll until
+			// the bounded deadline fires.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-hang","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(
+		netcup.WithAPIEndpoint(srv.URL),
+		netcup.WithAccessToken("tok"),
+		// Poll rapidly so the deadline (below) is reached in a few iterations.
+		netcup.WithTaskPollInterval(5*time.Millisecond),
+	)
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	// A short caller deadline; context.WithTimeout(ctx, defaultTaskTimeout) keeps
+	// the earlier (this) deadline, so the wait is bounded and the test is fast.
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "55"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, "POWEROFF"),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+
+	// Guard against a regression that lets Create hang: run it with a hard cap and
+	// fail the test (instead of blocking the suite) if it never returns.
+	done := make(chan struct{})
+	go func() {
+		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Create() did not return: task polling was not bounded by a deadline")
+	}
+
+	// A hit deadline is INDETERMINATE: must NOT error (erroring would taint →
+	// recreate → re-issue the destructive power command).
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() should not error when the task-polling deadline is exceeded, got: %v", resp.Diagnostics.Errors())
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Error("Create() expected a WARNING diagnostic when the task-polling deadline is exceeded, got none")
+	}
+
+	// Desired state must be persisted so the next apply sees no diff.
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Desired state must be persisted when the task-polling deadline is exceeded")
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (desired state persisted on timeout)", state.State.ValueString())
+	}
+	if state.StateOption.ValueString() != "POWEROFF" {
+		t.Errorf("StateOption = %q, want POWEROFF (full desired state persisted on timeout)", state.StateOption.ValueString())
+	}
+	if state.ID.ValueString() != "55" {
+		t.Errorf("ID = %q, want 55", state.ID.ValueString())
 	}
 }
 

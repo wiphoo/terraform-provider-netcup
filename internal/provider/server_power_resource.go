@@ -21,6 +21,16 @@ import (
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
+// defaultTaskTimeout (declared in rescue_resource.go, package-wide) also bounds
+// how long Create/Update here poll an accepted power task via WaitForTask before
+// giving up. Without it, the unbounded resource request context would let
+// `terraform apply` (or unattended CI) hang forever if netcup leaves a task
+// non-terminal. When the deadline fires, WaitForTask returns
+// context.DeadlineExceeded — which is NOT a *netcup.TaskError, so
+// classifyTaskWaitError treats it as INDETERMINATE: the desired state is
+// persisted with a warning (no error, no re-issue of the possibly destructive
+// power command).
+
 var _ resource.Resource = &serverPowerResource{}
 
 var _ resource.ResourceWithConfigure = &serverPowerResource{}
@@ -151,7 +161,12 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 	}
 
 	if plan.Wait.ValueBool() && task != nil {
-		if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
+		// Bound task polling with a finite deadline so an apply/CI run can never
+		// hang indefinitely if netcup leaves the task non-terminal. A hit deadline
+		// surfaces as context.DeadlineExceeded (not a *TaskError) ⇒ INDETERMINATE.
+		waitCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
+		defer cancel()
+		if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
 			if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, task.UUID); persist {
 				// INDETERMINATE wait (context canceled/deadline, transport error):
 				// SetPowerState was already accepted (202) and may have taken
@@ -294,7 +309,12 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		}
 
 		if plan.Wait.ValueBool() && task != nil {
-			if _, err := r.client.WaitForTask(ctx, task.UUID); err != nil {
+			// Bound task polling with a finite deadline (see defaultTaskTimeout)
+			// so an apply/CI run can never hang if netcup leaves the task
+			// non-terminal. A hit deadline is INDETERMINATE, not a *TaskError.
+			waitCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
+			defer cancel()
+			if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
 				if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, task.UUID); persist {
 					// INDETERMINATE wait: the new power command was accepted (202)
 					// and may have taken effect. Persist the NEW desired state + a
@@ -379,7 +399,8 @@ func classifyTaskWaitError(err error, taskUUID string) (terminalDiag diag.Diagno
 		"netcup power task acceptance could not be confirmed",
 		fmt.Sprintf(
 			"The power operation was accepted by netcup (task %s), but waiting for it to reach a "+
-				"terminal state was interrupted (%s). Canceling the wait does NOT cancel the remote "+
+				"terminal state was interrupted (%s) — e.g. the apply was canceled or the bounded "+
+				"task-polling deadline was exceeded. Canceling the wait does NOT cancel the remote "+
 				"task, so the operation may still have taken effect or may still be running.\n\n"+
 				"The desired state has been recorded in Terraform state to avoid re-issuing the "+
 				"(possibly destructive) power command on the next apply. The next `terraform refresh` "+
