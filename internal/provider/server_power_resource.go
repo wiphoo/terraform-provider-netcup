@@ -44,11 +44,12 @@ type serverPowerResource struct {
 
 // serverPowerResourceModel mirrors the Terraform schema for netcup_server_power.
 type serverPowerResourceModel struct {
-	ServerID    types.String `tfsdk:"server_id"`
-	State       types.String `tfsdk:"state"`
-	StateOption types.String `tfsdk:"state_option"`
-	Wait        types.Bool   `tfsdk:"wait"`
-	ID          types.String `tfsdk:"id"`
+	ServerID      types.String `tfsdk:"server_id"`
+	State         types.String `tfsdk:"state"`
+	StateOption   types.String `tfsdk:"state_option"`
+	Wait          types.Bool   `tfsdk:"wait"`
+	ID            types.String `tfsdk:"id"`
+	PendingTaskID types.String `tfsdk:"pending_task_id"`
 }
 
 // NewServerPowerResource returns a new netcup_server_power resource factory.
@@ -94,6 +95,27 @@ func (r *serverPowerResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Computed:    true,
 				Description: "The server ID (same as server_id; used as the resource identifier for import).",
 				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"pending_task_id": schema.StringAttribute{
+				Computed: true,
+				Description: "The UUID of an in-flight asynchronous power task, used to " +
+					"reconcile a pending power operation on refresh. When Create/Update " +
+					"submits a power command but the task has not confirmed terminally " +
+					"(wait=false, or a bounded/indeterminate wait), this holds the task " +
+					"UUID so a refresh that reads a transient live state (e.g. RUNNING " +
+					"while OFF is requested) consults the task before overwriting the " +
+					"desired state. Set to the \"indeterminate\" sentinel when the accepted " +
+					"response could not be decoded (no UUID available). Null once the task " +
+					"is terminal.",
+				PlanModifiers: []planmodifier.String{
+					// Mirror power's `id` approach: plain UseStateForUnknown for plan
+					// stability on in-place updates. Power intentionally has no
+					// resource-level ModifyPlan (server_id RequiresReplace already
+					// forces a full destroy/create with null prior state, where
+					// UseStateForUnknown is a no-op), so nothing copies stale values
+					// across a replacement.
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
@@ -145,22 +167,35 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 	state := netcup.PowerState(plan.State.ValueString())
 	stateOption := plan.StateOption.ValueString()
 
+	desired := serverPowerResourceModel{
+		ServerID:      plan.ServerID,
+		State:         plan.State,
+		StateOption:   plan.StateOption,
+		Wait:          plan.Wait,
+		ID:            types.StringValue(plan.ServerID.ValueString()),
+		PendingTaskID: types.StringNull(),
+	}
+
 	task, err := r.client.SetPowerState(ctx, int32(id), state, stateOption)
 	if err != nil {
-		diag, _ := apiErrorToDiag(err, true)
-		resp.Diagnostics.Append(diag)
+		handleSetPowerStateError(ctx, &resp.State, &resp.Diagnostics, err, &desired)
 		return
 	}
 
-	desired := serverPowerResourceModel{
-		ServerID:    plan.ServerID,
-		State:       plan.State,
-		StateOption: plan.StateOption,
-		Wait:        plan.Wait,
-		ID:          types.StringValue(plan.ServerID.ValueString()),
+	// wait=false: the async task has not completed, so a read-back would reflect
+	// the pre-op/intermediate live state (e.g. RUNNING while OFF was requested).
+	// Persist the accepted task UUID alongside the desired state so a refresh that
+	// observes a transient live state consults the task (GetTask) before mapping
+	// it over the desired value and re-issuing the (possibly destructive) command.
+	if !plan.Wait.ValueBool() {
+		if task != nil {
+			desired.PendingTaskID = types.StringValue(task.UUID)
+		}
+		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+		return
 	}
 
-	if plan.Wait.ValueBool() && task != nil {
+	if task != nil {
 		// Bound task polling with a finite deadline so an apply/CI run can never
 		// hang indefinitely if netcup leaves the task non-terminal. A hit deadline
 		// surfaces as context.DeadlineExceeded (not a *TaskError) ⇒ INDETERMINATE.
@@ -170,8 +205,11 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 			if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, task.UUID); persist {
 				// INDETERMINATE wait (context canceled/deadline, transport error):
 				// SetPowerState was already accepted (202) and may have taken
-				// effect. Persist the desired state + a warning so a later apply
-				// does not blindly re-issue the (possibly destructive) command.
+				// effect. Persist the desired state + the accepted task UUID + a
+				// warning so a later refresh consults the task before overwriting
+				// the desired state, and a later apply does not blindly re-issue
+				// the (possibly destructive) command.
+				desired.PendingTaskID = types.StringValue(task.UUID)
 				persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
 				return
 			} else {
@@ -184,6 +222,9 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 		}
 	}
 
+	// wait=true SUCCESS (task FINISHED, or synchronous 200 with no task): the
+	// operation completed, so there is no in-flight task to reconcile —
+	// pending_task_id stays null (set on `desired` above).
 	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 }
 
@@ -222,11 +263,73 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
+	// Thread B fix: reconcile a possibly-pending power task before mapping the live
+	// state over the desired state.
+	//
+	// When Create/Update submitted a power command but could not confirm it
+	// terminally (wait=false, or a bounded/indeterminate WaitForTask), it stored
+	// the task UUID in pending_task_id. While that async task runs, the live
+	// ServerState is transient and does NOT yet reflect the request (e.g. RUNNING
+	// right after requesting OFF, or SHUTOFF mid-POWERCYCLE). Mapping that live
+	// value over the desired `state` here would make the next plan re-issue the
+	// destructive command. So: if a task is pending, consult it and KEEP the
+	// desired `state` while it is still running; only reconcile from the live
+	// state once the task is terminal / gone.
+	mapLiveState := true
+	if pending := state.PendingTaskID; !pending.IsNull() && !pending.IsUnknown() && pending.ValueString() != "" {
+		uuid := pending.ValueString()
+
+		// The pendingTaskIDIndeterminate sentinel is NOT a real UUID (Create stored
+		// it because the accepted response could not be decoded — no UUID was
+		// available). There is nothing to GetTask. RETAIN the desired state and the
+		// sentinel until a later refresh observes the live state actually matching
+		// the desired value, at which point the mapping below is a no-op and the
+		// sentinel is cleared by the "live matches desired" check.
+		//
+		// Residual limitation (deliberate, mirrors rescue): with no UUID we cannot
+		// query the task, so an indeterminate power op that genuinely never took
+		// effect keeps the desired state until the live state converges or an
+		// operator intervenes — safer than overwriting the desired state and
+		// re-issuing a destructive command.
+		if uuid == pendingTaskIDIndeterminate {
+			mapLiveState = false
+			// Clear the sentinel once the live state confirms the desired value.
+			if server.ServerLiveInfo != nil {
+				mapped := liveStateToDesiredPower(server.ServerLiveInfo.State)
+				if mapped != "" && string(mapped) == state.State.ValueString() {
+					state.PendingTaskID = types.StringNull()
+				}
+			}
+		} else if task, terr := r.client.GetTask(ctx, uuid); terr != nil {
+			// A 404/gone means the task record no longer exists: reconcile from the
+			// live state and clear the pending marker.
+			d, gone := apiErrorToDiag(terr, false)
+			if gone {
+				state.PendingTaskID = types.StringNull()
+			} else {
+				// Transient error: we cannot tell whether the op is still pending.
+				// Surface a diagnostic, KEEP the desired state and the marker so the
+				// next refresh retries.
+				resp.Diagnostics.Append(d)
+				mapLiveState = false
+			}
+		} else if !task.State.IsTerminal() {
+			// The task is still running (PENDING/RUNNING/WAITING_FOR_CANCEL): the
+			// power op is in flight and the live state is transient. KEEP the desired
+			// state and retain the marker so the next refresh re-checks.
+			mapLiveState = false
+		} else {
+			// Terminal task: the op finished/failed. Clear the marker and reconcile
+			// `state` from the live ServerState via the normal mapping below.
+			state.PendingTaskID = types.StringNull()
+		}
+	}
+
 	// Map the live ServerState to the desired PowerState equivalent.
 	// Unknown or transitional states are treated as matching the current desired
 	// state to avoid spurious diffs: we preserve whatever `state` is already in
 	// Terraform state rather than forcing a re-apply.
-	if server.ServerLiveInfo != nil {
+	if mapLiveState && server.ServerLiveInfo != nil {
 		mapped := liveStateToDesiredPower(server.ServerLiveInfo.State)
 		if mapped != "" {
 			state.State = types.StringValue(string(mapped))
@@ -290,11 +393,12 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 	optionChanged := plan.StateOption.ValueString() != prior.StateOption.ValueString()
 
 	desired := serverPowerResourceModel{
-		ServerID:    plan.ServerID,
-		State:       plan.State,
-		StateOption: plan.StateOption,
-		Wait:        plan.Wait,
-		ID:          types.StringValue(plan.ServerID.ValueString()),
+		ServerID:      plan.ServerID,
+		State:         plan.State,
+		StateOption:   plan.StateOption,
+		Wait:          plan.Wait,
+		ID:            types.StringValue(plan.ServerID.ValueString()),
+		PendingTaskID: types.StringNull(),
 	}
 
 	if stateChanged || optionChanged {
@@ -303,12 +407,23 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 
 		task, err := r.client.SetPowerState(ctx, int32(id), powerState, stateOption)
 		if err != nil {
-			diag, _ := apiErrorToDiag(err, true)
-			resp.Diagnostics.Append(diag)
+			handleSetPowerStateError(ctx, &resp.State, &resp.Diagnostics, err, &desired)
 			return
 		}
 
-		if plan.Wait.ValueBool() && task != nil {
+		// wait=false: the async task has not completed. Persist the accepted task
+		// UUID alongside the NEW desired state so a refresh that observes a
+		// transient live state consults the task before overwriting the desired
+		// value and re-issuing the (possibly destructive) command.
+		if !plan.Wait.ValueBool() {
+			if task != nil {
+				desired.PendingTaskID = types.StringValue(task.UUID)
+			}
+			resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+			return
+		}
+
+		if task != nil {
 			// Bound task polling with a finite deadline (see defaultTaskTimeout)
 			// so an apply/CI run can never hang if netcup leaves the task
 			// non-terminal. A hit deadline is INDETERMINATE, not a *TaskError.
@@ -317,9 +432,11 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 			if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
 				if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, task.UUID); persist {
 					// INDETERMINATE wait: the new power command was accepted (202)
-					// and may have taken effect. Persist the NEW desired state + a
-					// warning so a later apply does not re-issue the command. (The
-					// old behaviour retained prior state, which caused a re-issue.)
+					// and may have taken effect. Persist the NEW desired state + the
+					// accepted task UUID + a warning so a later refresh consults the
+					// task and a later apply does not re-issue the command. (The old
+					// behaviour retained prior state, which caused a re-issue.)
+					desired.PendingTaskID = types.StringValue(task.UUID)
 					persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
 					return
 				} else {
@@ -333,6 +450,8 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		}
 	}
 
+	// SUCCESS (wait=true task FINISHED, synchronous 200, or wait-only change with
+	// no API call): pending_task_id stays null (set on `desired` above).
 	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 }
 
@@ -363,6 +482,54 @@ func (r *serverPowerResource) ImportState(ctx context.Context, req resource.Impo
 	// leaving server_id null and causing ParseInt to fail in Read.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), req.ID)...)
+}
+
+// handleSetPowerStateError classifies a non-nil error returned by SetPowerState
+// (the accepting PATCH) into a DEFINITIVE rejection vs an INDETERMINATE failure,
+// mirroring the terminal-vs-indeterminate philosophy classifyTaskWaitError
+// applies to WaitForTask.
+//
+//   - DEFINITIVE rejection — a *netcup.APIError with a 4xx status: the request was
+//     understood and refused (e.g. 400 invalid state_option, 404 unknown server,
+//     401/403 auth). No task was created and the server state was NOT changed, so
+//     a retry is safe. Surface an ERROR and persist NO state.
+//
+//   - INDETERMINATE — a transport error, a response-body decode error (a truncated
+//     202), or a 5xx: the PATCH may have been accepted server-side and an async
+//     power task may already be running even though no usable TaskInfo/UUID came
+//     back. Erroring-without-state here would let the next apply re-issue the
+//     command — for RESET/POWERCYCLE, rebooting the server twice. Instead persist
+//     the desired state + the pendingTaskIDIndeterminate sentinel (no UUID is
+//     available to track the real task) + a WARNING, so a later refresh/apply
+//     reconciles via Read's pending-task path instead of blindly re-issuing.
+//
+// The 4xx-*APIError classifier is shared with the rescue resource
+// (isDefinitiveEnableRejection) — its logic is generic (definitive 4xx vs
+// indeterminate transport/decode/5xx), so power reuses it rather than declaring a
+// duplicate.
+func handleSetPowerStateError(ctx context.Context, state *tfsdk.State, diags *diag.Diagnostics, err error, desired *serverPowerResourceModel) {
+	if isDefinitiveEnableRejection(err) {
+		d, _ := apiErrorToDiag(err, true)
+		diags.Append(d)
+		return
+	}
+
+	desired.PendingTaskID = types.StringValue(pendingTaskIDIndeterminate)
+	diags.Append(state.Set(ctx, desired)...)
+	diags.AddWarning(
+		"netcup power operation acceptance could not be confirmed",
+		fmt.Sprintf(
+			"Submitting the power operation to netcup returned an indeterminate error (%s): a "+
+				"transport error, a truncated/undecodable accepted (202) response, or a 5xx. The "+
+				"operation may already have been accepted and an async task may be running, but no "+
+				"task UUID was returned to track it.\n\n"+
+				"The desired state has been recorded in Terraform state (with a pending-task "+
+				"sentinel) to avoid re-issuing the (possibly destructive) power command on the next "+
+				"apply. The next `terraform refresh` or apply reconciles the actual power state once "+
+				"the live server state converges to the desired value.",
+			err.Error(),
+		),
+	)
 }
 
 // classifyTaskWaitError classifies a non-nil error returned by WaitForTask

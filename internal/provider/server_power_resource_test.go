@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,8 +208,14 @@ func TestServerPowerResource_Create_WithStateOption(t *testing.T) {
 	}
 }
 
-// TestServerPowerResource_Create_APIError verifies that a non-2xx from
-// SetPowerState surfaces as a Terraform error diagnostic.
+// TestServerPowerResource_Create_APIError verifies Create's handling of a 503
+// from SetPowerState. A 503 is INDETERMINATE (the node may have accepted the op
+// before failing), so — mirroring the merged rescue resource's Thread-A/B design
+// — Create must NOT hard-error-without-state (which would let the next apply
+// re-issue a destructive command). Instead it persists the desired state + the
+// pendingTaskIDIndeterminate sentinel and emits a WARNING. Definitive 4xx
+// rejections (which DO error with no state) are covered by
+// TestServerPowerResource_Create_DefinitiveRejection.
 func TestServerPowerResource_Create_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -232,8 +239,20 @@ func TestServerPowerResource_Create_APIError(t *testing.T) {
 	resp.State = tfsdk.State{Schema: schemaResp.Schema}
 	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
 
-	if !resp.Diagnostics.HasError() {
-		t.Fatal("Create() expected error diagnostics, got none")
+	// 5xx is indeterminate: no error, a warning, and desired state + sentinel.
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() should not error on a 503 (indeterminate), got: %v", resp.Diagnostics.Errors())
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Error("Create() expected a WARNING on a 503 SetPowerState, got none")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Desired state must be persisted on a 503 SetPowerState")
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want %q (sentinel)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 }
 
@@ -538,6 +557,509 @@ func TestServerPowerResource_Update_IndeterminateWait(t *testing.T) {
 	// The NEW desired state (OFF) must be persisted — not the prior state (ON).
 	if state.State.ValueString() != "OFF" {
 		t.Errorf("State = %q, want OFF (new desired state persisted, not prior ON)", state.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Create_IndeterminateSetPowerState verifies that when
+// SetPowerState fails with an INDETERMINATE error (transport/decode/5xx) — here a
+// truncated 202 body that fails to decode — Create persists the full desired
+// state + the pendingTaskIDIndeterminate sentinel and emits a WARNING (not an
+// error). This prevents the next apply from re-issuing a destructive power
+// command (e.g. rebooting a server twice on RESET/POWERCYCLE) when the op may
+// already be running remotely.
+func TestServerPowerResource_Create_IndeterminateSetPowerState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 202 accepted, but a truncated/malformed body ⇒ SetPowerState returns a
+		// decode error (NOT an *APIError) ⇒ indeterminate.
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"uuid":"task-`))
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "321"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	// Indeterminate SetPowerState must NOT error (erroring would allow a re-issue).
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() should not error on indeterminate SetPowerState, got: %v", resp.Diagnostics.Errors())
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Error("Create() expected a WARNING on indeterminate SetPowerState, got none")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Desired state must be persisted on an indeterminate SetPowerState")
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired state persisted)", state.State.ValueString())
+	}
+	if state.StateOption.ValueString() != "RESET" {
+		t.Errorf("StateOption = %q, want RESET (full desired state persisted)", state.StateOption.ValueString())
+	}
+	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want %q (sentinel — no UUID available)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
+	}
+}
+
+// TestServerPowerResource_Create_Indeterminate5xxSetPowerState verifies that a
+// 5xx from SetPowerState is treated as INDETERMINATE (the server may have
+// accepted the op): desired state + sentinel persisted, WARNING not error.
+func TestServerPowerResource_Create_Indeterminate5xxSetPowerState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"code":"BAD_GATEWAY","message":"upstream error"}`))
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "654"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, "POWEROFF"),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() should not error on a 5xx SetPowerState, got: %v", resp.Diagnostics.Errors())
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Error("Create() expected a WARNING on a 5xx SetPowerState, got none")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Desired state must be persisted on a 5xx SetPowerState")
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want %q", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
+	}
+}
+
+// TestServerPowerResource_Create_DefinitiveRejection verifies that a DEFINITIVE
+// 4xx rejection from SetPowerState (request understood and refused; no task
+// created) surfaces an ERROR and persists NO state, so a retry is safe.
+func TestServerPowerResource_Create_DefinitiveRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":"INVALID","message":"unsupported state_option"}`))
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "111"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() expected an ERROR on a definitive 4xx rejection, got none")
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("State must NOT be persisted on a definitive 4xx rejection (safe retry)")
+	}
+}
+
+// TestServerPowerResource_Create_NoWaitStoresTaskID verifies that wait=false
+// stores the accepted task UUID in pending_task_id (instead of discarding it), so
+// a refresh before the task finishes can reconcile via the task rather than
+// mapping a transient live state over the desired value.
+func TestServerPowerResource_Create_NoWaitStoresTaskID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/servers/222":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-nowait","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "222"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, false),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.PendingTaskID.ValueString() != "task-nowait" {
+		t.Errorf("PendingTaskID = %q, want task-nowait (accepted UUID retained on wait=false)", state.PendingTaskID.ValueString())
+	}
+	if state.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF", state.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingNonTerminalKeepsDesired verifies that when
+// pending_task_id references a still-running task, Read KEEPS the desired state
+// and does NOT overwrite it with the transient live state (RUNNING while OFF was
+// requested), and retains the pending marker.
+func TestServerPowerResource_Read_PendingNonTerminalKeepsDesired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/333":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 333, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-run":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-run","state":"RUNNING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired OFF; task still running; live state is transiently RUNNING.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "333"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "333"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-run"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (desired kept while task running; live RUNNING must NOT overwrite)", result.State.ValueString())
+	}
+	if result.PendingTaskID.ValueString() != "task-run" {
+		t.Errorf("PendingTaskID = %q, want task-run (retained while running)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingTerminalReconciles verifies that when
+// pending_task_id references a TERMINAL task, Read clears the marker and
+// reconciles `state` from the live ServerState via liveStateToDesiredPower.
+func TestServerPowerResource_Read_PendingTerminalReconciles(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/444":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 444, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-fin":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-fin","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired OFF; task finished; live state SHUTOFF ⇒ maps to OFF; marker cleared.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "444"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "444"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-fin"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (reconciled from live SHUTOFF)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared on terminal task)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingTerminalReconcilesDrift verifies the
+// terminal-task path also surfaces DRIFT: desired ON but the task finished and
+// the live state is SHUTOFF ⇒ Read maps to OFF so Terraform proposes a fix.
+func TestServerPowerResource_Read_PendingTerminalReconcilesDrift(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/445":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 445, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-fin2":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-fin2","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "445"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "445"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-fin2"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (drift surfaced from live SHUTOFF after terminal task)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingTaskGone verifies that a 404 on the pending
+// task (record gone) clears the marker and reconciles from the live state.
+func TestServerPowerResource_Read_PendingTaskGone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/555":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 555, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-gone":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"task not found"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "555"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "555"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-gone"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Live RUNNING → ON; marker cleared because the task is gone.
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (reconciled from live RUNNING after task 404)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared on task 404)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SentinelKeepsDesiredNoGetTask verifies that the
+// pendingTaskIDIndeterminate sentinel makes Read KEEP the desired state WITHOUT
+// calling GetTask (there is no real task to query), while the live state has not
+// yet converged to the desired value.
+func TestServerPowerResource_Read_SentinelKeepsDesiredNoGetTask(t *testing.T) {
+	getTaskCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/666":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 666, "name": "vps",
+				// Live still RUNNING while OFF was requested (op not yet applied).
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tasks/"):
+			getTaskCalled = true
+			t.Errorf("GetTask must NOT be called for the indeterminate sentinel")
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "666"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"id":              tftypes.NewValue(tftypes.String, "666"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, pendingTaskIDIndeterminate),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if getTaskCalled {
+		t.Error("GetTask was called for the sentinel; it must be skipped")
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Desired OFF must be kept (live RUNNING must NOT overwrite it) and the
+	// sentinel retained because the live state has not converged to OFF yet.
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (sentinel keeps desired; live RUNNING must not overwrite)", result.State.ValueString())
+	}
+	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want sentinel retained until live converges", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SentinelClearedOnConverge verifies that once the
+// live state converges to the desired value, Read clears the indeterminate
+// sentinel (still without calling GetTask).
+func TestServerPowerResource_Read_SentinelClearedOnConverge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/777":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 777, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired OFF; live now SHUTOFF (→ OFF) confirms the op ⇒ clear sentinel.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "777"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"id":              tftypes.NewValue(tftypes.String, "777"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, pendingTaskIDIndeterminate),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared once live converged to desired)", result.PendingTaskID.ValueString())
 	}
 }
 
