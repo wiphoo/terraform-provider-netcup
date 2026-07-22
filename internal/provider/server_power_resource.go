@@ -360,11 +360,38 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 				}
 			}
 		} else if task, terr := r.client.GetTask(ctx, uuid); terr != nil {
-			// A 404/gone means the task record no longer exists: reconcile from the
-			// live state and clear the pending marker.
+			// A 404/gone means the task record no longer exists (including a brief
+			// 404 right after an accepted task): reconcile from the live state and
+			// clear the pending marker.
 			d, gone := apiErrorToDiag(terr, false)
 			if gone {
-				state.PendingTaskID = types.StringNull()
+				// Thread B (P2) fix: REFETCH the live server before reconciling and
+				// clearing the marker — mirror the terminal-success branch below. The
+				// `server` snapshot above was taken BEFORE this GetTask; if the task
+				// disappeared between the two calls (e.g. it completed and was purged,
+				// or a transient 404 right after acceptance), that snapshot can still be
+				// a mid-transition state (e.g. RUNNING or SHUTOFF captured mid-OFF /
+				// mid-POWERCYCLE for a wait=false op). Reconciling from it would record
+				// the wrong power state and make the next apply re-issue the (possibly
+				// destructive) command. Take a fresh POST-lookup snapshot and reconcile
+				// from THAT.
+				//
+				// On refetch failure: 404/gone ⇒ the server itself disappeared, remove
+				// the resource; any other error ⇒ KEEP the marker + surface a diagnostic
+				// and do NOT map stale state, so the next refresh retries.
+				fresh, ferr := r.client.GetServer(ctx, int32(id))
+				if ferr != nil {
+					fd, fgone := apiErrorToDiag(ferr, false)
+					if fgone {
+						resp.State.RemoveResource(ctx)
+						return
+					}
+					resp.Diagnostics.Append(fd)
+					mapLiveState = false
+				} else {
+					server = fresh
+					state.PendingTaskID = types.StringNull()
+				}
 			} else {
 				// Transient error: we cannot tell whether the op is still pending.
 				// Surface a diagnostic, KEEP the desired state and the marker so the

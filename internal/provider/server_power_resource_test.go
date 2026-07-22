@@ -1406,6 +1406,77 @@ func TestServerPowerResource_Read_PendingTaskGone(t *testing.T) {
 	}
 }
 
+// TestServerPowerResource_Read_PendingTaskGoneRefetchesLiveState verifies Thread B
+// (P2): when the pending task disappears (GetTask 404) between the initial
+// GetServer and the lookup, Read REFETCHES GetServer for a fresh POST-lookup
+// snapshot before clearing the marker and reconciling — rather than reconciling
+// from the stale pre-lookup snapshot. Here the first GetServer returns RUNNING (a
+// transient mid-OFF live state for a wait=false OFF op), GetTask returns 404, and
+// the second GetServer returns the settled SHUTOFF ⇒ Read reconciles to OFF (from
+// the FRESH snapshot, not the stale RUNNING) and clears the marker. Without the
+// refetch it would record ON and re-issue the power-off next apply.
+func TestServerPowerResource_Read_PendingTaskGoneRefetchesLiveState(t *testing.T) {
+	serverCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/556":
+			serverCalls++
+			// First call: pre-lookup RUNNING (transient mid-OFF). Second call
+			// (post-refetch): settled SHUTOFF.
+			liveState := "RUNNING"
+			if serverCalls >= 2 {
+				liveState = "SHUTOFF"
+			}
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 556, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": liveState},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-gone-2":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"task not found"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired OFF (wait=false); task gone; settled live state SHUTOFF.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "556"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "556"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-gone-2"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if serverCalls < 2 {
+		t.Errorf("GetServer was called %d time(s); expected a post-lookup refetch (2)", serverCalls)
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (reconciled from POST-lookup SHUTOFF, not stale RUNNING)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared on task 404)", result.PendingTaskID.ValueString())
+	}
+}
+
 // TestServerPowerResource_Read_SentinelKeepsDesiredNoGetTask verifies that the
 // pendingTaskIDIndeterminate sentinel makes Read KEEP the desired state WITHOUT
 // calling GetTask (there is no real task to query), while the live state has not
