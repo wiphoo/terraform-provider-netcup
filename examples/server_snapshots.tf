@@ -13,5 +13,5 @@ data "netcup_server_snapshots" "example" {
 
 output "snapshots" {
   description = "All snapshots for the server (null when server_id is unset)."
-  value       = one(data.netcup_server_snapshots.example)
+  value       = one(data.netcup_server_snapshots.example[*].snapshots)
 }
