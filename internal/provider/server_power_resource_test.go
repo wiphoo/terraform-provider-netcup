@@ -2135,18 +2135,26 @@ func TestServerPowerResource_Update_WaitOnlyChange(t *testing.T) {
 	}
 }
 
-// TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID verifies Thread A
-// (P1): when a prior op was submitted with wait=false, its task UUID is recorded
-// in pending_task_id. Changing ONLY `wait` reaches the no-command path, which must
-// PRESERVE that marker (not null it). If it were nulled, the next refresh would
-// stop consulting the still-running task and could map a pre-op transient live
-// state over the desired value, causing the next apply to re-issue the destructive
-// command. The wait-only Update must also make NO SetPowerState/PATCH call.
+// TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID verifies the
+// no-command marker rule for a wait-only update that has NOTHING to poll: when the
+// retained marker is the indeterminate SENTINEL (no real task) and `wait` flips
+// false→true, the no-command path must PRESERVE that marker (not null it) and make
+// NO SetPowerState/PATCH call and NO WaitForTask call (there is no real task to
+// poll). If the marker were nulled, the next refresh would stop consulting the
+// pending op and could map a pre-op transient live state over the desired value,
+// causing the next apply to re-issue the destructive command. (The REAL-UUID
+// wait-flip case is Thread C, covered by
+// TestServerPowerResource_Update_WaitFlipWaitsRetainedTask.)
 func TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID(t *testing.T) {
 	powerCalled := false
+	getTaskCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPatch {
+		switch {
+		case r.Method == http.MethodPatch:
 			powerCalled = true
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tasks/"):
+			getTaskCalled = true
+			t.Errorf("GetTask/WaitForTask must NOT be called for the sentinel marker")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -2157,14 +2165,15 @@ func TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID(t *testing.T)
 	r, schemaResp := configureServerPowerResource(t, client)
 
 	ctx := context.Background()
-	// Prior state: OFF, wait=false, with an in-flight task recorded.
+	// Prior state: OFF, wait=false, with the indeterminate sentinel recorded (no
+	// real task to poll).
 	priorState := resourceState(schemaResp, map[string]tftypes.Value{
 		"server_id":       tftypes.NewValue(tftypes.String, "123"),
 		"state":           tftypes.NewValue(tftypes.String, "OFF"),
 		"state_option":    tftypes.NewValue(tftypes.String, nil),
 		"wait":            tftypes.NewValue(tftypes.Bool, false),
 		"id":              tftypes.NewValue(tftypes.String, "123"),
-		"pending_task_id": tftypes.NewValue(tftypes.String, "some-uuid"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, pendingTaskIDIndeterminate),
 	})
 	// Plan: same state + state_option, only wait flipped to true.
 	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
@@ -2184,11 +2193,14 @@ func TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID(t *testing.T)
 	if powerCalled {
 		t.Error("SetPowerState (PATCH) should NOT be called on a wait-only update, but it was")
 	}
+	if getTaskCalled {
+		t.Error("WaitForTask should NOT be called for the sentinel marker, but it was")
+	}
 
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	if result.PendingTaskID.ValueString() != "some-uuid" {
-		t.Errorf("PendingTaskID = %q, want some-uuid (prior marker preserved on wait-only update)", result.PendingTaskID.ValueString())
+	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want sentinel (prior marker preserved on wait-only update)", result.PendingTaskID.ValueString())
 	}
 	if result.Wait.ValueBool() != true {
 		t.Errorf("wait = %v, want true after wait-only update", result.Wait.ValueBool())
@@ -2303,6 +2315,325 @@ func TestServerPowerResource_Update_StateChange(t *testing.T) {
 	}
 	if !powerCalled {
 		t.Error("SetPowerState (PATCH) SHOULD be called when state changes, but it was not")
+	}
+}
+
+// TestServerPowerResource_Create_WaitTrueFinishedStoresTaskUUID verifies Thread A
+// (P1): on the default wait=true, when WaitForTask returns success (FINISHED),
+// Create persists the FINISHED task's UUID in pending_task_id (NOT null). This
+// hands the UUID to Read's terminal/FINISHED propagation-window logic so that if
+// SCP reports the task FINISHED before the live state converges (e.g. POWERCYCLE
+// FINISHED while GetServer still returns SHUTOFF), the next refresh does not record
+// the wrong state and reboot again. A follow-up Read within the window keeps the
+// desired state; a converged Read clears the marker.
+func TestServerPowerResource_Create_WaitTrueFinishedStoresTaskUUID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/servers/990":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-fin-created","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-fin-created":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-fin-created","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "990"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, "POWERCYCLE"),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	// Thread A: the FINISHED task's UUID is retained (not null) so Read governs
+	// convergence via the propagation window.
+	if state.PendingTaskID.ValueString() != "task-fin-created" {
+		t.Errorf("PendingTaskID = %q, want task-fin-created (finished UUID retained for Read convergence)", state.PendingTaskID.ValueString())
+	}
+	if state.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON", state.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Create_SyncStoresNullMarker verifies the marker rule for
+// a NEW command that completes SYNChronously (HTTP 200, task == nil): pending_task_id
+// stays null, because there is no async task to track.
+func TestServerPowerResource_Create_SyncStoresNullMarker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/v1/servers/991" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK) // sync — no task
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "991"),
+		"state":        tftypes.NewValue(tftypes.String, "ON"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if !state.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (synchronous 200 has no async task)", state.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Update_StateChangeStoresNewMarkerNotPrior verifies
+// Thread B (P2): an Update that CHANGES state (issues a new command) and succeeds
+// must persist the NEW task's marker (or null for a synchronous 200) — NEVER the
+// obsolete prior pending_task_id. Restoring the old UUID would make future refreshes
+// reconcile against the OLD operation and hide drift once the new op completed.
+//
+// Sub-case async: the new op returns a 202 FINISHED task ⇒ marker = the NEW UUID.
+// Sub-case sync:  the new op returns a 200 ⇒ marker = null.
+func TestServerPowerResource_Update_StateChangeStoresNewMarkerNotPrior(t *testing.T) {
+	t.Run("async_new_uuid", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPatch && r.URL.Path == "/v1/servers/992":
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"uuid":"task-new","state":"PENDING"}`))
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-new":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"uuid":"task-new","state":"FINISHED"}`))
+			default:
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer srv.Close()
+
+		client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+		r, schemaResp := configureServerPowerResource(t, client)
+
+		ctx := context.Background()
+		// Prior: ON with an OBSOLETE prior task UUID; plan flips to OFF (real change).
+		priorState := resourceState(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "992"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "992"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, "task-OBSOLETE"),
+		})
+		plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+			"server_id":    tftypes.NewValue(tftypes.String, "992"),
+			"state":        tftypes.NewValue(tftypes.String, "OFF"),
+			"state_option": tftypes.NewValue(tftypes.String, nil),
+			"wait":         tftypes.NewValue(tftypes.Bool, true),
+		})
+
+		var resp resource.UpdateResponse
+		resp.State = tfsdk.State{Schema: schemaResp.Schema}
+		r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("Update() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+		}
+		var state serverPowerResourceModel
+		resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+		if state.PendingTaskID.ValueString() != "task-new" {
+			t.Errorf("PendingTaskID = %q, want task-new (NEW task UUID, not obsolete prior)", state.PendingTaskID.ValueString())
+		}
+		if state.PendingTaskID.ValueString() == "task-OBSOLETE" {
+			t.Error("PendingTaskID must NOT be the obsolete prior UUID after a new command")
+		}
+	})
+
+	t.Run("sync_null", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPatch || r.URL.Path != "/v1/servers/993" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK) // sync — no task
+		}))
+		defer srv.Close()
+
+		client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+		r, schemaResp := configureServerPowerResource(t, client)
+
+		ctx := context.Background()
+		priorState := resourceState(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "993"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "993"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, "task-OBSOLETE"),
+		})
+		plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+			"server_id":    tftypes.NewValue(tftypes.String, "993"),
+			"state":        tftypes.NewValue(tftypes.String, "OFF"),
+			"state_option": tftypes.NewValue(tftypes.String, nil),
+			"wait":         tftypes.NewValue(tftypes.Bool, true),
+		})
+
+		var resp resource.UpdateResponse
+		resp.State = tfsdk.State{Schema: schemaResp.Schema}
+		r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("Update() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+		}
+		var state serverPowerResourceModel
+		resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+		if !state.PendingTaskID.IsNull() {
+			t.Errorf("PendingTaskID = %q, want null (synchronous 200 new command; not obsolete prior)", state.PendingTaskID.ValueString())
+		}
+	})
+}
+
+// TestServerPowerResource_Update_WaitFlipWaitsRetainedTask verifies Thread C (P2):
+// when a prior op was submitted with wait=false and still has a REAL pending_task_id
+// (a UUID, not the sentinel/null), changing ONLY `wait` to true must poll that
+// retained task with WaitForTask (bounded) WITHOUT submitting another power command,
+// so apply blocks until the tracked op is terminal — honoring wait=true's contract.
+// On terminal success the UUID marker is retained (Thread A: Read reconciles via the
+// window).
+func TestServerPowerResource_Update_WaitFlipWaitsRetainedTask(t *testing.T) {
+	powerCalled := false
+	taskPolled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch:
+			powerCalled = true
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-retained":
+			taskPolled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-retained","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Prior: OFF, wait=false, with a REAL in-flight task UUID recorded.
+	priorState := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "994"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "994"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-retained"),
+	})
+	// Plan: same state + state_option, only wait flipped to true.
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "994"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.UpdateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if powerCalled {
+		t.Error("SetPowerState (PATCH) must NOT be re-issued when only wait flips; the retained task is polled instead")
+	}
+	if !taskPolled {
+		t.Error("WaitForTask SHOULD be called on the retained task UUID when wait flips false→true, but it was not")
+	}
+
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.PendingTaskID.ValueString() != "task-retained" {
+		t.Errorf("PendingTaskID = %q, want task-retained (finished UUID retained for Read convergence)", result.PendingTaskID.ValueString())
+	}
+	if result.Wait.ValueBool() != true {
+		t.Errorf("wait = %v, want true", result.Wait.ValueBool())
+	}
+}
+
+// TestServerPowerResource_Update_WaitFlipRetainedTaskFailure verifies Thread C
+// (P2): if the retained task polled on a wait false→true flip reaches a FAILURE
+// terminal (*netcup.TaskError), Update surfaces an ERROR (like the command-issued
+// failure path) and re-issues NO power command.
+func TestServerPowerResource_Update_WaitFlipRetainedTaskFailure(t *testing.T) {
+	powerCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch:
+			powerCalled = true
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-retained-fail":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-retained-fail","state":"ERROR","message":"op failed"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	priorState := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "995"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "995"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-retained-fail"),
+	})
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "995"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.UpdateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Update() expected an ERROR when the retained task fails terminally, got none")
+	}
+	if powerCalled {
+		t.Error("SetPowerState (PATCH) must NOT be re-issued on a wait-only flip")
 	}
 }
 

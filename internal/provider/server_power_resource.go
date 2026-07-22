@@ -265,11 +265,25 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 				return
 			}
 		}
+
+		// wait=true SUCCESS (task FINISHED). Thread A (P1) fix: RETAIN the finished
+		// task's UUID (pendingMarkerFor(task)) instead of nulling the marker. SCP can
+		// report a task FINISHED before the live server state converges (e.g. a
+		// POWERCYCLE FINISHED while GetServer still returns SHUTOFF); with a null
+		// marker the next Read would record OFF and the following apply would reboot
+		// again. Feeding the finished UUID to Read lets its terminal/FINISHED
+		// propagation-window logic govern convergence: converged ⇒ clear the marker;
+		// within the window ⇒ retain the desired state; past the window ⇒ reconcile
+		// from live (genuine drift). The marker is cleared by Read once live state
+		// catches up, so it does not linger.
+		desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
+		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+		return
 	}
 
-	// wait=true SUCCESS (task FINISHED, or synchronous 200 with no task): the
-	// operation completed, so there is no in-flight task to reconcile —
-	// pending_task_id stays null (set on `desired` above).
+	// Synchronous 200 (task == nil): the command completed synchronously, so there
+	// is no async task to track — pending_task_id stays null (set on `desired`
+	// above).
 	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 }
 
@@ -570,25 +584,84 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 					return
 				}
 			}
+
+			// wait=true SUCCESS (new task FINISHED). Thread A (P1): RETAIN the NEW
+			// finished task's UUID so Read's propagation-window logic governs
+			// convergence (see Create). Thread B (P2): this command-issued path sets
+			// its own marker and RETURNS — it must NOT fall through to the prior-marker
+			// restore tail below, which would resurrect the OBSOLETE prior task ID and
+			// suppress live-state mapping against the new operation.
+			desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
+			resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+			return
 		}
+
+		// New command completed SYNChronously (HTTP 200, task == nil): no async task
+		// to track ⇒ marker stays null (set on `desired` above). Thread B (P2): this
+		// too is a command-issued path and must RETURN rather than fall through to the
+		// prior-marker restore tail (which would resurrect an obsolete prior UUID).
+		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+		return
 	}
 
-	// Thread A (P1) fix: PRESERVE the prior pending_task_id on the no-command path.
+	// NO new command was issued (wait-only / no-op update: state and state_option
+	// both unchanged). This is the ONLY path that restores the prior marker.
 	//
-	// We only reach here on a wait-only / no-op Update (state and state_option
-	// unchanged), because every branch that issued a new SetPowerState command
-	// returned above. `desired` was initialized with pending_task_id = null, but a
-	// prior op submitted with wait=false (or an indeterminate wait) may still be
-	// in flight with its task UUID/sentinel recorded in prior.PendingTaskID.
-	// Nulling it here would make the next refresh stop consulting that task and map
-	// a pre-op transient live state (e.g. RUNNING while OFF is desired) over the
-	// desired value — the next apply would then re-issue the destructive command.
-	// Carry the prior marker forward; only a newly-issued command (handled above)
-	// sets or replaces it.
-	desired.PendingTaskID = prior.PendingTaskID
+	// Thread B (P2): every path that issued a new command sets its own marker per the
+	// unified rule (new task UUID / sentinel / null-for-sync) and returns ABOVE, so
+	// we never resurrect an obsolete prior UUID after a fresh operation.
+	//
+	// Thread C (P2): if `wait` is now true and the retained prior marker is a REAL
+	// task UUID (not the sentinel, not empty/null), the prior op was submitted with
+	// wait=false and may still be running. Flipping wait→true documents that apply
+	// must block until the operation is terminal, so poll the RETAINED task with the
+	// same bounded (defaultTaskTimeout) + classifyTaskWaitError logic the command
+	// paths use — WITHOUT issuing another power command. On success ⇒ keep the UUID
+	// marker (Thread A: Read reconciles via the window); on terminal failure ⇒ error;
+	// on indeterminate ⇒ retain the marker + warning. The sentinel and null markers
+	// have no real task to poll, so they are simply preserved below.
+	priorMarker := prior.PendingTaskID
+	priorUUID := priorMarker.ValueString()
+	shouldWaitRetained := plan.Wait.ValueBool() &&
+		!priorMarker.IsNull() && !priorMarker.IsUnknown() &&
+		priorUUID != "" && priorUUID != pendingTaskIDIndeterminate
 
-	// SUCCESS (wait-only change with no API call): the new `wait` is persisted and
-	// any still-pending task marker is preserved.
+	if shouldWaitRetained {
+		// A real retained task UUID + wait flipped to true: wait on it without
+		// re-issuing the command.
+		waitCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
+		defer cancel()
+		if _, err := r.client.WaitForTask(waitCtx, priorUUID); err != nil {
+			if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, priorUUID); persist {
+				// INDETERMINATE wait on the retained task: retain the marker + warn,
+				// preserving the NEW wait value. A later refresh/apply reconciles.
+				desired.PendingTaskID = priorMarker
+				persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
+				return
+			} else {
+				// Confirmed terminal FAILURE of the retained op: surface the error
+				// without persisting (mirrors the command-issued failure path). No new
+				// command was issued, so this Update changed nothing.
+				resp.Diagnostics.Append(terminalDiag)
+				return
+			}
+		}
+
+		// Retained task FINISHED: keep its UUID marker (Thread A) so Read reconciles
+		// convergence via the propagation window, and persist the new wait value.
+		desired.PendingTaskID = priorMarker
+		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+		return
+	}
+
+	// No-command path with nothing to poll (wait unchanged/false, or the marker is
+	// the sentinel/null): PRESERVE the prior marker. `desired` was initialized with
+	// pending_task_id = null, but a prior op submitted with wait=false (or an
+	// indeterminate wait) may still be in flight with its task UUID/sentinel in
+	// prior.PendingTaskID. Nulling it would make the next refresh stop consulting
+	// that task and map a pre-op transient live state over the desired value — the
+	// next apply would then re-issue the destructive command.
+	desired.PendingTaskID = prior.PendingTaskID
 	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 }
 
