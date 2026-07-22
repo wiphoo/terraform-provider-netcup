@@ -844,6 +844,179 @@ func TestServerPowerResource_Create_NoWaitStoresTaskID(t *testing.T) {
 	}
 }
 
+// TestServerPowerResource_Create_NoWaitEmptyUUIDStoresSentinel verifies Thread A
+// (P1): when SetPowerState returns a syntactically valid 202 whose body OMITS
+// `uuid` (e.g. `{}`), it yields a non-nil *TaskInfo with an empty UUID. On the
+// wait=false path the persisted pending_task_id must be the pendingTaskIDIndeterminate
+// SENTINEL (an accepted-but-untrackable task) — NOT an empty string that Read would
+// skip, letting a transient live state overwrite the desired value and the next
+// apply re-issue the destructive command. A subsequent Read on that sentinel keeps
+// the desired state and does NOT call GetTask.
+func TestServerPowerResource_Create_NoWaitEmptyUUIDStoresSentinel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/servers/223":
+			// Valid JSON, but no `uuid` field → TaskInfo.UUID == "".
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "223"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, "POWERCYCLE"),
+		"wait":         tftypes.NewValue(tftypes.Bool, false),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	// The empty-UUID accepted task must be recorded as the sentinel, NOT "".
+	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want %q (sentinel — empty UUID is untrackable, not an empty marker)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
+	}
+	if state.PendingTaskID.ValueString() == "" {
+		t.Error("PendingTaskID must not be an empty marker (Read would skip it and re-issue the command)")
+	}
+	if state.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF", state.State.ValueString())
+	}
+
+	// A subsequent Read on that sentinel must KEEP the desired state and NOT call
+	// GetTask (there is no trackable task), even though the live state has not yet
+	// converged.
+	getTaskCalled := false
+	readSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/servers/223":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 223, "name": "vps",
+				// Live still RUNNING while OFF was requested (op not yet applied).
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/tasks/"):
+			getTaskCalled = true
+			t.Errorf("GetTask must NOT be called for the indeterminate sentinel")
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+	}))
+	defer readSrv.Close()
+
+	readClient := netcup.New(netcup.WithAPIEndpoint(readSrv.URL), netcup.WithAccessToken("tok"))
+	rr, readSchemaResp := configureServerPowerResource(t, readClient)
+
+	readSt := resourceState(readSchemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "223"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, "POWERCYCLE"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "223"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, state.PendingTaskID.ValueString()),
+	})
+
+	var readResp resource.ReadResponse
+	readResp.State = tfsdk.State{Schema: readSchemaResp.Schema}
+	rr.Read(ctx, resource.ReadRequest{State: readSt}, &readResp)
+
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", readResp.Diagnostics.Errors())
+	}
+	if getTaskCalled {
+		t.Error("GetTask was called for the sentinel; it must be skipped")
+	}
+	var readResult serverPowerResourceModel
+	readResp.Diagnostics.Append(readResp.State.Get(ctx, &readResult)...)
+	if readResult.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (sentinel keeps desired; live RUNNING must not overwrite)", readResult.State.ValueString())
+	}
+	if readResult.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want sentinel retained until live converges", readResult.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_TerminalFailureReconcilesImmediately verifies
+// Thread B (P2): a tracked task that reached a FAILURE terminal (ERROR) with a
+// recent FinishedAt while the refetched live state is STILL SHUTOFF (a failed
+// power-on) must NOT be treated as propagation lag. The propagation window applies
+// only to the SUCCESS terminal (FINISHED); for a failure terminal Read IMMEDIATELY
+// clears pending_task_id and reconciles from the live state (SHUTOFF → OFF) so the
+// drift surfaces right away for a corrective apply, rather than retaining the
+// desired ON for up to powerPropagationWindow.
+func TestServerPowerResource_Read_TerminalFailureReconcilesImmediately(t *testing.T) {
+	// Recent FinishedAt: WITHIN powerPropagationWindow — proves the window is NOT
+	// applied to a failure terminal (it would otherwise retain the desired state).
+	finished := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/449":
+			// Failed power-on: server is still SHUTOFF.
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 449, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-fail":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-fail","state":"ERROR","finishedAt":"` + finished + `","message":"power-on failed"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired ON (a power-on target); task failed recently; live still SHUTOFF ⇒
+	// failure terminal ⇒ NO window ⇒ clear marker + reconcile to OFF immediately.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "449"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "449"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-fail"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (failed power-on drift surfaced immediately, NOT retained by the propagation window)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared immediately on failure terminal)", result.PendingTaskID.ValueString())
+	}
+}
+
 // TestServerPowerResource_Read_PendingNonTerminalKeepsDesired verifies that when
 // pending_task_id references a still-running task, Read KEEPS the desired state
 // and does NOT overwrite it with the transient live state (RUNNING while OFF was

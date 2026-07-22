@@ -51,6 +51,25 @@ import (
 // SCP propagation (seconds) while surfacing true drift promptly.
 const powerPropagationWindow = 2 * time.Minute
 
+// pendingMarkerFor returns the value to store in pending_task_id for an accepted
+// (202) power task, so every UUID-recording site treats a missing UUID identically.
+//
+// Thread A (P1) fix: SetPowerState returns a non-nil *TaskInfo whenever the 202
+// body decoded, even if it OMITS `uuid` (e.g. body `{}`) — leaving TaskInfo.UUID
+// empty. Storing that empty string as the marker is unsafe: Read explicitly SKIPS
+// empty/null markers (it only consults the task when the marker is non-empty), so a
+// refresh during an OFF/POWERCYCLE transition would map the transient live state
+// over the desired value via liveStateToDesiredPower and the next apply would
+// re-issue the (possibly destructive) command. An accepted-but-untrackable task is
+// exactly what the pendingTaskIDIndeterminate sentinel represents, so map a
+// nil-or-empty-UUID task to the sentinel; otherwise record the real UUID.
+func pendingMarkerFor(task *netcup.TaskInfo) string {
+	if task == nil || task.UUID == "" {
+		return pendingTaskIDIndeterminate
+	}
+	return task.UUID
+}
+
 var _ resource.Resource = &serverPowerResource{}
 
 var _ resource.ResourceWithConfigure = &serverPowerResource{}
@@ -209,7 +228,9 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 	// it over the desired value and re-issuing the (possibly destructive) command.
 	if !plan.Wait.ValueBool() {
 		if task != nil {
-			desired.PendingTaskID = types.StringValue(task.UUID)
+			// Thread A (P1): a 202 whose body omits `uuid` yields a non-nil task with
+			// an empty UUID; store the sentinel (not an empty marker Read would skip).
+			desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
 		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 		return
@@ -229,7 +250,11 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 				// warning so a later refresh consults the task before overwriting
 				// the desired state, and a later apply does not blindly re-issue
 				// the (possibly destructive) command.
-				desired.PendingTaskID = types.StringValue(task.UUID)
+				//
+				// Thread A (P1): pendingMarkerFor stores the sentinel when task.UUID is
+				// empty (a 202 body without `uuid`), so Read never skips an empty marker
+				// and re-issues the command.
+				desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
 				persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
 				return
 			} else {
@@ -339,7 +364,8 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 			// state and retain the marker so the next refresh re-checks.
 			mapLiveState = false
 		} else {
-			// Terminal task: the op finished/failed.
+			// Terminal task: the op finished (FINISHED) or failed
+			// (ERROR/CANCELED/ROLLBACK).
 			//
 			// Thread B (P1) fix: REFETCH the live server before reconciling. The
 			// `server` snapshot above was taken BEFORE GetTask; if the task
@@ -362,13 +388,13 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 				}
 				resp.Diagnostics.Append(d)
 				mapLiveState = false
-			} else {
-				// Thread B (P1) refinement: the task is FINISHED and we have a fresh
-				// snapshot, but SCP live-state propagation can still LAG — the single
-				// refetch may STILL report the operation's intermediate state (e.g. a
-				// POWERCYCLE whose refetch is still SHUTOFF before the server comes
-				// back RUNNING). Clearing the marker unconditionally then records the
-				// wrong state (OFF) and the next apply reboots again.
+			} else if task.State == netcup.TaskStateFinished {
+				// SUCCESS terminal. Thread B (P1) refinement: the task is FINISHED and
+				// we have a fresh snapshot, but SCP live-state propagation can still LAG
+				// — the single refetch may STILL report the operation's intermediate
+				// state (e.g. a POWERCYCLE whose refetch is still SHUTOFF before the
+				// server comes back RUNNING). Clearing the marker unconditionally then
+				// records the wrong state (OFF) and the next apply reboots again.
 				//
 				// So only CLEAR the marker + reconcile if the fresh live state CONFIRMS
 				// the desired `state` (converged). If it does NOT yet match, this is
@@ -396,6 +422,22 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 					// Retain the marker and keep the desired state (do not map).
 					mapLiveState = false
 				}
+			} else {
+				// FAILURE terminal (ERROR/CANCELED/ROLLBACK).
+				//
+				// Thread B (P2) fix: EXCLUDE failed tasks from the propagation window.
+				// The b50a937 window logic exists to absorb SCP live-state propagation
+				// LAG after a SUCCESSFUL operation — but a task that reached a failure
+				// terminal did NOT succeed, so a still-mismatched live state is not lag,
+				// it is the definitive outcome (e.g. a failed power-on leaving the
+				// server SHUTOFF while desired is ON). Applying the window here would
+				// RETAIN the desired state for up to powerPropagationWindow (2m), so
+				// `terraform refresh`/plan would report NO changes despite the known
+				// failure. Instead IMMEDIATELY clear the marker and reconcile from the
+				// (refetched) live state — with no window — so the drift surfaces right
+				// away for a corrective apply.
+				server = fresh
+				state.PendingTaskID = types.StringNull()
 			}
 		}
 	}
@@ -492,7 +534,9 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		// value and re-issuing the (possibly destructive) command.
 		if !plan.Wait.ValueBool() {
 			if task != nil {
-				desired.PendingTaskID = types.StringValue(task.UUID)
+				// Thread A (P1): a 202 whose body omits `uuid` yields a non-nil task
+				// with an empty UUID; store the sentinel (not an empty marker Read skips).
+				desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
 			}
 			resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 			return
@@ -511,7 +555,11 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 					// accepted task UUID + a warning so a later refresh consults the
 					// task and a later apply does not re-issue the command. (The old
 					// behaviour retained prior state, which caused a re-issue.)
-					desired.PendingTaskID = types.StringValue(task.UUID)
+					//
+					// Thread A (P1): pendingMarkerFor stores the sentinel when task.UUID
+					// is empty (202 body without `uuid`), so Read never skips an empty
+					// marker and re-issues the command.
+					desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
 					persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
 					return
 				} else {
