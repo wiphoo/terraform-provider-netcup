@@ -208,15 +208,16 @@ func TestServerPowerResource_Create_WithStateOption(t *testing.T) {
 	}
 }
 
-// TestServerPowerResource_Create_APIError verifies Create's handling of a 503
-// from SetPowerState. A 503 is INDETERMINATE (the node may have accepted the op
-// before failing), so — mirroring the merged rescue resource's Thread-A/B design
-// — Create must NOT hard-error-without-state (which would let the next apply
-// re-issue a destructive command). Instead it persists the desired state + the
-// pendingTaskIDIndeterminate sentinel and emits a WARNING. Definitive 4xx
-// rejections (which DO error with no state) are covered by
-// TestServerPowerResource_Create_DefinitiveRejection.
-func TestServerPowerResource_Create_APIError(t *testing.T) {
+// TestServerPowerResource_Create_MaintenanceDefinitive verifies Thread C (P1):
+// the documented 503 MAINTENANCE response from SetPowerState is a DEFINITIVE
+// rejection — the request was explicitly refused and no task was created — so
+// Create surfaces an ERROR and persists NO state (no desired value, no sentinel).
+// This lets Terraform retry once maintenance ends, instead of the previous
+// indeterminate handling that persisted the desired state + sentinel and made
+// Read report false convergence forever. A genuinely ambiguous/unexpected 5xx
+// (e.g. 502 with no MAINTENANCE marker) remains indeterminate — covered by
+// TestServerPowerResource_Create_Indeterminate5xxSetPowerState.
+func TestServerPowerResource_Create_MaintenanceDefinitive(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -239,20 +240,15 @@ func TestServerPowerResource_Create_APIError(t *testing.T) {
 	resp.State = tfsdk.State{Schema: schemaResp.Schema}
 	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
 
-	// 5xx is indeterminate: no error, a warning, and desired state + sentinel.
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Create() should not error on a 503 (indeterminate), got: %v", resp.Diagnostics.Errors())
+	// 503 MAINTENANCE is definitive: an ERROR, no warning, and NO persisted state.
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() expected an ERROR on a 503 MAINTENANCE (definitive rejection), got none")
 	}
-	if resp.Diagnostics.WarningsCount() == 0 {
-		t.Error("Create() expected a WARNING on a 503 SetPowerState, got none")
+	if resp.Diagnostics.WarningsCount() != 0 {
+		t.Errorf("Create() expected no warnings on a definitive 503 MAINTENANCE, got %d", resp.Diagnostics.WarningsCount())
 	}
-	if resp.State.Raw.IsNull() {
-		t.Fatal("Desired state must be persisted on a 503 SetPowerState")
-	}
-	var state serverPowerResourceModel
-	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
-	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
-		t.Errorf("PendingTaskID = %q, want %q (sentinel)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
+	if !resp.State.Raw.IsNull() {
+		t.Error("State must NOT be persisted on a 503 MAINTENANCE (so Terraform retries after maintenance ends)")
 	}
 }
 
@@ -1677,6 +1673,135 @@ func TestServerPowerResource_Update_WaitOnlyChange(t *testing.T) {
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
 	if result.Wait.ValueBool() != true {
 		t.Errorf("wait = %v, want true after wait-only update", result.Wait.ValueBool())
+	}
+}
+
+// TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID verifies Thread A
+// (P1): when a prior op was submitted with wait=false, its task UUID is recorded
+// in pending_task_id. Changing ONLY `wait` reaches the no-command path, which must
+// PRESERVE that marker (not null it). If it were nulled, the next refresh would
+// stop consulting the still-running task and could map a pre-op transient live
+// state over the desired value, causing the next apply to re-issue the destructive
+// command. The wait-only Update must also make NO SetPowerState/PATCH call.
+func TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID(t *testing.T) {
+	powerCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			powerCalled = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Prior state: OFF, wait=false, with an in-flight task recorded.
+	priorState := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "123"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "123"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "some-uuid"),
+	})
+	// Plan: same state + state_option, only wait flipped to true.
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "123"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.UpdateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: priorState}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if powerCalled {
+		t.Error("SetPowerState (PATCH) should NOT be called on a wait-only update, but it was")
+	}
+
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.PendingTaskID.ValueString() != "some-uuid" {
+		t.Errorf("PendingTaskID = %q, want some-uuid (prior marker preserved on wait-only update)", result.PendingTaskID.ValueString())
+	}
+	if result.Wait.ValueBool() != true {
+		t.Errorf("wait = %v, want true after wait-only update", result.Wait.ValueBool())
+	}
+}
+
+// TestServerPowerResource_Read_PendingTerminalRefetchesLiveState verifies Thread B
+// (P1): when Read finds pending_task_id set and GetTask reports the task TERMINAL,
+// it REFETCHES GetServer to reconcile from a POST-completion live snapshot rather
+// than the stale pre-completion snapshot taken before GetTask. Here the first
+// GetServer returns SHUTOFF (mid-POWERCYCLE), GetTask returns FINISHED, and the
+// second GetServer returns RUNNING (post-completion) ⇒ Read reconciles to ON and
+// clears the marker. Without the refetch it would record OFF and reboot again.
+func TestServerPowerResource_Read_PendingTerminalRefetchesLiveState(t *testing.T) {
+	serverCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/888":
+			serverCalls++
+			// First call: pre-completion SHUTOFF (transient mid-POWERCYCLE).
+			// Second call (post-refetch): post-completion RUNNING.
+			liveState := "SHUTOFF"
+			if serverCalls >= 2 {
+				liveState = "RUNNING"
+			}
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 888, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": liveState},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-cycle":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-cycle","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired ON (a POWERCYCLE reboot); task finished; post-completion live RUNNING.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "888"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "POWERCYCLE"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "888"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-cycle"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if serverCalls < 2 {
+		t.Errorf("GetServer was called %d time(s); expected a post-completion refetch (2)", serverCalls)
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (reconciled from POST-completion RUNNING, not stale SHUTOFF)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared after terminal task + refetch)", result.PendingTaskID.ValueString())
 	}
 }
 

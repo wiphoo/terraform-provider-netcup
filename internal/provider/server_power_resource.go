@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -319,9 +320,33 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 			// state and retain the marker so the next refresh re-checks.
 			mapLiveState = false
 		} else {
-			// Terminal task: the op finished/failed. Clear the marker and reconcile
-			// `state` from the live ServerState via the normal mapping below.
-			state.PendingTaskID = types.StringNull()
+			// Terminal task: the op finished/failed.
+			//
+			// Thread B (P1) fix: REFETCH the live server before reconciling. The
+			// `server` snapshot above was taken BEFORE GetTask; if the task
+			// transitioned to terminal in the window between those two calls, that
+			// snapshot is a stale PRE-completion state (e.g. SHUTOFF captured
+			// mid-POWERCYCLE even though the task has since restored RUNNING).
+			// Reconciling from it would record the wrong power state and make the
+			// next apply re-issue the command. Take a fresh POST-completion snapshot
+			// and reconcile from THAT, then clear the marker.
+			//
+			// If the refetch fails we KEEP the marker and surface a diagnostic so the
+			// next refresh retries, rather than reconcile from a stale snapshot.
+			fresh, ferr := r.client.GetServer(ctx, int32(id))
+			if ferr != nil {
+				d, gone := apiErrorToDiag(ferr, false)
+				if gone {
+					// Server disappeared post-completion: remove the resource.
+					resp.State.RemoveResource(ctx)
+					return
+				}
+				resp.Diagnostics.Append(d)
+				mapLiveState = false
+			} else {
+				server = fresh
+				state.PendingTaskID = types.StringNull()
+			}
 		}
 	}
 
@@ -450,8 +475,22 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		}
 	}
 
-	// SUCCESS (wait=true task FINISHED, synchronous 200, or wait-only change with
-	// no API call): pending_task_id stays null (set on `desired` above).
+	// Thread A (P1) fix: PRESERVE the prior pending_task_id on the no-command path.
+	//
+	// We only reach here on a wait-only / no-op Update (state and state_option
+	// unchanged), because every branch that issued a new SetPowerState command
+	// returned above. `desired` was initialized with pending_task_id = null, but a
+	// prior op submitted with wait=false (or an indeterminate wait) may still be
+	// in flight with its task UUID/sentinel recorded in prior.PendingTaskID.
+	// Nulling it here would make the next refresh stop consulting that task and map
+	// a pre-op transient live state (e.g. RUNNING while OFF is desired) over the
+	// desired value — the next apply would then re-issue the destructive command.
+	// Carry the prior marker forward; only a newly-issued command (handled above)
+	// sets or replaces it.
+	desired.PendingTaskID = prior.PendingTaskID
+
+	// SUCCESS (wait-only change with no API call): the new `wait` is persisted and
+	// any still-pending task marker is preserved.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
 }
 
@@ -489,26 +528,35 @@ func (r *serverPowerResource) ImportState(ctx context.Context, req resource.Impo
 // mirroring the terminal-vs-indeterminate philosophy classifyTaskWaitError
 // applies to WaitForTask.
 //
-//   - DEFINITIVE rejection — a *netcup.APIError with a 4xx status: the request was
-//     understood and refused (e.g. 400 invalid state_option, 404 unknown server,
-//     401/403 auth). No task was created and the server state was NOT changed, so
-//     a retry is safe. Surface an ERROR and persist NO state.
+//   - DEFINITIVE rejection — a *netcup.APIError with a 4xx status (e.g. 400 invalid
+//     state_option, 404 unknown server, 401/403 auth) OR a documented 503
+//     MAINTENANCE response: the request was understood and refused, no task was
+//     created, and the server state was NOT changed, so a retry is safe. Surface an
+//     ERROR and persist NO state (so Terraform retries once maintenance ends).
 //
 //   - INDETERMINATE — a transport error, a response-body decode error (a truncated
-//     202), or a 5xx: the PATCH may have been accepted server-side and an async
-//     power task may already be running even though no usable TaskInfo/UUID came
-//     back. Erroring-without-state here would let the next apply re-issue the
-//     command — for RESET/POWERCYCLE, rebooting the server twice. Instead persist
-//     the desired state + the pendingTaskIDIndeterminate sentinel (no UUID is
-//     available to track the real task) + a WARNING, so a later refresh/apply
-//     reconciles via Read's pending-task path instead of blindly re-issuing.
+//     202), or an unexpected/undocumented 5xx: the PATCH may have been accepted
+//     server-side and an async power task may already be running even though no
+//     usable TaskInfo/UUID came back. Erroring-without-state here would let the next
+//     apply re-issue the command — for RESET/POWERCYCLE, rebooting the server twice.
+//     Instead persist the desired state + the pendingTaskIDIndeterminate sentinel
+//     (no UUID is available to track the real task) + a WARNING, so a later
+//     refresh/apply reconciles via Read's pending-task path instead of re-issuing.
 //
-// The 4xx-*APIError classifier is shared with the rescue resource
-// (isDefinitiveEnableRejection) — its logic is generic (definitive 4xx vs
-// indeterminate transport/decode/5xx), so power reuses it rather than declaring a
-// duplicate.
+// Thread C (P1) refinement: a documented 503 MAINTENANCE response is ALSO a
+// DEFINITIVE rejection, not indeterminate. docs/SCP-API-NOTES.md documents the
+// PATCH /v1/servers/{id} responses as exactly `202 TaskInfo` (accepted async),
+// `200` (accepted sync), or `503 ResponseError` (node in maintenance). A 503
+// maintenance response means the request was EXPLICITLY refused and NO task was
+// created — treating it as indeterminate would persist the desired state + the
+// sentinel, and Read would then preserve that desired value indefinitely (false
+// convergence: Terraform never retries once maintenance ends). So power uses
+// isDefinitivePowerRejection, which extends the shared 4xx test with the
+// endpoint-specific 503-maintenance case. Genuinely ambiguous failures
+// (transport errors, truncated/undecodable 202, other/unexpected 5xx) remain
+// indeterminate and fall through to the sentinel path below.
 func handleSetPowerStateError(ctx context.Context, state *tfsdk.State, diags *diag.Diagnostics, err error, desired *serverPowerResourceModel) {
-	if isDefinitiveEnableRejection(err) {
+	if isDefinitivePowerRejection(err) {
 		d, _ := apiErrorToDiag(err, true)
 		diags.Append(d)
 		return
@@ -530,6 +578,46 @@ func handleSetPowerStateError(ctx context.Context, state *tfsdk.State, diags *di
 			err.Error(),
 		),
 	)
+}
+
+// isDefinitivePowerRejection reports whether a SetPowerState error is a
+// DEFINITIVE rejection by the SCP API — one where the request was understood and
+// refused, no async task was created, and the server state was NOT changed (so a
+// retry is safe and the caller must persist NO state).
+//
+// It treats two cases as definitive:
+//
+//   - a *netcup.APIError with a 4xx status (shared with rescue's generic
+//     isDefinitiveEnableRejection: 400 invalid state_option, 404 unknown server,
+//     401/403 auth), and
+//
+//   - Thread C (P1): a documented 503 MAINTENANCE response. For this endpoint the
+//     spec documents 503 ONLY as `ResponseError` with the node in maintenance
+//     (docs/SCP-API-NOTES.md, "Power state — PATCH /v1/servers/{id}"): the request
+//     was explicitly rejected and no task was created. We match status 503 AND a
+//     MAINTENANCE marker in the response body/code so that a hypothetical
+//     UNDOCUMENTED/ambiguous 503 (with a different body) still falls through to the
+//     indeterminate path; per the docs, a real maintenance rejection always carries
+//     the MAINTENANCE signal.
+//
+// Everything else stays INDETERMINATE (transport error, truncated/undecodable
+// 202 decode error, other/unexpected 5xx): the op may have been accepted
+// server-side, so the caller persists the desired state + sentinel + warning.
+func isDefinitivePowerRejection(err error) bool {
+	if isDefinitiveEnableRejection(err) {
+		return true
+	}
+	var apiErr *netcup.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	// Documented maintenance rejection: 503 whose ResponseError code/message
+	// indicates maintenance. Match case-insensitively on the body (which
+	// APIError captures verbatim, including the {"code":"MAINTENANCE",...} JSON).
+	return strings.Contains(strings.ToUpper(apiErr.Body), "MAINTENANCE")
 }
 
 // classifyTaskWaitError classifies a non-nil error returned by WaitForTask
