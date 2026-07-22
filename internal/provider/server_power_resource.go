@@ -389,8 +389,32 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 					resp.Diagnostics.Append(fd)
 					mapLiveState = false
 				} else {
+					// Thread B (P1 follow-up) fix: the fresh POST-lookup snapshot can
+					// STILL show the operation's pre-op/intermediate live state — SCP
+					// live-state propagation lags a purged/404 task just as it lags a
+					// FINISHED one (e.g. a POWERCYCLE whose refetch is still SHUTOFF
+					// before the server comes back RUNNING). Clearing the marker
+					// unconditionally would record the wrong state (OFF) and make the
+					// next apply reboot again. So only CLEAR + reconcile when the fresh
+					// live state CONFIRMS the desired `state`; otherwise fall back to the
+					// indeterminate sentinel and RETAIN the desired state (map nothing).
+					//
+					// Unlike the terminal-success branch there is no task.FinishedAt to
+					// bound a time window here (the task record is gone), so the bound is
+					// the sentinel's own convergence check above: the next refresh clears
+					// the sentinel as soon as the live state matches the desired value —
+					// the same deliberate residual limitation the sentinel path documents.
 					server = fresh
-					state.PendingTaskID = types.StringNull()
+					mapped := ""
+					if fresh.ServerLiveInfo != nil {
+						mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
+					}
+					if mapped != "" && mapped == state.State.ValueString() {
+						state.PendingTaskID = types.StringNull()
+					} else {
+						state.PendingTaskID = types.StringValue(pendingTaskIDIndeterminate)
+						mapLiveState = false
+					}
 				}
 			} else {
 				// Transient error: we cannot tell whether the op is still pending.

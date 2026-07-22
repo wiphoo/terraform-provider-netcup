@@ -1353,9 +1353,16 @@ func TestServerPowerResource_Read_TerminalConverged(t *testing.T) {
 	}
 }
 
-// TestServerPowerResource_Read_PendingTaskGone verifies that a 404 on the pending
-// task (record gone) clears the marker and reconciles from the live state.
-func TestServerPowerResource_Read_PendingTaskGone(t *testing.T) {
+// TestServerPowerResource_Read_PendingTaskGoneUnconvergedRetains verifies the
+// Thread B (P1 follow-up) fix: when the pending task is gone (GetTask 404) and the
+// fresh POST-lookup refetch does NOT yet confirm the desired state, Read must NOT
+// clear the marker and reconcile from the (still-unconverged) live state — doing
+// so would record the wrong power state and make the next apply re-issue the
+// command. Here desired is OFF but the refetched live state is still RUNNING (the
+// off op hasn't propagated / the task was purged mid-transition): Read RETAINS the
+// desired OFF and falls back to the indeterminate sentinel until a later refresh
+// observes convergence.
+func TestServerPowerResource_Read_PendingTaskGoneUnconvergedRetains(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -1397,12 +1404,125 @@ func TestServerPowerResource_Read_PendingTaskGone(t *testing.T) {
 	}
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	// Live RUNNING → ON; marker cleared because the task is gone.
+	// Live RUNNING ≠ desired OFF ⇒ not converged: retain desired OFF, do not map.
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (retained; live RUNNING not yet converged after task 404)", result.State.ValueString())
+	}
+	// Marker degrades to the indeterminate sentinel (real UUID is gone/untrackable).
+	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want %q (retained sentinel until convergence)", result.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
+	}
+}
+
+// TestServerPowerResource_Read_PendingTaskGoneConvergedClears verifies that when
+// the pending task is gone (GetTask 404) and the fresh refetch CONFIRMS the desired
+// state, Read clears the marker and reconciles normally. Desired ON, refetch shows
+// RUNNING ⇒ converged ⇒ marker cleared, state ON.
+func TestServerPowerResource_Read_PendingTaskGoneConvergedClears(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/555":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 555, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-gone":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"task not found"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "555"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "555"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-gone"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Live RUNNING → ON confirms desired ON ⇒ converged: clear the marker.
 	if result.State.ValueString() != "ON" {
 		t.Errorf("State = %q, want ON (reconciled from live RUNNING after task 404)", result.State.ValueString())
 	}
 	if !result.PendingTaskID.IsNull() {
-		t.Errorf("PendingTaskID = %q, want null (cleared on task 404)", result.PendingTaskID.ValueString())
+		t.Errorf("PendingTaskID = %q, want null (cleared on convergence after task 404)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingTaskGonePowercycleLagRetains reproduces the
+// reviewer's exact example: a POWERCYCLE (desired ON) whose task briefly 404s, and
+// whose fresh refetch STILL reports SHUTOFF before the server comes back RUNNING.
+// The unconditional-clear bug recorded OFF and rebooted again on the next apply;
+// the fix retains desired ON + the sentinel until the live state converges.
+func TestServerPowerResource_Read_PendingTaskGonePowercycleLagRetains(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/555":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 555, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-gone":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"task not found"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "555"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "555"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-gone"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Refetch SHUTOFF (→ OFF) ≠ desired ON ⇒ propagation lag: retain ON, do not
+	// record OFF (which would reboot again next apply).
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (retained; refetch SHUTOFF is unconverged POWERCYCLE lag)", result.State.ValueString())
+	}
+	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want %q (retained sentinel until convergence)", result.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 }
 
