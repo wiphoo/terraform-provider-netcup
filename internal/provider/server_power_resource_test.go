@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -687,6 +688,117 @@ func TestServerPowerResource_Create_DefinitiveRejection(t *testing.T) {
 	}
 }
 
+// failingTokenSource is a netcup.TokenSource whose Token() always fails,
+// simulating a refresh-token that cannot be refreshed. Because newRequest
+// consults the TokenSource BEFORE httpClient.Do, SetPowerState returns the
+// resulting (pre-dispatch) error without ever sending the PATCH.
+type failingTokenSource struct{ err error }
+
+func (f failingTokenSource) Token(_ context.Context) (string, error) { return "", f.err }
+
+// TestServerPowerResource_Create_PreDispatchAuthDefinitive verifies Thread A (P1):
+// a token-refresh failure surfaces from SetPowerState BEFORE the request is
+// dispatched (wrapped in netcup.ErrPreDispatch). The power PATCH was DEFINITIVELY
+// never submitted, so Create must ERROR and persist NO state and NO sentinel —
+// NOT record indeterminate convergence (which would strand the desired state and
+// stop Terraform retrying after auth recovers).
+func TestServerPowerResource_Create_PreDispatchAuthDefinitive(t *testing.T) {
+	dispatched := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The power PATCH must never reach the server on a pre-dispatch failure.
+		dispatched = true
+		t.Errorf("unexpected dispatched request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(
+		netcup.WithAPIEndpoint(srv.URL),
+		netcup.WithTokenSource(failingTokenSource{err: errors.New("refresh token expired")}),
+	)
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "777"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if dispatched {
+		t.Fatal("power request was dispatched despite a pre-dispatch token failure")
+	}
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create() expected an ERROR on a pre-dispatch token failure, got none")
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("State must NOT be persisted on a pre-dispatch failure (safe retry, no false convergence)")
+	}
+	// Also assert no warning-only path was taken (which would indicate the
+	// indeterminate/sentinel branch was reached).
+	if resp.Diagnostics.WarningsCount() != 0 {
+		t.Errorf("expected no warnings on a definitive pre-dispatch failure, got %d", resp.Diagnostics.WarningsCount())
+	}
+}
+
+// TestServerPowerResource_Create_AfterDispatchTransportIndeterminate verifies the
+// counterpart to the pre-dispatch case: an AFTER-dispatch transport failure (the
+// server hangs up mid-request, so httpClient.Do returns a *url.Error) is
+// AMBIGUOUS — the PATCH may already have been accepted — so Create persists the
+// desired state + the pendingTaskIDIndeterminate sentinel + a WARNING, and does
+// NOT error. This confirms the discriminator: only pre-dispatch errors are
+// definitive; transport errors after dispatch stay indeterminate.
+func TestServerPowerResource_Create_AfterDispatchTransportIndeterminate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hijack and abruptly close the connection so httpClient.Do returns a
+		// transport error (*url.Error) rather than an HTTP status.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter does not support hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":    tftypes.NewValue(tftypes.String, "778"),
+		"state":        tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option": tftypes.NewValue(tftypes.String, nil),
+		"wait":         tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() must NOT error on an ambiguous after-dispatch transport failure; got: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("State must be persisted (desired + sentinel) on an ambiguous after-dispatch failure")
+	}
+	var state serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want %q (indeterminate sentinel)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Error("expected a WARNING diagnostic on an indeterminate after-dispatch failure")
+	}
+}
+
 // TestServerPowerResource_Create_NoWaitStoresTaskID verifies that wait=false
 // stores the accepted task UUID in pending_task_id (instead of discarding it), so
 // a refresh before the task finishes can reconcile via the task rather than
@@ -891,6 +1003,180 @@ func TestServerPowerResource_Read_PendingTerminalReconcilesDrift(t *testing.T) {
 	}
 	if !result.PendingTaskID.IsNull() {
 		t.Errorf("PendingTaskID = %q, want null", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_TerminalPropagationLagWithinWindow verifies
+// Thread B (P1): after a FINISHED task, the post-completion refetch can STILL
+// report the operation's intermediate live state (e.g. a POWERCYCLE whose refetch
+// is still SHUTOFF before the server comes back RUNNING). WITHIN
+// powerPropagationWindow (measured from task.FinishedAt), Read treats the
+// mismatch as propagation lag: it RETAINS pending_task_id and KEEPS the desired
+// state rather than recording OFF (which would reboot again on the next apply).
+func TestServerPowerResource_Read_TerminalPropagationLagWithinWindow(t *testing.T) {
+	finished := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/446":
+			// Both the pre-GetTask snapshot and the post-completion refetch still
+			// report the intermediate SHUTOFF (propagation has not caught up).
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 446, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-lag":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-lag","state":"FINISHED","finishedAt":"` + finished + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Desired ON (a POWERCYCLE target); task finished recently; refetch still
+	// SHUTOFF ⇒ within window ⇒ retain marker + keep desired ON.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "446"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "446"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-lag"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired kept during propagation lag, not reconciled to OFF)", result.State.ValueString())
+	}
+	if result.PendingTaskID.ValueString() != "task-lag" {
+		t.Errorf("PendingTaskID = %q, want task-lag (marker retained within propagation window)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_TerminalPropagationPastWindow verifies Thread B
+// (P1): once time.Since(task.FinishedAt) exceeds powerPropagationWindow, a still-
+// mismatched live state is treated as GENUINE drift (e.g. the server was stopped
+// externally after the task finished) — Read CLEARS the marker and reconciles
+// from the live state so real drift surfaces for a corrective apply.
+func TestServerPowerResource_Read_TerminalPropagationPastWindow(t *testing.T) {
+	// FinishedAt older than powerPropagationWindow (2m).
+	finished := time.Now().Add(-3 * time.Minute).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/447":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 447, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-old":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-old","state":"FINISHED","finishedAt":"` + finished + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "447"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "447"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-old"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (genuine drift surfaced past propagation window)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared past window)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_TerminalConverged verifies Thread B (P1): when the
+// post-completion refetch CONFIRMS the desired state (live RUNNING for desired
+// ON), Read clears the marker and reconciles regardless of the window. This is
+// the converged happy path, analogous to the ae9ca5e reconcile test.
+func TestServerPowerResource_Read_TerminalConverged(t *testing.T) {
+	finished := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/448":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 448, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-conv":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-conv","state":"FINISHED","finishedAt":"` + finished + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "448"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "448"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-conv"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (converged: live RUNNING confirms desired)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared on convergence)", result.PendingTaskID.ValueString())
 	}
 }
 

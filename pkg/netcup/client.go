@@ -6,6 +6,7 @@ package netcup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,26 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrPreDispatch marks an error that occurred while BUILDING a request in
+// newRequest — i.e. BEFORE httpClient.Do was ever called, so the request was
+// DEFINITIVELY never sent over the wire. Two failure modes carry it: a token
+// acquisition/refresh failure from the configured TokenSource, and a request
+// construction failure from http.NewRequestWithContext.
+//
+// It exists so callers of mutating endpoints (e.g. SetPowerState) can reliably
+// distinguish a pre-dispatch failure — where the server state was NOT changed
+// and a retry is unambiguously safe — from an AFTER-dispatch failure (a
+// transport *url.Error mid-flight, or a truncated/undecodable response), which
+// is genuinely ambiguous because the request may already have taken effect.
+// Match it with errors.Is(err, netcup.ErrPreDispatch).
+//
+// A transport error returned by httpClient.Do (a *url.Error) and a
+// response-decode error are deliberately NOT wrapped with this sentinel, so
+// they stay ambiguous. Note a TokenSource refresh can itself fail on its own
+// transport error; wrapping it here is still correct because the ORIGINAL
+// (power) request never left the client regardless of why the token step failed.
+var ErrPreDispatch = errors.New("request not dispatched")
 
 const (
 	// DefaultAPIEndpoint is the SCP REST API base URL (the /scp-core/api root).
@@ -154,7 +175,9 @@ func (c *Client) newRequest(ctx context.Context, method, path, accept string, bo
 	url := strings.TrimRight(c.apiEndpoint, "/") + path
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return nil, err
+		// Request construction failed before any dispatch — mark it pre-dispatch
+		// so mutating callers can treat it as a definitive, safe-to-retry failure.
+		return nil, fmt.Errorf("%w: building request: %w", ErrPreDispatch, err)
 	}
 	if accept != "" {
 		req.Header.Set("Accept", accept)
@@ -168,7 +191,11 @@ func (c *Client) newRequest(ctx context.Context, method, path, accept string, bo
 		t, err := c.tokenSource.Token(ctx)
 		if err != nil {
 			if authRequired {
-				return nil, fmt.Errorf("getting access token: %w", err)
+				// The token could not be acquired/refreshed, so the request is
+				// never dispatched. Mark it pre-dispatch (in addition to keeping
+				// the original error in the chain) so mutating callers can classify
+				// it as a definitive, safe-to-retry failure via errors.Is.
+				return nil, fmt.Errorf("%w: getting access token: %w", ErrPreDispatch, err)
 			}
 			t = ""
 		}

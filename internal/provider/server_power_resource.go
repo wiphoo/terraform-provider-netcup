@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -31,6 +32,24 @@ import (
 // classifyTaskWaitError treats it as INDETERMINATE: the desired state is
 // persisted with a warning (no error, no re-issue of the possibly destructive
 // power command).
+
+// powerPropagationWindow bounds how long Read's terminal-task-success branch
+// keeps retaining pending_task_id (and the desired state) when the post-FINISHED
+// GetServer refetch STILL shows the operation's intermediate live state.
+//
+// Thread B (P1) fix: even after the ae9ca5e post-FINISHED refetch, SCP's
+// live-state propagation can lag — a single fresh snapshot may still report an
+// intermediate state (e.g. a POWERCYCLE whose refetch is still SHUTOFF before the
+// server comes back RUNNING). Clearing the marker unconditionally then records the
+// wrong state (OFF) and the next apply reboots again. So within this window we
+// treat a still-mismatched live state as propagation lag and RETAIN the marker +
+// keep the desired state; once time.Since(task.FinishedAt) exceeds it we treat the
+// mismatch as GENUINE drift (e.g. an externally-stopped server) and reconcile from
+// the live state. This mirrors rescue's bounded rescuePropagationWindow. It is a
+// SEPARATE, power-named const (not a reuse of the rescue-named symbol) so each
+// resource's window can evolve independently; 2 minutes comfortably covers real
+// SCP propagation (seconds) while surfacing true drift promptly.
+const powerPropagationWindow = 2 * time.Minute
 
 var _ resource.Resource = &serverPowerResource{}
 
@@ -329,7 +348,7 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 			// mid-POWERCYCLE even though the task has since restored RUNNING).
 			// Reconciling from it would record the wrong power state and make the
 			// next apply re-issue the command. Take a fresh POST-completion snapshot
-			// and reconcile from THAT, then clear the marker.
+			// and reconcile from THAT.
 			//
 			// If the refetch fails we KEEP the marker and surface a diagnostic so the
 			// next refresh retries, rather than reconcile from a stale snapshot.
@@ -344,8 +363,39 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 				resp.Diagnostics.Append(d)
 				mapLiveState = false
 			} else {
+				// Thread B (P1) refinement: the task is FINISHED and we have a fresh
+				// snapshot, but SCP live-state propagation can still LAG — the single
+				// refetch may STILL report the operation's intermediate state (e.g. a
+				// POWERCYCLE whose refetch is still SHUTOFF before the server comes
+				// back RUNNING). Clearing the marker unconditionally then records the
+				// wrong state (OFF) and the next apply reboots again.
+				//
+				// So only CLEAR the marker + reconcile if the fresh live state CONFIRMS
+				// the desired `state` (converged). If it does NOT yet match, this is
+				// either propagation lag or genuine drift — bound the ambiguity by the
+				// task's own FinishedAt: within powerPropagationWindow, treat it as lag
+				// and RETAIN the marker + KEEP the desired state (map nothing); once
+				// the window elapses (or FinishedAt is absent), treat the mismatch as
+				// GENUINE drift and reconcile from the live state (so a real
+				// externally-stopped server still surfaces), clearing the marker.
+				// Mirrors rescue's bounded post-terminal propagation handling.
 				server = fresh
-				state.PendingTaskID = types.StringNull()
+				mapped := ""
+				if fresh.ServerLiveInfo != nil {
+					mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
+				}
+				converged := mapped != "" && mapped == state.State.ValueString()
+				withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
+				if converged || !withinWindow {
+					// Converged (live matches desired) or past the propagation window
+					// (treat mismatch as genuine drift): clear the marker and reconcile
+					// from the fresh live state below.
+					state.PendingTaskID = types.StringNull()
+				} else {
+					// Still mismatched but within the window: propagation is in flight.
+					// Retain the marker and keep the desired state (do not map).
+					mapLiveState = false
+				}
 			}
 		}
 	}
@@ -529,19 +579,38 @@ func (r *serverPowerResource) ImportState(ctx context.Context, req resource.Impo
 // applies to WaitForTask.
 //
 //   - DEFINITIVE rejection — a *netcup.APIError with a 4xx status (e.g. 400 invalid
-//     state_option, 404 unknown server, 401/403 auth) OR a documented 503
-//     MAINTENANCE response: the request was understood and refused, no task was
-//     created, and the server state was NOT changed, so a retry is safe. Surface an
-//     ERROR and persist NO state (so Terraform retries once maintenance ends).
+//     state_option, 404 unknown server, 401/403 auth), a documented 503
+//     MAINTENANCE response, OR a PRE-DISPATCH failure (netcup.ErrPreDispatch: the
+//     token could not be refreshed / the request could not be constructed, so
+//     httpClient.Do was never reached): the request was understood and refused, or
+//     never left the client at all — no task was created, and the server state was
+//     NOT changed, so a retry is safe. Surface an ERROR and persist NO state (so
+//     Terraform retries once the token/maintenance issue clears).
 //
-//   - INDETERMINATE — a transport error, a response-body decode error (a truncated
-//     202), or an unexpected/undocumented 5xx: the PATCH may have been accepted
-//     server-side and an async power task may already be running even though no
-//     usable TaskInfo/UUID came back. Erroring-without-state here would let the next
-//     apply re-issue the command — for RESET/POWERCYCLE, rebooting the server twice.
+//   - INDETERMINATE — an AFTER-dispatch transport error (a *url.Error from
+//     httpClient.Do mid-flight), a response-body decode error (a truncated 202), or
+//     an unexpected/undocumented 5xx: the PATCH may have been accepted server-side
+//     and an async power task may already be running even though no usable
+//     TaskInfo/UUID came back. Erroring-without-state here would let the next apply
+//     re-issue the command — for RESET/POWERCYCLE, rebooting the server twice.
 //     Instead persist the desired state + the pendingTaskIDIndeterminate sentinel
 //     (no UUID is available to track the real task) + a WARNING, so a later
 //     refresh/apply reconciles via Read's pending-task path instead of re-issuing.
+//
+// Thread A (P1) refinement: a PRE-DISPATCH failure (netcup.ErrPreDispatch) is
+// DEFINITIVE, not indeterminate. SetPowerState builds the request in newRequest —
+// which consults the TokenSource and constructs the *http.Request — BEFORE it ever
+// calls httpClient.Do. If the refresh token cannot be refreshed (or the request
+// cannot be built), newRequest returns an error wrapping netcup.ErrPreDispatch and
+// SetPowerState returns it WITHOUT dispatching: the power PATCH was definitively
+// never submitted, so no task exists and the server state is unchanged. Treating
+// that as indeterminate would persist the desired state + sentinel, and Read would
+// then preserve the desired value indefinitely (false convergence — Terraform
+// never retries even after auth recovers). isDefinitivePowerRejection matches
+// ErrPreDispatch via errors.Is so these fail cleanly with an ERROR and no state.
+// The discriminator is reliable because the sentinel is added ONLY on newRequest's
+// pre-dispatch paths; the after-dispatch transport *url.Error and decode errors are
+// returned raw (unwrapped), so they stay indeterminate.
 //
 // Thread C (P1) refinement: a documented 503 MAINTENANCE response is ALSO a
 // DEFINITIVE rejection, not indeterminate. docs/SCP-API-NOTES.md documents the
@@ -585,11 +654,21 @@ func handleSetPowerStateError(ctx context.Context, state *tfsdk.State, diags *di
 // refused, no async task was created, and the server state was NOT changed (so a
 // retry is safe and the caller must persist NO state).
 //
-// It treats two cases as definitive:
+// It treats three cases as definitive:
 //
 //   - a *netcup.APIError with a 4xx status (shared with rescue's generic
 //     isDefinitiveEnableRejection: 400 invalid state_option, 404 unknown server,
-//     401/403 auth), and
+//     401/403 auth),
+//
+//   - Thread A (P1): a PRE-DISPATCH failure (netcup.ErrPreDispatch). SetPowerState
+//     builds the request — consulting the TokenSource and constructing the
+//     *http.Request in newRequest — BEFORE calling httpClient.Do. A token-refresh
+//     failure or a request-construction failure surfaces wrapped in ErrPreDispatch
+//     and the power PATCH is never dispatched, so no task was created and the
+//     server state is unchanged: a retry is safe and NO state must be persisted.
+//     This is a typed/sentinel signal (errors.Is), reliable because newRequest adds
+//     it ONLY on its pre-dispatch paths — an after-dispatch transport *url.Error or
+//     decode error is returned unwrapped and therefore stays indeterminate, AND
 //
 //   - Thread C (P1): a documented 503 MAINTENANCE response. For this endpoint the
 //     spec documents 503 ONLY as `ResponseError` with the node in maintenance
@@ -604,6 +683,11 @@ func handleSetPowerStateError(ctx context.Context, state *tfsdk.State, diags *di
 // 202 decode error, other/unexpected 5xx): the op may have been accepted
 // server-side, so the caller persists the desired state + sentinel + warning.
 func isDefinitivePowerRejection(err error) bool {
+	// Thread A (P1): a pre-dispatch failure (token refresh / request construction)
+	// means the power PATCH was never sent — definitive, safe to retry, no state.
+	if errors.Is(err, netcup.ErrPreDispatch) {
+		return true
+	}
 	if isDefinitiveEnableRejection(err) {
 		return true
 	}

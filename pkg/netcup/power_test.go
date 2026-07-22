@@ -3,12 +3,37 @@ package netcup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// TestSetPowerStatePreDispatchTokenErrorIsMarked proves that when the configured
+// TokenSource cannot produce a token, SetPowerState fails in newRequest BEFORE the
+// PATCH is dispatched, and the returned error is marked with ErrPreDispatch so
+// callers can classify it as a definitive, safe-to-retry failure via errors.Is.
+// The original token error must remain in the chain.
+func TestSetPowerStatePreDispatchTokenErrorIsMarked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("PATCH must not be dispatched when the token source fails")
+	}))
+	defer srv.Close()
+
+	c := New(WithAPIEndpoint(srv.URL), WithTokenSource(erroringTokenSource{}))
+	_, err := c.SetPowerState(context.Background(), 42, PowerOff, "")
+	if err == nil {
+		t.Fatal("SetPowerState() error = nil, want a pre-dispatch token error")
+	}
+	if !errors.Is(err, ErrPreDispatch) {
+		t.Errorf("errors.Is(err, ErrPreDispatch) = false, want true; err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "token source unavailable") {
+		t.Errorf("error = %v, want the original token failure preserved in the chain", err)
+	}
+}
 
 func TestSetPowerState202ReturnsTask(t *testing.T) {
 	var gotMethod, gotPath, gotQuery, gotContentType, gotBody string
