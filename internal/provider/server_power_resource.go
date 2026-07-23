@@ -111,6 +111,8 @@ var _ resource.ResourceWithConfigure = &serverPowerResource{}
 
 var _ resource.ResourceWithImportState = &serverPowerResource{}
 
+var _ resource.ResourceWithModifyPlan = &serverPowerResource{}
+
 // serverPowerResource manages the power state of a netcup server.
 type serverPowerResource struct {
 	client *netcup.Client
@@ -169,6 +171,10 @@ func (r *serverPowerResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Computed:    true,
 				Description: "The server ID (same as server_id; used as the resource identifier for import).",
 				PlanModifiers: []planmodifier.String{
+					// Thread A (P1): stock UseStateForUnknown for plan stability on
+					// in-place updates; the resource-level ModifyPlan below forces this
+					// unknown on any planned server_id replacement so the new server_id
+					// becomes the new id (rather than the old id being copied in).
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
@@ -184,12 +190,10 @@ func (r *serverPowerResource) Schema(_ context.Context, _ resource.SchemaRequest
 					"response could not be decoded (no UUID available). Null once the task " +
 					"is terminal.",
 				PlanModifiers: []planmodifier.String{
-					// Mirror power's `id` approach: plain UseStateForUnknown for plan
-					// stability on in-place updates. Power intentionally has no
-					// resource-level ModifyPlan (server_id RequiresReplace already
-					// forces a full destroy/create with null prior state, where
-					// UseStateForUnknown is a no-op), so nothing copies stale values
-					// across a replacement.
+					// Thread A (P1): stock UseStateForUnknown for plan stability on
+					// in-place updates; the resource-level ModifyPlan below forces this
+					// unknown on any planned server_id replacement so pending_task_id is
+					// recomputed for the new server rather than copied from prior state.
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
@@ -212,6 +216,70 @@ func (r *serverPowerResource) Configure(_ context.Context, req resource.Configur
 	}
 
 	r.client = client
+}
+
+// ModifyPlan forces the UseStateForUnknown computed attributes (id,
+// pending_task_id) to UNKNOWN ("known after apply") whenever a replacement is
+// planned (the target server_id changes or is unknown), so the destroy/create
+// cycle recomputes them for the (re)created power resource instead of copying
+// stale prior-state values into the plan.
+//
+// Thread A (P1) fix — mirrors rescueResource.ModifyPlan:
+//
+// server_id has RequiresReplace, so changing it plans a destroy+create. But
+// Terraform computes that plan while the PRIOR state is still available, and
+// stock stringplanmodifier.UseStateForUnknown() copies the prior computed `id`
+// (the OLD server's id) into the replacement plan. Create then returns the NEW
+// server's id, so Terraform rejects the apply with "Provider produced
+// inconsistent result after apply" — AFTER the disruptive power op already ran.
+// (The earlier schema comment claiming a replacement re-plans with null prior
+// state — making UseStateForUnknown a no-op — was wrong for the server_id-CHANGE
+// case: the prior state is present when the combined plan is computed.)
+//
+// This resource-level ModifyPlan fixes the server_id-CHANGE case authoritatively
+// (no heuristic — it compares the two server_ids and forces the computed values
+// unknown when they differ or the planned server_id is unknown). A FORCED replace
+// with an UNCHANGED server_id (`-replace=ADDRESS`) is already correct: Terraform
+// re-plans the create half with a NULL prior state, where stock
+// UseStateForUnknown does nothing and the framework marks the computed nils
+// unknown, so Create fills real values and the result is consistent. We
+// deliberately do NOT force-unknown on a normal in-place update (server_id
+// unchanged and known) so a wait-only change keeps a stable plan.
+func (r *serverPowerResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	// Nothing to do on create (no prior state) or destroy (null plan).
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	var stateServerID types.String
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("server_id"), &stateServerID)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	var planServerID types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("server_id"), &planServerID)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// A replacement is planned when the target server changes. An unknown planned
+	// server_id (derived from another resource's not-yet-known output) is also a
+	// potential replacement whose target cannot be proven to match — treat it as a
+	// replacement so the computed values are recomputed rather than copied. A
+	// null/unknown prior-state server_id likewise cannot be proven equal.
+	sameServer := !planServerID.IsNull() && !planServerID.IsUnknown() &&
+		!stateServerID.IsNull() && !stateServerID.IsUnknown() &&
+		stateServerID.ValueString() == planServerID.ValueString()
+	if sameServer {
+		// In-place update (server_id unchanged and known): leave the plan as-is so
+		// stock UseStateForUnknown keeps the computed values stable.
+		return
+	}
+
+	// Replacement planned: force the UseStateForUnknown computed values unknown so
+	// Create recomputes them for the (re)created power resource.
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("id"), types.StringUnknown())...)
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("pending_task_id"), types.StringUnknown())...)
 }
 
 func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -395,8 +463,28 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 		// re-issuing a destructive command.
 		if uuid == pendingTaskIDIndeterminate {
 			mapLiveState = false
-			// Clear the sentinel once the live state confirms the desired value.
-			if server.ServerLiveInfo != nil {
+			// Thread C (P1): for a SAME-STATE op (RESET/POWERCYCLE on an ON server)
+			// the sentinel must NOT self-clear on live-equality. An accepted-but-
+			// untrackable reboot transits ON → SHUTOFF → ON; the FIRST refresh can
+			// observe the pre-op RUNNING (== desired ON) before the reboot even
+			// begins. Clearing the sentinel then would let a LATER refresh during the
+			// reboot's SHUTOFF phase record OFF, and the next apply would submit a
+			// SECOND reboot. The sentinel carries no task/FinishedAt to bound a window
+			// against, so — consistent with the same-state GetTask-404 branch below,
+			// which also retains rather than trusting a live-equality signal — RETAIN
+			// the sentinel and the desired state until an operator re-applies.
+			//
+			// Residual tradeoff (deliberate, documented): a same-state indeterminate
+			// op that genuinely never took effect keeps the desired ON under the
+			// sentinel until the operator re-applies — the safe choice (never silently
+			// drop a possibly-unfinished reboot), matching the same-state 404 branch's
+			// unbounded retain. Adding a first-seen timestamp to bound this would
+			// require a new schema attribute; the existing safe-retain tradeoff is
+			// reused instead.
+			//
+			// For a NON-same-state op live-equality genuinely proves convergence (the
+			// pre-/post-op power states differ), so clear the sentinel as before.
+			if !sameState && server.ServerLiveInfo != nil {
 				mapped := liveStateToDesiredPower(server.ServerLiveInfo.State)
 				if mapped != "" && string(mapped) == state.State.ValueString() {
 					state.PendingTaskID = types.StringNull()
@@ -545,38 +633,42 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 				// externally-stopped server still surfaces), clearing the marker.
 				// Mirrors rescue's bounded post-terminal propagation handling.
 				server = fresh
-				if sameState {
-					// Thread A (P1): SAME-STATE op (RESET/POWERCYCLE on an ON server). The
-					// task terminal-SUCCESS (FINISHED) IS the convergence signal for a
-					// reboot — the reboot ran to completion and the server is back ON. We
-					// must NOT infer convergence from live==desired here: a refetch that
-					// still shows RUNNING is ambiguous (reboot not started vs finished), and
-					// applying the FINISHED-success window/live-equality logic could either
-					// falsely retain a stale marker or, worse, on a mid-reboot SHUTOFF
-					// refetch record OFF and reboot again. Since FINISHED is authoritative,
-					// CLEAR the marker unconditionally and reconcile from the (refetched)
-					// live state below — the reboot is done, so whatever the live state now
-					// is (RUNNING normally, or a genuine post-reboot drift) is real.
+				// Thread B (P1) correction to 25afe91: for BOTH same-state and
+				// non-same-state ops, a FINISHED task alone is NOT sufficient to clear
+				// the marker — SCP live-state propagation can lag, so the post-FINISHED
+				// refetch may still report the operation's intermediate state (e.g. a
+				// POWERCYCLE whose refetch is still SHUTOFF before the server comes back
+				// RUNNING). 25afe91 cleared the same-state marker UNCONDITIONALLY on
+				// FINISHED; that records OFF on a lagged SHUTOFF refetch and the next
+				// apply reboots again. So gate the clear on the SAME bounded window the
+				// non-same-state path uses:
+				//   converged (fresh live == desired) ⇒ clear + reconcile;
+				//   mismatch within powerPropagationWindow of FinishedAt ⇒ RETAIN the
+				//     marker + keep the desired state (map nothing) — propagation lag;
+				//   past the window (or no FinishedAt) ⇒ clear + reconcile (genuine drift).
+				//
+				// This reconciles with the round-1 same-state intent: FINISHED is
+				// REQUIRED to clear a same-state marker (a bare live-RUNNING without a
+				// terminal task never clears it — see the non-terminal and sentinel
+				// branches), AND after FINISHED the live state must confirm the desired
+				// value (or the window must expire) before clearing. `sameState` no
+				// longer changes THIS branch's clear/retain decision (the window logic is
+				// identical for both); it still governs the FAILURE branch below.
+				mapped := ""
+				if fresh.ServerLiveInfo != nil {
+					mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
+				}
+				converged := mapped != "" && mapped == state.State.ValueString()
+				withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
+				if converged || !withinWindow {
+					// Converged (live matches desired) or past the propagation window
+					// (treat mismatch as genuine drift): clear the marker and reconcile
+					// from the fresh live state below.
 					state.PendingTaskID = types.StringNull()
 				} else {
-					// NON-same-state op: keep the existing live-equality convergence +
-					// propagation-window behavior.
-					mapped := ""
-					if fresh.ServerLiveInfo != nil {
-						mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
-					}
-					converged := mapped != "" && mapped == state.State.ValueString()
-					withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
-					if converged || !withinWindow {
-						// Converged (live matches desired) or past the propagation window
-						// (treat mismatch as genuine drift): clear the marker and reconcile
-						// from the fresh live state below.
-						state.PendingTaskID = types.StringNull()
-					} else {
-						// Still mismatched but within the window: propagation is in flight.
-						// Retain the marker and keep the desired state (do not map).
-						mapLiveState = false
-					}
+					// Still mismatched but within the window: propagation is in flight.
+					// Retain the marker and keep the desired state (do not map).
+					mapLiveState = false
 				}
 			} else {
 				// FAILURE terminal (ERROR/CANCELED/ROLLBACK).

@@ -1722,20 +1722,21 @@ func TestServerPowerResource_Read_SameStateResetTaskFinishedClears(t *testing.T)
 	}
 }
 
-// TestServerPowerResource_Read_SameStateResetTaskFinishedMidRebootClears verifies
-// Thread A (P1) edge: even when the post-FINISHED refetch STILL shows SHUTOFF
-// (mid-reboot lag), a same-state op treats FINISHED as authoritative and clears
-// the marker + reconciles from live — because for a REBOOT, FINISHED means the
-// operation ran to completion. (Contrast the NON-same-state FINISHED path, which
-// would retain within the propagation window.)
-func TestServerPowerResource_Read_SameStateResetTaskFinishedMidRebootClears(t *testing.T) {
+// TestServerPowerResource_Read_SameStateResetTaskFinishedMidRebootRetains verifies
+// Thread B (P1): CORRECTS the 25afe91 behavior. When a same-state POWERCYCLE task
+// is FINISHED but the post-FINISHED refetch STILL shows SHUTOFF (propagation lag)
+// and FinishedAt is recent (WITHIN powerPropagationWindow), FINISHED alone is NOT
+// sufficient to clear — the marker is RETAINED and the desired ON is KEPT (map
+// nothing). 25afe91 previously cleared unconditionally and recorded OFF, which
+// made the next apply reboot again; this test asserts the corrected retain.
+func TestServerPowerResource_Read_SameStateResetTaskFinishedMidRebootRetains(t *testing.T) {
 	finished := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/562":
-			// Still SHUTOFF right after FINISHED. For a same-state op we clear the
-			// marker regardless (FINISHED is authoritative) and reconcile from live.
+			// Still SHUTOFF right after FINISHED (propagation lag). Within the window
+			// this is treated as lag: retain the marker, keep desired ON.
 			w.WriteHeader(http.StatusOK)
 			out, _ := json.Marshal(map[string]interface{}{
 				"id": 562, "name": "vps",
@@ -1773,12 +1774,70 @@ func TestServerPowerResource_Read_SameStateResetTaskFinishedMidRebootClears(t *t
 	}
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	// FINISHED authoritative ⇒ marker cleared; live SHUTOFF reconciled ⇒ OFF drift.
+	// Within window + still SHUTOFF ⇒ propagation lag: retain marker, keep ON.
+	if result.PendingTaskID.ValueString() != "task-reset-fin2" {
+		t.Errorf("PendingTaskID = %q, want task-reset-fin2 (retained within propagation window on lagged refetch)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired kept; SHUTOFF refetch is propagation lag, not converged)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SameStateResetTaskFinishedPastWindowReconciles
+// verifies Thread B (P1): once powerPropagationWindow has elapsed since FinishedAt
+// and the refetch STILL shows SHUTOFF, the mismatch is treated as GENUINE drift —
+// the marker is cleared and the live state reconciled to OFF so a real
+// externally-stopped server surfaces for a corrective apply.
+func TestServerPowerResource_Read_SameStateResetTaskFinishedPastWindowReconciles(t *testing.T) {
+	// FinishedAt well past the 2m window.
+	finished := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/563":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 563, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-reset-fin3":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-reset-fin3","state":"FINISHED","finishedAt":"` + finished + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "563"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "POWERCYCLE"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "563"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-reset-fin3"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Past window + still SHUTOFF ⇒ genuine drift: clear + reconcile to OFF.
 	if !result.PendingTaskID.IsNull() {
-		t.Errorf("PendingTaskID = %q, want null (FINISHED authoritative for same-state op)", result.PendingTaskID.ValueString())
+		t.Errorf("PendingTaskID = %q, want null (past window ⇒ genuine drift, cleared)", result.PendingTaskID.ValueString())
 	}
 	if result.State.ValueString() != "OFF" {
-		t.Errorf("State = %q, want OFF (reconciled from live SHUTOFF after a FINISHED reboot)", result.State.ValueString())
+		t.Errorf("State = %q, want OFF (past window reconciled from live SHUTOFF)", result.State.ValueString())
 	}
 }
 
@@ -2047,6 +2106,309 @@ func TestServerPowerResource_Read_SentinelClearedOnConverge(t *testing.T) {
 	}
 	if !result.PendingTaskID.IsNull() {
 		t.Errorf("PendingTaskID = %q, want null (cleared once live converged to desired)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SameStateSentinelRetainsOnLiveRunning verifies
+// Thread C (P1): for a SAME-STATE op (RESET/POWERCYCLE on an ON server) carrying
+// the indeterminate sentinel (accepted-but-untrackable reboot, no UUID), Read must
+// NOT clear the sentinel when the live state equals the desired value (RUNNING ==
+// ON). That first-refresh RUNNING could be the pre-op state before the reboot even
+// begins; clearing then would let a later SHUTOFF refresh record OFF and trigger a
+// second reboot. The sentinel + desired ON are RETAINED (no GetTask), consistent
+// with the same-state 404 branch's safe-retain tradeoff.
+func TestServerPowerResource_Read_SameStateSentinelRetainsOnLiveRunning(t *testing.T) {
+	getTaskCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/888":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 888, "name": "vps",
+				// Live RUNNING (== desired ON): for a same-state reboot this is
+				// ambiguous (pre-reboot vs post-reboot) and must NOT clear the sentinel.
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tasks/"):
+			getTaskCalled = true
+			t.Errorf("GetTask must NOT be called for the indeterminate sentinel")
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Same-state op: state=ON, state_option=RESET, sentinel marker, live RUNNING.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "888"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"id":              tftypes.NewValue(tftypes.String, "888"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, pendingTaskIDIndeterminate),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if getTaskCalled {
+		t.Error("GetTask was called for the sentinel; it must be skipped")
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Same-state sentinel: RETAINED even though live == desired.
+	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+		t.Errorf("PendingTaskID = %q, want sentinel retained (same-state live-equality must NOT clear)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired kept)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_NonSameStateSentinelClearsOnConverge verifies Thread
+// C (P1): the NON-same-state sentinel path is UNCHANGED — when the live state
+// converges to the desired value (pre-/post-op states differ, so equality proves
+// convergence) the sentinel is cleared as before. Complements the same-state
+// retain test above; the OFF-op sentinel tests already cover this, this one asserts
+// it explicitly alongside the same-state contrast.
+func TestServerPowerResource_Read_NonSameStateSentinelClearsOnConverge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/889":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 889, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Non-same-state op: state=OFF (no state_option), sentinel, live SHUTOFF ⇒ OFF.
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "889"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"id":              tftypes.NewValue(tftypes.String, "889"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, pendingTaskIDIndeterminate),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (non-same-state sentinel clears on live-equality)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_ModifyPlan_ServerIDChangeForcesUnknown verifies Thread A
+// (P1): when server_id changes (a replacement), ModifyPlan forces id +
+// pending_task_id to unknown so Create recomputes them for the NEW server —
+// avoiding "Provider produced inconsistent result after apply" after the disruptive
+// power op. Mirrors rescueResource.ModifyPlan.
+func TestServerPowerResource_ModifyPlan_ServerIDChangeForcesUnknown(t *testing.T) {
+	r, schemaResp := configureServerPowerResource(t, netcup.New(netcup.WithAPIEndpoint("http://example.invalid"), netcup.WithAccessToken("tok")))
+	ctx := context.Background()
+
+	req := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+		// What stock UseStateForUnknown would produce for a server_id change: the
+		// prior computed id copied into the plan (the bug ModifyPlan corrects).
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "67890"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var planned serverPowerResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Plan.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !planned.ID.IsUnknown() {
+		t.Errorf("id must be unknown on a server_id replacement, got %q", planned.ID.ValueString())
+	}
+	if !planned.PendingTaskID.IsUnknown() {
+		t.Errorf("pending_task_id must be unknown on a server_id replacement, got %q", planned.PendingTaskID.ValueString())
+	}
+	// server_id itself is the trigger and must remain the new known value.
+	if planned.ServerID.ValueString() != "67890" {
+		t.Errorf("server_id = %q, want 67890", planned.ServerID.ValueString())
+	}
+}
+
+// TestServerPowerResource_ModifyPlan_InPlaceUpdatePreserves verifies Thread A
+// (P1): on an in-place update (server_id unchanged and known — e.g. a wait-only
+// change) ModifyPlan must NOT force the computed values unknown, so stock
+// UseStateForUnknown keeps them stable (no spurious "(known after apply)").
+func TestServerPowerResource_ModifyPlan_InPlaceUpdatePreserves(t *testing.T) {
+	r, schemaResp := configureServerPowerResource(t, netcup.New(netcup.WithAPIEndpoint("http://example.invalid"), netcup.WithAccessToken("tok")))
+	ctx := context.Background()
+
+	req := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, "task-abc"),
+		}),
+		// Wait-only change: server_id unchanged; computed values still known (stock
+		// UseStateForUnknown already reused prior state).
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, false),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, "task-abc"),
+		}),
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var planned serverPowerResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Plan.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if planned.ID.IsUnknown() || planned.PendingTaskID.IsUnknown() {
+		t.Error("in-place update must keep computed values known (no forced unknown / no plan churn)")
+	}
+	if planned.ID.ValueString() != "12345" || planned.PendingTaskID.ValueString() != "task-abc" {
+		t.Errorf("in-place update must preserve prior computed values, got id=%q pending=%q", planned.ID.ValueString(), planned.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_ModifyPlan_UnknownServerIDForcesUnknown verifies Thread A
+// (P1): an UNKNOWN planned server_id (derived from another resource's not-yet-known
+// output) cannot be proven equal, so ModifyPlan treats it as a potential
+// replacement and forces the computed values unknown.
+func TestServerPowerResource_ModifyPlan_UnknownServerIDForcesUnknown(t *testing.T) {
+	r, schemaResp := configureServerPowerResource(t, netcup.New(netcup.WithAPIEndpoint("http://example.invalid"), netcup.WithAccessToken("tok")))
+	ctx := context.Background()
+
+	req := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var planned serverPowerResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Plan.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !planned.ID.IsUnknown() || !planned.PendingTaskID.IsUnknown() {
+		t.Error("an unknown planned server_id must force id + pending_task_id unknown (potential replacement)")
+	}
+}
+
+// TestServerPowerResource_ModifyPlan_CreateAndDestroyNoop verifies Thread A (P1):
+// ModifyPlan does nothing on create (null prior state) or destroy (null plan).
+func TestServerPowerResource_ModifyPlan_CreateAndDestroyNoop(t *testing.T) {
+	r, schemaResp := configureServerPowerResource(t, netcup.New(netcup.WithAPIEndpoint("http://example.invalid"), netcup.WithAccessToken("tok")))
+	ctx := context.Background()
+	objType := schemaResp.Schema.Type().TerraformType(ctx)
+
+	createReq := resource.ModifyPlanRequest{
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, nil), Schema: schemaResp.Schema},
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+			"pending_task_id": tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		}),
+	}
+	createResp := resource.ModifyPlanResponse{Plan: createReq.Plan}
+	r.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, createReq, &createResp)
+	if createResp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan(create) unexpected diagnostics: %v", createResp.Diagnostics.Errors())
+	}
+
+	destroyReq := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, nil),
+		}),
+		Plan: tfsdk.Plan{Raw: tftypes.NewValue(objType, nil), Schema: schemaResp.Schema},
+	}
+	destroyResp := resource.ModifyPlanResponse{Plan: destroyReq.Plan}
+	r.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, destroyReq, &destroyResp)
+	if destroyResp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan(destroy) unexpected diagnostics: %v", destroyResp.Diagnostics.Errors())
 	}
 }
 
