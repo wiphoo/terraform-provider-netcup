@@ -70,6 +70,41 @@ func pendingMarkerFor(task *netcup.TaskInfo) string {
 	return task.UUID
 }
 
+// isSameStatePowerOp reports whether the (state, state_option) pair describes a
+// SAME-STATE power operation: one whose desired power state is identical BEFORE
+// and AFTER the op, so the server is expected to be in the same power state at
+// rest on both sides while transiting through an intermediate state mid-flight.
+//
+// Per pkg/netcup/power.go (SetPowerState) the SCP API documents state_option per
+// target state: ON accepts POWERCYCLE and RESET, OFF accepts POWEROFF, and
+// SUSPENDED accepts none. RESET and POWERCYCLE are REBOOTS applied to an already-
+// ON server: the desired `state` is ON, and the server is ON both before and
+// after, transiting ON → SHUTOFF → ON during the reboot. POWEROFF (state=OFF) is
+// NOT same-state — it moves the server from ON to OFF, so its post-op power state
+// differs from its pre-op one and live==desired equality genuinely proves it.
+//
+// Threads A & B (P1/P2) hinge on this: for a same-state op,
+// liveStateToDesiredPower(server) == desired (RUNNING == ON) does NOT prove the
+// op converged — the server may be ON merely because the reboot has not started
+// yet, or has already completed. Only the TASK reaching a terminal state is
+// authoritative. Callers use this to gate the convergence/clear/force-drift
+// decisions so a same-state reboot is never treated as converged on live equality
+// alone.
+//
+// Matching is case-insensitive on both fields to mirror the validator/mapping
+// helpers (which upper-case before comparing), so `reset`/`Reset` are recognized.
+func isSameStatePowerOp(state, stateOption string) bool {
+	if !strings.EqualFold(strings.TrimSpace(state), string(netcup.PowerOn)) {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(stateOption)) {
+	case "RESET", "POWERCYCLE":
+		return true
+	default:
+		return false
+	}
+}
+
 var _ resource.Resource = &serverPowerResource{}
 
 var _ resource.ResourceWithConfigure = &serverPowerResource{}
@@ -335,6 +370,14 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 	// desired `state` while it is still running; only reconcile from the live
 	// state once the task is terminal / gone.
 	mapLiveState := true
+	// Threads A & B (P1/P2): a RESET/POWERCYCLE on an ON server is a SAME-STATE op
+	// — the server is ON at rest both before and after, transiting through SHUTOFF
+	// mid-reboot. For such ops liveStateToDesiredPower(server) == desired can NOT
+	// prove convergence (the server may be ON only because the reboot has not begun,
+	// or has already finished), so the TASK reaching a terminal state is the ONLY
+	// authoritative completion signal. The branches below use this to gate their
+	// convergence/clear decisions.
+	sameState := isSameStatePowerOp(state.State.ValueString(), state.StateOption.ValueString())
 	if pending := state.PendingTaskID; !pending.IsNull() && !pending.IsUnknown() && pending.ValueString() != "" {
 		uuid := pending.ValueString()
 
@@ -409,7 +452,38 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 					if fresh.ServerLiveInfo != nil {
 						mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
 					}
-					if mapped != "" && mapped == state.State.ValueString() {
+					if sameState {
+						// Thread A (P1): SAME-STATE op (RESET/POWERCYCLE on an ON server).
+						// The refetched live state being RUNNING (== desired ON) does NOT
+						// prove the reboot converged — the server may be ON only because the
+						// reboot has not begun (or has already finished). Clearing the marker
+						// on that live-equality would let a later refresh during the reboot's
+						// SHUTOFF phase record OFF, and the next apply would submit a SECOND
+						// reboot. So do NOT clear on live-equality here: only a TERMINAL task
+						// is authoritative for a same-state op.
+						//
+						// A GetTask 404 gives no FinishedAt to bound a time window, so bound
+						// retention by RE-QUERYING the task: keep the REAL UUID marker (not the
+						// sentinel) so the NEXT refresh calls GetTask again. A 404 right after
+						// acceptance is typically transient — the task record reappears and,
+						// once it reaches FINISHED, the terminal-FINISHED branch clears the
+						// marker (treating FINISHED itself as convergence for same-state ops).
+						// Retaining the queryable UUID (rather than degrading to the sentinel,
+						// whose live-equality self-clear would fire on the false RUNNING signal)
+						// is the bound: retention lasts only until the task is terminal-
+						// confirmed on a later refresh.
+						//
+						// Tradeoff: if the task record NEVER reappears (permanently purged
+						// while the server sits RUNNING), the marker is retained indefinitely
+						// and Terraform keeps the desired ON without re-issuing the reboot —
+						// the deliberately safe choice (never silently drop a possibly-
+						// unfinished reboot), matching the sentinel path's documented residual
+						// limitation. An operator can force reconciliation with a re-apply.
+						mapLiveState = false
+						// state.PendingTaskID left unchanged (retain the real UUID).
+					} else if mapped != "" && mapped == state.State.ValueString() {
+						// NON-same-state op: live-equality genuinely proves convergence
+						// (the pre-/post-op power states differ), so clear + reconcile.
 						state.PendingTaskID = types.StringNull()
 					} else {
 						state.PendingTaskID = types.StringValue(pendingTaskIDIndeterminate)
@@ -471,21 +545,38 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 				// externally-stopped server still surfaces), clearing the marker.
 				// Mirrors rescue's bounded post-terminal propagation handling.
 				server = fresh
-				mapped := ""
-				if fresh.ServerLiveInfo != nil {
-					mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
-				}
-				converged := mapped != "" && mapped == state.State.ValueString()
-				withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
-				if converged || !withinWindow {
-					// Converged (live matches desired) or past the propagation window
-					// (treat mismatch as genuine drift): clear the marker and reconcile
-					// from the fresh live state below.
+				if sameState {
+					// Thread A (P1): SAME-STATE op (RESET/POWERCYCLE on an ON server). The
+					// task terminal-SUCCESS (FINISHED) IS the convergence signal for a
+					// reboot — the reboot ran to completion and the server is back ON. We
+					// must NOT infer convergence from live==desired here: a refetch that
+					// still shows RUNNING is ambiguous (reboot not started vs finished), and
+					// applying the FINISHED-success window/live-equality logic could either
+					// falsely retain a stale marker or, worse, on a mid-reboot SHUTOFF
+					// refetch record OFF and reboot again. Since FINISHED is authoritative,
+					// CLEAR the marker unconditionally and reconcile from the (refetched)
+					// live state below — the reboot is done, so whatever the live state now
+					// is (RUNNING normally, or a genuine post-reboot drift) is real.
 					state.PendingTaskID = types.StringNull()
 				} else {
-					// Still mismatched but within the window: propagation is in flight.
-					// Retain the marker and keep the desired state (do not map).
-					mapLiveState = false
+					// NON-same-state op: keep the existing live-equality convergence +
+					// propagation-window behavior.
+					mapped := ""
+					if fresh.ServerLiveInfo != nil {
+						mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
+					}
+					converged := mapped != "" && mapped == state.State.ValueString()
+					withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
+					if converged || !withinWindow {
+						// Converged (live matches desired) or past the propagation window
+						// (treat mismatch as genuine drift): clear the marker and reconcile
+						// from the fresh live state below.
+						state.PendingTaskID = types.StringNull()
+					} else {
+						// Still mismatched but within the window: propagation is in flight.
+						// Retain the marker and keep the desired state (do not map).
+						mapLiveState = false
+					}
 				}
 			} else {
 				// FAILURE terminal (ERROR/CANCELED/ROLLBACK).
@@ -503,6 +594,30 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 				// away for a corrective apply.
 				server = fresh
 				state.PendingTaskID = types.StringNull()
+
+				// Thread B (P2) fix: a FAILED SAME-STATE op (RESET/POWERCYCLE on an ON
+				// server) leaves the server RUNNING (== desired ON) even though the reboot
+				// never happened. Reconciling from live would keep state = ON and
+				// state_option = RESET (both == config), and Terraform would report NO
+				// changes — the failed reboot would NEVER be retried. For a NON-same-state
+				// failure the live state already diverges from desired (e.g. failed
+				// power-on ⇒ SHUTOFF ⇒ OFF ≠ ON), so clear+reconcile-from-live above
+				// already surfaces drift and we leave those unchanged.
+				//
+				// To surface drift for the same-state failure, FORCE a corrective plan by
+				// BLANKING the stored operation-specific field: clear state_option to null.
+				// state_option is Optional (no Default/Computed), so config `state_option =
+				// "RESET"` vs stored null yields a real plan diff (null → RESET), which
+				// re-runs Update (stateChanged||optionChanged ⇒ optionChanged true) and
+				// re-issues the reboot. We deliberately blank state_option rather than
+				// `state`: `state` must keep meaning the live power state (ON), and its
+				// validator only accepts ON/OFF/SUSPENDED — corrupting it would misreport
+				// the server's power state. On a SUCCESSFUL same-state op the FINISHED
+				// branch above keeps state_option intact (it is never blanked there), so a
+				// succeeded reboot leaves no perpetual diff.
+				if sameState {
+					state.StateOption = types.StringNull()
+				}
 			}
 		}
 	}

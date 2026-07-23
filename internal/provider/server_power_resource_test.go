@@ -1597,6 +1597,347 @@ func TestServerPowerResource_Read_PendingTaskGoneRefetchesLiveState(t *testing.T
 	}
 }
 
+// TestServerPowerResource_Read_SameStateResetTaskGoneRetains verifies Thread A
+// (P1): a SAME-STATE op (state=ON, state_option=RESET) whose GetTask briefly 404s
+// while the refetched live state is STILL RUNNING (== desired ON) must NOT clear
+// the marker on that live-equality. For a same-state reboot, live==desired is not
+// proof of convergence (the server may be ON only because the reboot has not begun
+// or has already finished). Clearing here would let a later refresh during the
+// reboot's SHUTOFF phase record OFF and submit a SECOND reboot. Instead Read
+// RETAINS the desired ON and the REAL UUID marker (so the next refresh re-queries
+// the transiently-404 task), and does NOT map the live state.
+func TestServerPowerResource_Read_SameStateResetTaskGoneRetains(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/560":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 560, "name": "vps",
+				// Live RUNNING (== desired ON) — but the RESET reboot may not have
+				// started yet, so this equality does NOT prove convergence.
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-reset-gone":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"task not found"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "560"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "560"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-reset-gone"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (same-state RESET: live equality is not convergence)", result.State.ValueString())
+	}
+	// The REAL UUID marker is retained (NOT the sentinel, NOT null) so the next
+	// refresh re-queries the transiently-404 task.
+	if result.PendingTaskID.ValueString() != "task-reset-gone" {
+		t.Errorf("PendingTaskID = %q, want task-reset-gone (real UUID retained to re-query, bounding retention)", result.PendingTaskID.ValueString())
+	}
+	if result.StateOption.ValueString() != "RESET" {
+		t.Errorf("StateOption = %q, want RESET (unchanged on a still-pending same-state op)", result.StateOption.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SameStateResetTaskFinishedClears verifies Thread A
+// (P1): the retention in the 404 case is bounded — on a LATER refresh the
+// re-queried task is FINISHED, and for a same-state op the task terminal-SUCCESS
+// IS the convergence signal. Read then CLEARS the marker (not inferring
+// convergence from live-equality) and reconciles from the fresh live state.
+func TestServerPowerResource_Read_SameStateResetTaskFinishedClears(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/561":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 561, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-reset-fin":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-reset-fin","state":"FINISHED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "561"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "561"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-reset-fin"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (FINISHED same-state reboot; live RUNNING confirms)", result.State.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (FINISHED is the convergence signal for a same-state op)", result.PendingTaskID.ValueString())
+	}
+	// SUCCESS same-state op: state_option is NOT blanked — no perpetual diff.
+	if result.StateOption.ValueString() != "RESET" {
+		t.Errorf("StateOption = %q, want RESET (restored/kept on a successful same-state op)", result.StateOption.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SameStateResetTaskFinishedMidRebootClears verifies
+// Thread A (P1) edge: even when the post-FINISHED refetch STILL shows SHUTOFF
+// (mid-reboot lag), a same-state op treats FINISHED as authoritative and clears
+// the marker + reconciles from live — because for a REBOOT, FINISHED means the
+// operation ran to completion. (Contrast the NON-same-state FINISHED path, which
+// would retain within the propagation window.)
+func TestServerPowerResource_Read_SameStateResetTaskFinishedMidRebootClears(t *testing.T) {
+	finished := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/562":
+			// Still SHUTOFF right after FINISHED. For a same-state op we clear the
+			// marker regardless (FINISHED is authoritative) and reconcile from live.
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 562, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-reset-fin2":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-reset-fin2","state":"FINISHED","finishedAt":"` + finished + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "562"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "POWERCYCLE"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "562"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-reset-fin2"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// FINISHED authoritative ⇒ marker cleared; live SHUTOFF reconciled ⇒ OFF drift.
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (FINISHED authoritative for same-state op)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (reconciled from live SHUTOFF after a FINISHED reboot)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SameStateResetTaskFailedForcesDrift verifies Thread
+// B (P2): a retained wait=false RESET task that reaches a FAILURE terminal (ERROR)
+// while the server is still RUNNING (== desired ON) must FORCE DRIFT. The stored
+// state stays state=ON (live) but state_option is BLANKED to null so the next plan
+// shows `state_option: null → RESET` (a diff that re-runs Update and re-issues the
+// reboot). Without this, state=ON + state_option=RESET both equal config and
+// Terraform would report NO changes, never retrying the failed reboot.
+func TestServerPowerResource_Read_SameStateResetTaskFailedForcesDrift(t *testing.T) {
+	finished := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/563":
+			// Reboot never happened: server is still RUNNING (== desired ON).
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 563, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-reset-fail":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-reset-fail","state":"ERROR","finishedAt":"` + finished + `","message":"reset failed"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "563"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "563"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-reset-fail"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// state stays ON (the live power state); state_option is blanked to force drift.
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (state keeps meaning live power state)", result.State.ValueString())
+	}
+	if !result.StateOption.IsNull() {
+		t.Errorf("StateOption = %q, want null (blanked to force `null → RESET` drift so the failed reboot is retried)", result.StateOption.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared immediately on failure terminal)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_NonSameStateTaskFailedKeepsOption verifies Thread B
+// (P2): a NON-same-state failed op (state=OFF, state_option=POWEROFF) must be left
+// UNCHANGED — its live state already diverges from desired (failed power-off ⇒ the
+// server is still RUNNING ⇒ ON ≠ OFF), so clear+reconcile-from-live already
+// surfaces drift. state_option must NOT be blanked here.
+func TestServerPowerResource_Read_NonSameStateTaskFailedKeepsOption(t *testing.T) {
+	finished := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/564":
+			// Failed power-off: server is still RUNNING (≠ desired OFF) ⇒ drift already
+			// surfaces via live→ON.
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 564, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-off-fail":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-off-fail","state":"ERROR","finishedAt":"` + finished + `","message":"poweroff failed"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "564"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, "POWEROFF"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "564"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-off-fail"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	// Live RUNNING → ON ≠ desired OFF: drift already surfaces; state_option untouched.
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (drift surfaces from live for a non-same-state failure)", result.State.ValueString())
+	}
+	if result.StateOption.ValueString() != "POWEROFF" {
+		t.Errorf("StateOption = %q, want POWEROFF (NOT blanked for a non-same-state failed op)", result.StateOption.ValueString())
+	}
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (cleared on failure terminal)", result.PendingTaskID.ValueString())
+	}
+}
+
+// TestIsSameStatePowerOp unit-tests the same-state detection helper: RESET and
+// POWERCYCLE on an ON server are same-state (reboot-through-SHUTOFF, identical
+// pre-/post power state); everything else is not.
+func TestIsSameStatePowerOp(t *testing.T) {
+	tests := []struct {
+		state       string
+		stateOption string
+		want        bool
+	}{
+		{"ON", "RESET", true},
+		{"ON", "POWERCYCLE", true},
+		{"ON", "reset", true},      // case-insensitive
+		{"ON", "PowerCycle", true}, // case-insensitive
+		{"ON", " RESET ", true},    // trimmed
+		{"ON", "", false},          // plain power-on, not same-state
+		{"ON", "POWEROFF", false},  // not a documented ON option
+		{"OFF", "POWEROFF", false}, // power-off changes the power state
+		{"OFF", "RESET", false},    // RESET only meaningful on ON
+		{"SUSPENDED", "", false},   // suspend changes the power state
+		{"on", "RESET", true},      // case-insensitive state
+		{"", "RESET", false},       // no state
+	}
+	for _, tt := range tests {
+		t.Run(tt.state+"/"+tt.stateOption, func(t *testing.T) {
+			if got := isSameStatePowerOp(tt.state, tt.stateOption); got != tt.want {
+				t.Errorf("isSameStatePowerOp(%q, %q) = %v, want %v", tt.state, tt.stateOption, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestServerPowerResource_Read_SentinelKeepsDesiredNoGetTask verifies that the
 // pendingTaskIDIndeterminate sentinel makes Read KEEP the desired state WITHOUT
 // calling GetTask (there is no real task to query), while the live state has not
