@@ -655,10 +655,43 @@ func (r *serverPowerResource) reconcilePendingTask(
 			mapLiveState = false
 		}
 	} else if !task.State.IsTerminal() {
-		// The task is still running (PENDING/RUNNING/WAITING_FOR_CANCEL): the
-		// power op is in flight and the live state is transient. KEEP the desired
-		// state and retain the marker so the next refresh re-checks.
-		mapLiveState = false
+		// The task is still running (PENDING/RUNNING/WAITING_FOR_CANCEL): the power op
+		// is in flight and the live state is transient, so normally KEEP the desired
+		// state and retain the marker for the next refresh to re-check.
+		//
+		// Thread r3638659469 (P2): but if SCP leaves the accepted task non-terminal
+		// INDEFINITELY, an unbounded retain suppresses live-state mapping forever and
+		// hides later drift — this is the wait=false counterpart of the sync wait
+		// path's defaultTaskTimeout (which does NOT cover this branch). Bound it by the
+		// task's own StartedAt: once a STARTED task has been running longer than
+		// defaultTaskTimeout (the same finite bound WaitForTask uses), treat it as
+		// stuck — refetch the live server and reconcile from it so drift surfaces for a
+		// corrective apply. A not-yet-started task (StartedAt nil) is still queued, not
+		// stuck, so it keeps retaining until it starts or reaches a terminal state.
+		if task.StartedAt != nil && time.Since(*task.StartedAt) > defaultTaskTimeout {
+			// Refetch a fresh snapshot before reconciling (the `server` snapshot was
+			// taken BEFORE GetTask), mirroring the terminal branch.
+			fresh, ferr := r.client.GetServer(ctx, id)
+			if ferr != nil {
+				d, gone := apiErrorToDiag(ferr, false)
+				if gone {
+					resp.State.RemoveResource(ctx)
+					return server, false, true
+				}
+				resp.Diagnostics.Append(d)
+				mapLiveState = false
+			} else {
+				// Stuck past the bound: clear the marker and reconcile from the fresh
+				// live state (mapLiveState stays true) so a never-completing op or
+				// external drift surfaces. Past defaultTaskTimeout (15m) even a same-state
+				// reboot is long over, so — as in the sentinel past-window path — we no
+				// longer withhold live mapping.
+				server = fresh
+				state.PendingTaskID = types.StringNull()
+			}
+		} else {
+			mapLiveState = false
+		}
 	} else {
 		// Terminal task: the op finished (FINISHED) or failed
 		// (ERROR/CANCELED/ROLLBACK).

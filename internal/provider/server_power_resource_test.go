@@ -1073,6 +1073,119 @@ func TestServerPowerResource_Read_PendingNonTerminalKeepsDesired(t *testing.T) {
 	}
 }
 
+// TestServerPowerResource_Read_PendingNonTerminalStuckPastTimeoutReconciles
+// verifies thread r3638659469 (P2): a wait=false task left non-terminal (RUNNING)
+// far longer than defaultTaskTimeout is treated as STUCK — Read stops retaining the
+// marker, refetches live, and reconciles from it so drift surfaces. Here the task
+// started 16m ago (> 15m bound) and the live server is now SHUTOFF (never powered on,
+// or externally stopped), so desired ON is reconciled to OFF and the marker cleared.
+func TestServerPowerResource_Read_PendingNonTerminalStuckPastTimeoutReconciles(t *testing.T) {
+	startedAt := time.Now().Add(-defaultTaskTimeout - time.Minute).UTC().Format(time.RFC3339Nano)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/334":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 334, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-stuck":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-stuck","state":"RUNNING","startedAt":"` + startedAt + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "334"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "334"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-stuck"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (stuck non-terminal task cleared past defaultTaskTimeout)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (drift surfaced from live SHUTOFF once the task timed out)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingNonTerminalWithinTimeoutRetains verifies the
+// other side of thread r3638659469: a task still running WITHIN defaultTaskTimeout of
+// its StartedAt is in flight, not stuck, so Read retains the marker and keeps the
+// desired state (does not map the transient live state). Also covers the not-yet-
+// started (StartedAt nil) case implicitly — those keep retaining too.
+func TestServerPowerResource_Read_PendingNonTerminalWithinTimeoutRetains(t *testing.T) {
+	startedAt := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/335":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 335, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-fresh":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-fresh","state":"RUNNING","startedAt":"` + startedAt + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "335"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "335"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-fresh"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if result.PendingTaskID.ValueString() != "task-fresh" {
+		t.Errorf("PendingTaskID = %q, want task-fresh (retained while running within the timeout)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (desired kept; live RUNNING must NOT overwrite a still-in-flight op)", result.State.ValueString())
+	}
+}
+
 // TestServerPowerResource_Read_PendingTerminalReconciles verifies that when
 // pending_task_id references a TERMINAL task, Read clears the marker and
 // reconciles `state` from the live ServerState via liveStateToDesiredPower.
