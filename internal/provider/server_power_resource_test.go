@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -607,7 +608,7 @@ func TestServerPowerResource_Create_IndeterminateSetPowerState(t *testing.T) {
 	if state.StateOption.ValueString() != "RESET" {
 		t.Errorf("StateOption = %q, want RESET (full desired state persisted)", state.StateOption.ValueString())
 	}
-	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(state.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want %q (sentinel — no UUID available)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 }
@@ -649,7 +650,7 @@ func TestServerPowerResource_Create_Indeterminate5xxSetPowerState(t *testing.T) 
 	}
 	var state serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
-	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(state.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want %q", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 }
@@ -791,7 +792,7 @@ func TestServerPowerResource_Create_AfterDispatchTransportIndeterminate(t *testi
 	}
 	var state serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
-	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(state.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want %q (indeterminate sentinel)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 	if resp.Diagnostics.WarningsCount() == 0 {
@@ -887,7 +888,7 @@ func TestServerPowerResource_Create_NoWaitEmptyUUIDStoresSentinel(t *testing.T) 
 	var state serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
 	// The empty-UUID accepted task must be recorded as the sentinel, NOT "".
-	if state.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(state.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want %q (sentinel — empty UUID is untrackable, not an empty marker)", state.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 	if state.PendingTaskID.ValueString() == "" {
@@ -948,7 +949,7 @@ func TestServerPowerResource_Create_NoWaitEmptyUUIDStoresSentinel(t *testing.T) 
 	if readResult.State.ValueString() != "OFF" {
 		t.Errorf("State = %q, want OFF (sentinel keeps desired; live RUNNING must not overwrite)", readResult.State.ValueString())
 	}
-	if readResult.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(readResult.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want sentinel retained until live converges", readResult.PendingTaskID.ValueString())
 	}
 }
@@ -1409,7 +1410,7 @@ func TestServerPowerResource_Read_PendingTaskGoneUnconvergedRetains(t *testing.T
 		t.Errorf("State = %q, want OFF (retained; live RUNNING not yet converged after task 404)", result.State.ValueString())
 	}
 	// Marker degrades to the indeterminate sentinel (real UUID is gone/untrackable).
-	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want %q (retained sentinel until convergence)", result.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 }
@@ -1521,7 +1522,7 @@ func TestServerPowerResource_Read_PendingTaskGonePowercycleLagRetains(t *testing
 	if result.State.ValueString() != "ON" {
 		t.Errorf("State = %q, want ON (retained; refetch SHUTOFF is unconverged POWERCYCLE lag)", result.State.ValueString())
 	}
-	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want %q (retained sentinel until convergence)", result.PendingTaskID.ValueString(), pendingTaskIDIndeterminate)
 	}
 }
@@ -2053,7 +2054,7 @@ func TestServerPowerResource_Read_SentinelKeepsDesiredNoGetTask(t *testing.T) {
 	if result.State.ValueString() != "OFF" {
 		t.Errorf("State = %q, want OFF (sentinel keeps desired; live RUNNING must not overwrite)", result.State.ValueString())
 	}
-	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want sentinel retained until live converges", result.PendingTaskID.ValueString())
 	}
 }
@@ -2167,11 +2168,132 @@ func TestServerPowerResource_Read_SameStateSentinelRetainsOnLiveRunning(t *testi
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
 	// Same-state sentinel: RETAINED even though live == desired.
-	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want sentinel retained (same-state live-equality must NOT clear)", result.PendingTaskID.ValueString())
 	}
 	if result.State.ValueString() != "ON" {
 		t.Errorf("State = %q, want ON (desired kept)", result.State.ValueString())
+	}
+}
+
+// sameStateSentinelMarker builds a timestamped same-state indeterminate marker with
+// the given first-seen time, mirroring newIndeterminateMarker's encoding.
+func sameStateSentinelMarker(firstSeen time.Time) string {
+	return pendingTaskIDIndeterminate + indeterminateMarkerSep + strconv.FormatInt(firstSeen.UnixNano(), 10)
+}
+
+// TestServerPowerResource_Read_SameStateSentinelBoundedClearsPastWindow verifies the
+// P2 fix (thread r3635966368): a same-state (RESET) indeterminate sentinel carries an
+// embedded first-seen timestamp. Once powerPropagationWindow elapses since first-seen
+// the reboot's risky transition is over, so Read STOPS retaining — it clears the
+// sentinel and reconciles from the live state, surfacing a LATER external shutdown
+// (live SHUTOFF ⇒ OFF) that the old unbounded retain hid indefinitely.
+func TestServerPowerResource_Read_SameStateSentinelBoundedClearsPastWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/888":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 888, "name": "vps",
+				// External shutdown AFTER the reboot completed — must surface once the
+				// bounded retain window has elapsed.
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tasks/"):
+			t.Errorf("GetTask must NOT be called for the indeterminate sentinel")
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// first-seen well past powerPropagationWindow.
+	marker := sameStateSentinelMarker(time.Now().Add(-powerPropagationWindow - time.Minute))
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "888"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"id":              tftypes.NewValue(tftypes.String, "888"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, marker),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (sentinel cleared past the propagation window)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (external shutdown surfaced once the window elapsed)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_SameStateSentinelBoundedRetainsWithinWindow verifies
+// the other side of the P2 fix (thread r3635966368): WITHIN powerPropagationWindow of
+// the embedded first-seen timestamp the reboot may still be in flight, so a same-state
+// sentinel is still RETAINED (a live RUNNING == desired ON must NOT clear it) and the
+// desired ON is kept — preserving the Thread C safe-retain during the risky window.
+func TestServerPowerResource_Read_SameStateSentinelBoundedRetainsWithinWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/888":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 888, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tasks/"):
+			t.Errorf("GetTask must NOT be called for the indeterminate sentinel")
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	// Freshly first-seen (well within the window).
+	marker := sameStateSentinelMarker(time.Now())
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "888"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+		"id":              tftypes.NewValue(tftypes.String, "888"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, marker),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
+		t.Errorf("PendingTaskID = %q, want sentinel retained within the propagation window", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired kept while within window)", result.State.ValueString())
 	}
 }
 
@@ -3147,7 +3269,7 @@ func TestServerPowerResource_Update_WaitOnlyPreservesPendingTaskID(t *testing.T)
 
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	if result.PendingTaskID.ValueString() != pendingTaskIDIndeterminate {
+	if !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
 		t.Errorf("PendingTaskID = %q, want sentinel (prior marker preserved on wait-only update)", result.PendingTaskID.ValueString())
 	}
 	if result.Wait.ValueBool() != true {

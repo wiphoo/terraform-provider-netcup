@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,9 +65,51 @@ const powerPropagationWindow = 2 * time.Minute
 // nil-or-empty-UUID task to the sentinel; otherwise record the real UUID.
 func pendingMarkerFor(task *netcup.TaskInfo) string {
 	if task == nil || task.UUID == "" {
-		return pendingTaskIDIndeterminate
+		return newIndeterminateMarker()
 	}
 	return task.UUID
+}
+
+// indeterminateMarkerSep separates the pendingTaskIDIndeterminate stem from an
+// embedded first-seen timestamp (UnixNano) in the power resource's sentinel marker,
+// e.g. "indeterminate@1721731200000000000".
+const indeterminateMarkerSep = "@"
+
+// newIndeterminateMarker builds a power-resource indeterminate sentinel that embeds
+// the current time as a first-seen timestamp (thread r3635966368). A same-state
+// RESET/POWERCYCLE sentinel can never self-clear on live-equality (a false pre-op
+// RUNNING would drop a possibly-unfinished reboot), so without a bound it would be
+// retained forever — hiding a LATER external shutdown indefinitely. Embedding the
+// first-seen time lets Read bound retention to the risky-transition window
+// (powerPropagationWindow) and then reconcile from live so eventual drift surfaces.
+// It reuses the single pending_task_id string (no new schema attribute); the shared
+// bare pendingTaskIDIndeterminate stem keeps rescue's marker semantics untouched.
+func newIndeterminateMarker() string {
+	return pendingTaskIDIndeterminate + indeterminateMarkerSep + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
+
+// isIndeterminateMarker reports whether a pending_task_id value is an indeterminate
+// sentinel — either the bare pendingTaskIDIndeterminate stem (legacy state written
+// before timestamps, or a rescue-style marker) or a timestamped
+// "indeterminate@<unixnano>" produced by newIndeterminateMarker.
+func isIndeterminateMarker(s string) bool {
+	return s == pendingTaskIDIndeterminate || strings.HasPrefix(s, pendingTaskIDIndeterminate+indeterminateMarkerSep)
+}
+
+// indeterminateMarkerTime extracts the embedded first-seen timestamp from a
+// timestamped indeterminate marker. It returns ok=false for a bare (timestamp-less)
+// sentinel or an unparseable suffix, so callers fall back to the original unbounded
+// retain for such markers.
+func indeterminateMarkerTime(s string) (time.Time, bool) {
+	prefix := pendingTaskIDIndeterminate + indeterminateMarkerSep
+	if !strings.HasPrefix(s, prefix) {
+		return time.Time{}, false
+	}
+	nanos, err := strconv.ParseInt(s[len(prefix):], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(0, nanos), true
 }
 
 // isSameStatePowerOp reports whether the (state, state_option) pair describes a
@@ -489,43 +532,42 @@ func (r *serverPowerResource) reconcilePendingTask(
 	}
 	uuid := pending.ValueString()
 
-	// The pendingTaskIDIndeterminate sentinel is NOT a real UUID (Create stored
-	// it because the accepted response could not be decoded — no UUID was
-	// available). There is nothing to GetTask. RETAIN the desired state and the
-	// sentinel until a later refresh observes the live state actually matching
-	// the desired value, at which point the mapping below is a no-op and the
-	// sentinel is cleared by the "live matches desired" check.
-	//
-	// Residual limitation (deliberate, mirrors rescue): with no UUID we cannot
-	// query the task, so an indeterminate power op that genuinely never took
-	// effect keeps the desired state until the live state converges or an
-	// operator intervenes — safer than overwriting the desired state and
-	// re-issuing a destructive command.
-	if uuid == pendingTaskIDIndeterminate {
-		mapLiveState = false
-		// Thread C (P1): for a SAME-STATE op (RESET/POWERCYCLE on an ON server)
-		// the sentinel must NOT self-clear on live-equality. An accepted-but-
-		// untrackable reboot transits ON → SHUTOFF → ON; the FIRST refresh can
-		// observe the pre-op RUNNING (== desired ON) before the reboot even
-		// begins. Clearing the sentinel then would let a LATER refresh during the
-		// reboot's SHUTOFF phase record OFF, and the next apply would submit a
-		// SECOND reboot. The sentinel carries no task/FinishedAt to bound a window
-		// against, so — consistent with the same-state GetTask-404 branch below,
-		// which also retains rather than trusting a live-equality signal — RETAIN
-		// the sentinel and the desired state until an operator re-applies.
-		//
-		// Residual tradeoff (deliberate, documented): a same-state indeterminate
-		// op that genuinely never took effect keeps the desired ON under the
-		// sentinel until the operator re-applies — the safe choice (never silently
-		// drop a possibly-unfinished reboot), matching the same-state 404 branch's
-		// unbounded retain. Adding a first-seen timestamp to bound this would
-		// require a new schema attribute; the existing safe-retain tradeoff is
-		// reused instead.
-		//
-		// For a NON-same-state op live-equality genuinely proves convergence (the
-		// pre-/post-op power states differ), so clear the sentinel as before.
-		if !sameState && liveConfirmsDesired(server, state.State.ValueString()) {
-			state.PendingTaskID = types.StringNull()
+	// The indeterminate sentinel is NOT a real UUID (Create/Update stored it because
+	// the accepted response could not be decoded — no UUID was available). There is
+	// nothing to GetTask, so retain the desired state until either the live state
+	// confirms the desired value (non-same-state) or the risky-transition window
+	// elapses (same-state).
+	if isIndeterminateMarker(uuid) {
+		if sameState {
+			// SAME-STATE op (RESET/POWERCYCLE on an ON server): the sentinel must NOT
+			// self-clear on live-equality — an accepted-but-untrackable reboot transits
+			// ON → SHUTOFF → ON, and the FIRST refresh can observe the pre-op RUNNING
+			// (== desired ON) before the reboot even begins; clearing then would let a
+			// later refresh during the reboot's SHUTOFF phase record OFF and the next
+			// apply submit a SECOND reboot.
+			//
+			// Thread r3635966368 (P2): retaining FOREVER (the old behavior) hides a LATER
+			// external shutdown/suspension indefinitely — state stays ON, config matches,
+			// so no Update ever runs. Bound the retain by the marker's embedded first-seen
+			// timestamp: WITHIN powerPropagationWindow of first-seen the reboot's risky
+			// transition may still be in flight, so RETAIN (map nothing); ONCE the window
+			// elapses the reboot is over, so clear the sentinel and reconcile from the
+			// live state below so eventual drift surfaces. A bare/legacy marker with no
+			// embedded timestamp falls back to the original unbounded retain.
+			if firstSeen, ok := indeterminateMarkerTime(uuid); ok && time.Since(firstSeen) > powerPropagationWindow {
+				state.PendingTaskID = types.StringNull()
+				// mapLiveState stays true: reconcile from live below.
+			} else {
+				mapLiveState = false
+			}
+		} else {
+			// NON-same-state op: live-equality genuinely proves convergence (the pre-/
+			// post-op power states differ), so clear the sentinel on a live match;
+			// otherwise retain the desired state (map nothing) until it converges.
+			mapLiveState = false
+			if liveConfirmsDesired(server, state.State.ValueString()) {
+				state.PendingTaskID = types.StringNull()
+			}
 		}
 	} else if task, terr := r.client.GetTask(ctx, uuid); terr != nil {
 		// A 404/gone means the task record no longer exists (including a brief
@@ -607,7 +649,7 @@ func (r *serverPowerResource) reconcilePendingTask(
 					// (the pre-/post-op power states differ), so clear + reconcile.
 					state.PendingTaskID = types.StringNull()
 				} else {
-					state.PendingTaskID = types.StringValue(pendingTaskIDIndeterminate)
+					state.PendingTaskID = types.StringValue(newIndeterminateMarker())
 					mapLiveState = false
 				}
 			}
@@ -895,7 +937,7 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 	priorUUID := priorMarker.ValueString()
 	shouldWaitRetained := plan.Wait.ValueBool() &&
 		!priorMarker.IsNull() && !priorMarker.IsUnknown() &&
-		priorUUID != "" && priorUUID != pendingTaskIDIndeterminate
+		priorUUID != "" && !isIndeterminateMarker(priorUUID)
 
 	if shouldWaitRetained {
 		// A real retained task UUID + wait flipped to true: wait on it without
@@ -1024,7 +1066,7 @@ func handleSetPowerStateError(ctx context.Context, state *tfsdk.State, diags *di
 		return
 	}
 
-	desired.PendingTaskID = types.StringValue(pendingTaskIDIndeterminate)
+	desired.PendingTaskID = types.StringValue(newIndeterminateMarker())
 	diags.Append(state.Set(ctx, desired)...)
 	diags.AddWarning(
 		"netcup power operation acceptance could not be confirmed",
