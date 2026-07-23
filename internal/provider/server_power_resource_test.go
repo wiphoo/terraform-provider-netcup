@@ -1598,16 +1598,16 @@ func TestServerPowerResource_Read_PendingTaskGoneRefetchesLiveState(t *testing.T
 	}
 }
 
-// TestServerPowerResource_Read_SameStateResetTaskGoneRetains verifies Thread A
-// (P1): a SAME-STATE op (state=ON, state_option=RESET) whose GetTask briefly 404s
-// while the refetched live state is STILL RUNNING (== desired ON) must NOT clear
-// the marker on that live-equality. For a same-state reboot, live==desired is not
-// proof of convergence (the server may be ON only because the reboot has not begun
-// or has already finished). Clearing here would let a later refresh during the
-// reboot's SHUTOFF phase record OFF and submit a SECOND reboot. Instead Read
-// RETAINS the desired ON and the REAL UUID marker (so the next refresh re-queries
-// the transiently-404 task), and does NOT map the live state.
-func TestServerPowerResource_Read_SameStateResetTaskGoneRetains(t *testing.T) {
+// TestServerPowerResource_Read_SameStateResetTaskGoneDegradesToBoundedSentinel
+// verifies thread r3638353424 (P1): a SAME-STATE op (state=ON, state_option=RESET)
+// whose GetTask 404s while the refetched live state is STILL RUNNING (== desired ON)
+// must NOT clear the marker on that live-equality (for a same-state reboot,
+// live==desired is not proof of convergence). Read RETAINS the desired ON and does
+// NOT map the live state — but instead of retaining the RAW UUID forever (which would
+// hide a later external shutdown indefinitely if the purged task never reappears), it
+// DEGRADES the marker to a timestamped indeterminate sentinel so the bounded-age
+// reconciliation eventually surfaces drift.
+func TestServerPowerResource_Read_SameStateResetTaskGoneDegradesToBoundedSentinel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -1654,10 +1654,13 @@ func TestServerPowerResource_Read_SameStateResetTaskGoneRetains(t *testing.T) {
 	if result.State.ValueString() != "ON" {
 		t.Errorf("State = %q, want ON (same-state RESET: live equality is not convergence)", result.State.ValueString())
 	}
-	// The REAL UUID marker is retained (NOT the sentinel, NOT null) so the next
-	// refresh re-queries the transiently-404 task.
-	if result.PendingTaskID.ValueString() != "task-reset-gone" {
-		t.Errorf("PendingTaskID = %q, want task-reset-gone (real UUID retained to re-query, bounding retention)", result.PendingTaskID.ValueString())
+	// The raw UUID is DEGRADED to a timestamped indeterminate sentinel (bounded), not
+	// retained forever and not cleared on the false live-equality.
+	if !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
+		t.Errorf("PendingTaskID = %q, want a bounded indeterminate sentinel (degraded from the purged UUID)", result.PendingTaskID.ValueString())
+	}
+	if _, ok := indeterminateMarkerTime(result.PendingTaskID.ValueString()); !ok {
+		t.Errorf("PendingTaskID = %q, want an embedded first-seen timestamp to bound retention", result.PendingTaskID.ValueString())
 	}
 	if result.StateOption.ValueString() != "RESET" {
 		t.Errorf("StateOption = %q, want RESET (unchanged on a still-pending same-state op)", result.StateOption.ValueString())
@@ -2176,9 +2179,9 @@ func TestServerPowerResource_Read_SameStateSentinelRetainsOnLiveRunning(t *testi
 	}
 }
 
-// sameStateSentinelMarker builds a timestamped same-state indeterminate marker with
-// the given first-seen time, mirroring newIndeterminateMarker's encoding.
-func sameStateSentinelMarker(firstSeen time.Time) string {
+// timestampedSentinelMarker builds a timestamped indeterminate marker with the given
+// first-seen time, mirroring newIndeterminateMarker's encoding.
+func timestampedSentinelMarker(firstSeen time.Time) string {
 	return pendingTaskIDIndeterminate + indeterminateMarkerSep + strconv.FormatInt(firstSeen.UnixNano(), 10)
 }
 
@@ -2214,7 +2217,7 @@ func TestServerPowerResource_Read_SameStateSentinelBoundedClearsPastWindow(t *te
 
 	ctx := context.Background()
 	// first-seen well past powerPropagationWindow.
-	marker := sameStateSentinelMarker(time.Now().Add(-powerPropagationWindow - time.Minute))
+	marker := timestampedSentinelMarker(time.Now().Add(-powerPropagationWindow - time.Minute))
 	st := resourceState(schemaResp, map[string]tftypes.Value{
 		"server_id":       tftypes.NewValue(tftypes.String, "888"),
 		"state":           tftypes.NewValue(tftypes.String, "ON"),
@@ -2270,7 +2273,7 @@ func TestServerPowerResource_Read_SameStateSentinelBoundedRetainsWithinWindow(t 
 
 	ctx := context.Background()
 	// Freshly first-seen (well within the window).
-	marker := sameStateSentinelMarker(time.Now())
+	marker := timestampedSentinelMarker(time.Now())
 	st := resourceState(schemaResp, map[string]tftypes.Value{
 		"server_id":       tftypes.NewValue(tftypes.String, "888"),
 		"state":           tftypes.NewValue(tftypes.String, "ON"),
@@ -2297,12 +2300,71 @@ func TestServerPowerResource_Read_SameStateSentinelBoundedRetainsWithinWindow(t 
 	}
 }
 
+// TestServerPowerResource_Read_NonSameStateSentinelBoundedClearsPastWindow verifies
+// thread r3638353419 (P1): a NON-same-state indeterminate op (here state=OFF) that
+// never took effect never reaches live==desired, so the sentinel would otherwise be
+// retained forever and Terraform would never retry. The embedded first-seen timestamp
+// bounds it: once powerPropagationWindow elapses, Read clears the sentinel and
+// reconciles from the live state (still RUNNING ⇒ ON), surfacing the drift so the next
+// plan (config OFF vs state ON) re-issues the command.
+func TestServerPowerResource_Read_NonSameStateSentinelBoundedClearsPastWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/889":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 889, "name": "vps",
+				// The requested OFF never took effect — server is still RUNNING, so
+				// live never equals desired OFF. Past the window this must surface.
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tasks/"):
+			t.Errorf("GetTask must NOT be called for the indeterminate sentinel")
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	marker := timestampedSentinelMarker(time.Now().Add(-powerPropagationWindow - time.Minute))
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "889"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "889"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, marker),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (non-same-state sentinel cleared past the window)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (never-executed OFF surfaced from live once the window elapsed)", result.State.ValueString())
+	}
+}
+
 // TestServerPowerResource_Read_NonSameStateSentinelClearsOnConverge verifies Thread
-// C (P1): the NON-same-state sentinel path is UNCHANGED — when the live state
-// converges to the desired value (pre-/post-op states differ, so equality proves
-// convergence) the sentinel is cleared as before. Complements the same-state
-// retain test above; the OFF-op sentinel tests already cover this, this one asserts
-// it explicitly alongside the same-state contrast.
+// C (P1): the NON-same-state sentinel path clears EARLY (within the window) when the
+// live state converges to the desired value (pre-/post-op states differ, so equality
+// proves convergence). Complements the same-state retain test above; the OFF-op
+// sentinel tests already cover this, this one asserts it explicitly alongside the
+// same-state contrast.
 func TestServerPowerResource_Read_NonSameStateSentinelClearsOnConverge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

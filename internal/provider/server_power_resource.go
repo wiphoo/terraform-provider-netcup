@@ -538,32 +538,35 @@ func (r *serverPowerResource) reconcilePendingTask(
 	// confirms the desired value (non-same-state) or the risky-transition window
 	// elapses (same-state).
 	if isIndeterminateMarker(uuid) {
-		if sameState {
-			// SAME-STATE op (RESET/POWERCYCLE on an ON server): the sentinel must NOT
-			// self-clear on live-equality — an accepted-but-untrackable reboot transits
-			// ON → SHUTOFF → ON, and the FIRST refresh can observe the pre-op RUNNING
-			// (== desired ON) before the reboot even begins; clearing then would let a
-			// later refresh during the reboot's SHUTOFF phase record OFF and the next
-			// apply submit a SECOND reboot.
-			//
-			// Thread r3635966368 (P2): retaining FOREVER (the old behavior) hides a LATER
-			// external shutdown/suspension indefinitely — state stays ON, config matches,
-			// so no Update ever runs. Bound the retain by the marker's embedded first-seen
-			// timestamp: WITHIN powerPropagationWindow of first-seen the reboot's risky
-			// transition may still be in flight, so RETAIN (map nothing); ONCE the window
-			// elapses the reboot is over, so clear the sentinel and reconcile from the
-			// live state below so eventual drift surfaces. A bare/legacy marker with no
-			// embedded timestamp falls back to the original unbounded retain.
-			if firstSeen, ok := indeterminateMarkerTime(uuid); ok && time.Since(firstSeen) > powerPropagationWindow {
-				state.PendingTaskID = types.StringNull()
-				// mapLiveState stays true: reconcile from live below.
-			} else {
-				mapLiveState = false
-			}
-		} else {
-			// NON-same-state op: live-equality genuinely proves convergence (the pre-/
-			// post-op power states differ), so clear the sentinel on a live match;
-			// otherwise retain the desired state (map nothing) until it converges.
+		// The sentinel carries an embedded first-seen timestamp (newIndeterminateMarker).
+		// Bound the retain by it so an indeterminate op that NEVER took effect — or one
+		// whose completion later drifts — cannot hide indefinitely (threads r3635966368
+		// + r3638353419). A bare/legacy marker with no embedded timestamp falls back to
+		// the original unbounded behavior.
+		firstSeen, hasTS := indeterminateMarkerTime(uuid)
+		switch {
+		case hasTS && time.Since(firstSeen) > powerPropagationWindow:
+			// Risky-transition window elapsed for BOTH same-state and non-same-state: the
+			// op is over, or it never ran. Stop retaining — clear the sentinel and
+			// reconcile from the live state below so eventual drift / a never-executed
+			// command surfaces for a corrective apply. This is REQUIRED for non-same-state
+			// too: an OFF/plain-ON/SUSPENDED op that never took effect never reaches
+			// live==desired, so without this bound the marker (and the wrong desired
+			// state) would be retained forever and Terraform would never retry.
+			state.PendingTaskID = types.StringNull()
+			// mapLiveState stays true: reconcile from live below.
+		case sameState:
+			// Within window, SAME-STATE op (RESET/POWERCYCLE on an ON server): the sentinel
+			// must NOT self-clear on live-equality — an accepted-but-untrackable reboot
+			// transits ON → SHUTOFF → ON, and a refresh can observe the pre-op RUNNING (==
+			// desired ON) before the reboot begins; clearing then would let a later SHUTOFF
+			// refresh record OFF and submit a SECOND reboot. RETAIN (map nothing).
+			mapLiveState = false
+		default:
+			// Within window, NON-same-state op: live-equality genuinely proves convergence
+			// (the pre-/post-op power states differ), so clear the sentinel EARLY on a live
+			// match; otherwise retain the desired state (map nothing) until it converges or
+			// the window elapses.
 			mapLiveState = false
 			if liveConfirmsDesired(server, state.State.ValueString()) {
 				state.PendingTaskID = types.StringNull()
@@ -616,34 +619,25 @@ func (r *serverPowerResource) reconcilePendingTask(
 				// the same deliberate residual limitation the sentinel path documents.
 				server = fresh
 				if sameState {
-					// Thread A (P1): SAME-STATE op (RESET/POWERCYCLE on an ON server).
-					// The refetched live state being RUNNING (== desired ON) does NOT
-					// prove the reboot converged — the server may be ON only because the
-					// reboot has not begun (or has already finished). Clearing the marker
-					// on that live-equality would let a later refresh during the reboot's
-					// SHUTOFF phase record OFF, and the next apply would submit a SECOND
-					// reboot. So do NOT clear on live-equality here: only a TERMINAL task
-					// is authoritative for a same-state op.
+					// SAME-STATE op (RESET/POWERCYCLE on an ON server) whose task record is
+					// gone (404). The refetched live state being RUNNING (== desired ON) does
+					// NOT prove the reboot converged (the server may be ON only because the
+					// reboot has not begun or has already finished), so we must NOT clear on
+					// live-equality here — only a TERMINAL task is authoritative.
 					//
-					// A GetTask 404 gives no FinishedAt to bound a time window, so bound
-					// retention by RE-QUERYING the task: keep the REAL UUID marker (not the
-					// sentinel) so the NEXT refresh calls GetTask again. A 404 right after
-					// acceptance is typically transient — the task record reappears and,
-					// once it reaches FINISHED, the terminal-FINISHED branch clears the
-					// marker (treating FINISHED itself as convergence for same-state ops).
-					// Retaining the queryable UUID (rather than degrading to the sentinel,
-					// whose live-equality self-clear would fire on the false RUNNING signal)
-					// is the bound: retention lasts only until the task is terminal-
-					// confirmed on a later refresh.
-					//
-					// Tradeoff: if the task record NEVER reappears (permanently purged
-					// while the server sits RUNNING), the marker is retained indefinitely
-					// and Terraform keeps the desired ON without re-issuing the reboot —
-					// the deliberately safe choice (never silently drop a possibly-
-					// unfinished reboot), matching the sentinel path's documented residual
-					// limitation. An operator can force reconciliation with a re-apply.
+					// Thread r3638353424 (P1): the previous fix retained the RAW UUID here so
+					// the next refresh could re-query a transiently-404 task — but a task that
+					// is PERMANENTLY purged never reappears, so the raw UUID (and the wrong
+					// desired state) was retained FOREVER, hiding a later external shutdown
+					// indefinitely. Instead DEGRADE to a timestamped indeterminate sentinel so
+					// the bounded-age reconciliation applies: the next refresh takes the
+					// sentinel branch, RETAINS the desired state within powerPropagationWindow
+					// of first-seen (no false live-equality clear), then clears + reconciles
+					// from live once the window elapses. We abandon re-querying the purged task
+					// (a gone task is unlikely to reappear, and if the reboot did finish the
+					// post-window live state reconciles correctly anyway).
+					state.PendingTaskID = types.StringValue(newIndeterminateMarker())
 					mapLiveState = false
-					// state.PendingTaskID left unchanged (retain the real UUID).
 				} else if liveConfirmsDesired(fresh, state.State.ValueString()) {
 					// NON-same-state op: live-equality genuinely proves convergence
 					// (the pre-/post-op power states differ), so clear + reconcile.
