@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -297,12 +296,9 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
-	id, err := strconv.ParseInt(plan.ServerID.ValueString(), 10, 32)
+	id, err := parseServerID(plan.ServerID.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError(
-			"Invalid server_id",
-			fmt.Sprintf("Cannot parse %q as a numeric server ID.", plan.ServerID.ValueString()),
-		)
+		resp.Diagnostics.AddError("Invalid server_id", err.Error())
 		return
 	}
 
@@ -318,7 +314,7 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 		PendingTaskID: types.StringNull(),
 	}
 
-	task, err := r.client.SetPowerState(ctx, int32(id), state, stateOption)
+	task, err := r.client.SetPowerState(ctx, id, state, stateOption)
 	if err != nil {
 		handleSetPowerStateError(ctx, &resp.State, &resp.Diagnostics, err, &desired)
 		return
@@ -405,16 +401,13 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	id, err := strconv.ParseInt(state.ServerID.ValueString(), 10, 32)
+	id, err := parseServerID(state.ServerID.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError(
-			"Invalid server_id in state",
-			fmt.Sprintf("Cannot parse %q as a numeric server ID.", state.ServerID.ValueString()),
-		)
+		resp.Diagnostics.AddError("Invalid server_id in state", err.Error())
 		return
 	}
 
-	server, err := r.client.GetServer(ctx, int32(id))
+	server, err := r.client.GetServer(ctx, id)
 	if err != nil {
 		diag, gone := apiErrorToDiag(err, false)
 		if gone {
@@ -510,7 +503,7 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 				// On refetch failure: 404/gone ⇒ the server itself disappeared, remove
 				// the resource; any other error ⇒ KEEP the marker + surface a diagnostic
 				// and do NOT map stale state, so the next refresh retries.
-				fresh, ferr := r.client.GetServer(ctx, int32(id))
+				fresh, ferr := r.client.GetServer(ctx, id)
 				if ferr != nil {
 					fd, fgone := apiErrorToDiag(ferr, false)
 					if fgone {
@@ -605,7 +598,7 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 			//
 			// If the refetch fails we KEEP the marker and surface a diagnostic so the
 			// next refresh retries, rather than reconcile from a stale snapshot.
-			fresh, ferr := r.client.GetServer(ctx, int32(id))
+			fresh, ferr := r.client.GetServer(ctx, id)
 			if ferr != nil {
 				d, gone := apiErrorToDiag(ferr, false)
 				if gone {
@@ -765,12 +758,9 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	id, err := strconv.ParseInt(plan.ServerID.ValueString(), 10, 32)
+	id, err := parseServerID(plan.ServerID.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError(
-			"Invalid server_id",
-			fmt.Sprintf("Cannot parse %q as a numeric server ID.", plan.ServerID.ValueString()),
-		)
+		resp.Diagnostics.AddError("Invalid server_id", err.Error())
 		return
 	}
 
@@ -794,7 +784,7 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		powerState := netcup.PowerState(plan.State.ValueString())
 		stateOption := plan.StateOption.ValueString()
 
-		task, err := r.client.SetPowerState(ctx, int32(id), powerState, stateOption)
+		task, err := r.client.SetPowerState(ctx, id, powerState, stateOption)
 		if err != nil {
 			handleSetPowerStateError(ctx, &resp.State, &resp.Diagnostics, err, &desired)
 			return
@@ -934,8 +924,9 @@ func (r *serverPowerResource) Delete(_ context.Context, _ resource.DeleteRequest
 }
 
 func (r *serverPowerResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	// Validate that the import ID is a numeric server ID.
-	if _, err := strconv.ParseInt(req.ID, 10, 32); err != nil {
+	// Validate that the import ID is a numeric server ID. Reuse parseServerID so the
+	// import path stays in sync with the parse/validation rule used everywhere else.
+	if _, err := parseServerID(req.ID); err != nil {
 		resp.Diagnostics.AddError(
 			"Invalid import ID",
 			fmt.Sprintf("The import ID must be a numeric server ID; got %q.", req.ID),
