@@ -837,7 +837,7 @@ func TestServerPowerResource_Create_NoWaitStoresTaskID(t *testing.T) {
 	}
 	var state serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
-	if state.PendingTaskID.ValueString() != "task-nowait" {
+	if pendingTaskUUID(state.PendingTaskID.ValueString()) != "task-nowait" {
 		t.Errorf("PendingTaskID = %q, want task-nowait (accepted UUID retained on wait=false)", state.PendingTaskID.ValueString())
 	}
 	if state.State.ValueString() != "OFF" {
@@ -1247,6 +1247,121 @@ func TestServerPowerResource_Read_PendingNonTerminalWithinTimeoutRetains(t *test
 	}
 	if result.State.ValueString() != "OFF" {
 		t.Errorf("State = %q, want OFF (desired kept; live RUNNING must NOT overwrite a still-in-flight op)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingQueuedNeverStartedStuckReconciles verifies
+// thread r3639673890 (P2): a wait=false task stuck in PENDING with StartedAt nil
+// (never started) is bounded by the marker's persisted first-seen (acceptance) time,
+// NOT StartedAt. Here the marker was accepted 16m ago (> 15m defaultTaskTimeout) and
+// the task is still PENDING with no startedAt, so Read treats it as stuck — the
+// StartedAt-only bound could never expire it — refetches live (SHUTOFF) and reconciles
+// desired OFF to OFF... here desired is ON so the never-run command surfaces as OFF.
+func TestServerPowerResource_Read_PendingQueuedNeverStartedStuckReconciles(t *testing.T) {
+	// Real-task marker (uuid + "@" + unixnano) first-seen 16m ago.
+	marker := "task-queued" + indeterminateMarkerSep + strconv.FormatInt(time.Now().Add(-defaultTaskTimeout-time.Minute).UnixNano(), 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/337":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 337, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "SHUTOFF"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-queued":
+			// Still PENDING, and StartedAt omitted (nil) — the queue never advanced.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-queued","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "337"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "337"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, marker),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (indefinitely-queued task expired via acceptance time)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (never-run command surfaced from live SHUTOFF once the acceptance timeout elapsed)", result.State.ValueString())
+	}
+}
+
+// TestServerPowerResource_Read_PendingQueuedNeverStartedWithinTimeoutRetains verifies
+// the other side of thread r3639673890: a freshly-accepted PENDING task (StartedAt nil,
+// first-seen just now) is still within defaultTaskTimeout, so it is retained — the
+// acceptance-time bound must not expire a task that was only just queued.
+func TestServerPowerResource_Read_PendingQueuedNeverStartedWithinTimeoutRetains(t *testing.T) {
+	marker := "task-queued" + indeterminateMarkerSep + strconv.FormatInt(time.Now().UnixNano(), 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/338":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 338, "name": "vps",
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-queued":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-queued","state":"PENDING"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "338"),
+		"state":           tftypes.NewValue(tftypes.String, "OFF"),
+		"state_option":    tftypes.NewValue(tftypes.String, nil),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "338"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, marker),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if pendingTaskUUID(result.PendingTaskID.ValueString()) != "task-queued" {
+		t.Errorf("PendingTaskID = %q, want the task-queued marker retained within the acceptance timeout", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "OFF" {
+		t.Errorf("State = %q, want OFF (desired kept; freshly-queued op is not yet stuck)", result.State.ValueString())
 	}
 }
 
@@ -3673,7 +3788,7 @@ func TestServerPowerResource_Create_WaitTrueFinishedStoresTaskUUID(t *testing.T)
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
 	// Thread A: the FINISHED task's UUID is retained (not null) so Read governs
 	// convergence via the propagation window.
-	if state.PendingTaskID.ValueString() != "task-fin-created" {
+	if pendingTaskUUID(state.PendingTaskID.ValueString()) != "task-fin-created" {
 		t.Errorf("PendingTaskID = %q, want task-fin-created (finished UUID retained for Read convergence)", state.PendingTaskID.ValueString())
 	}
 	if state.State.ValueString() != "ON" {
@@ -3772,10 +3887,10 @@ func TestServerPowerResource_Update_StateChangeStoresNewMarkerNotPrior(t *testin
 		}
 		var state serverPowerResourceModel
 		resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
-		if state.PendingTaskID.ValueString() != "task-new" {
+		if pendingTaskUUID(state.PendingTaskID.ValueString()) != "task-new" {
 			t.Errorf("PendingTaskID = %q, want task-new (NEW task UUID, not obsolete prior)", state.PendingTaskID.ValueString())
 		}
-		if state.PendingTaskID.ValueString() == "task-OBSOLETE" {
+		if pendingTaskUUID(state.PendingTaskID.ValueString()) == "task-OBSOLETE" {
 			t.Error("PendingTaskID must NOT be the obsolete prior UUID after a new command")
 		}
 	})

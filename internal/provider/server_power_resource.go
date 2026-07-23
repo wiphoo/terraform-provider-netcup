@@ -67,7 +67,11 @@ func pendingMarkerFor(task *netcup.TaskInfo) string {
 	if task == nil || task.UUID == "" {
 		return newIndeterminateMarker()
 	}
-	return task.UUID
+	// Embed a first-seen (acceptance) timestamp so Read can bound retention of a
+	// still-non-terminal task — including one that never leaves PENDING, whose
+	// StartedAt stays nil (thread r3639673890). Read strips the bare UUID back out
+	// for GetTask/WaitForTask.
+	return newPendingTaskMarker(task.UUID)
 }
 
 // indeterminateMarkerSep separates the pendingTaskIDIndeterminate stem from an
@@ -110,6 +114,46 @@ func indeterminateMarkerTime(s string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(0, nanos), true
+}
+
+// newPendingTaskMarker records a REAL accepted task UUID together with a first-seen
+// (acceptance) timestamp: "<uuid>@<unixnano>". Read strips the bare UUID back out
+// (pendingTaskUUID) for GetTask/WaitForTask and uses the timestamp (pendingTaskFirstSeen)
+// to bound how long a still-non-terminal task may be retained.
+//
+// Thread r3639673890 (P2): a wait=false task that never leaves PENDING reports
+// StartedAt: null forever, so a StartedAt-based bound alone can never expire it — an
+// indefinitely-queued command (and later drift) would hide with no corrective plan.
+// The persisted acceptance time bounds that case too (an accepted task still
+// non-terminal after defaultTaskTimeout is treated as stuck regardless of StartedAt).
+// SCP task UUIDs never contain '@', so the separator is unambiguous.
+func newPendingTaskMarker(uuid string) string {
+	return uuid + indeterminateMarkerSep + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
+
+// pendingTaskUUID returns the bare task UUID from a real-task marker, stripping any
+// embedded "@<unixnano>" first-seen suffix. A marker with no valid timestamp suffix
+// (legacy state written before r3639673890, or a test fixture) is returned unchanged.
+// Only ever called on non-indeterminate markers.
+func pendingTaskUUID(marker string) string {
+	if i := strings.LastIndex(marker, indeterminateMarkerSep); i >= 0 {
+		if _, err := strconv.ParseInt(marker[i+len(indeterminateMarkerSep):], 10, 64); err == nil {
+			return marker[:i]
+		}
+	}
+	return marker
+}
+
+// pendingTaskFirstSeen extracts the embedded first-seen (acceptance) timestamp from a
+// real-task marker, or ok=false for a legacy marker without one (callers then fall
+// back to the task's StartedAt).
+func pendingTaskFirstSeen(marker string) (time.Time, bool) {
+	if i := strings.LastIndex(marker, indeterminateMarkerSep); i >= 0 {
+		if nanos, err := strconv.ParseInt(marker[i+len(indeterminateMarkerSep):], 10, 64); err == nil {
+			return time.Unix(0, nanos), true
+		}
+	}
+	return time.Time{}, false
 }
 
 // isSameStatePowerOp reports whether the (state, state_option) pair describes a
@@ -572,7 +616,7 @@ func (r *serverPowerResource) reconcilePendingTask(
 				state.PendingTaskID = types.StringNull()
 			}
 		}
-	} else if task, terr := r.client.GetTask(ctx, uuid); terr != nil {
+	} else if task, terr := r.client.GetTask(ctx, pendingTaskUUID(uuid)); terr != nil {
 		// A 404/gone means the task record no longer exists (including a brief
 		// 404 right after an accepted task): reconcile from the live state and
 		// clear the pending marker.
@@ -662,13 +706,22 @@ func (r *serverPowerResource) reconcilePendingTask(
 		// Thread r3638659469 (P2): but if SCP leaves the accepted task non-terminal
 		// INDEFINITELY, an unbounded retain suppresses live-state mapping forever and
 		// hides later drift — this is the wait=false counterpart of the sync wait
-		// path's defaultTaskTimeout (which does NOT cover this branch). Bound it by the
-		// task's own StartedAt: once a STARTED task has been running longer than
-		// defaultTaskTimeout (the same finite bound WaitForTask uses), treat it as
-		// stuck — refetch the live server and reconcile from it so drift surfaces for a
-		// corrective apply. A not-yet-started task (StartedAt nil) is still queued, not
-		// stuck, so it keeps retaining until it starts or reaches a terminal state.
-		if task.StartedAt != nil && time.Since(*task.StartedAt) > defaultTaskTimeout {
+		// path's defaultTaskTimeout (which does NOT cover this branch).
+		//
+		// Bound it by the marker's persisted first-seen (acceptance) time when present:
+		// an accepted task still non-terminal defaultTaskTimeout after we recorded it is
+		// treated as stuck. Thread r3639673890 (P2): this covers a task that never leaves
+		// PENDING (StartedAt stays nil forever) — which the earlier StartedAt-only bound
+		// could not expire. Fall back to the task's StartedAt only for a legacy marker
+		// with no embedded timestamp (a task not yet started and with no acceptance time
+		// keeps retaining until it starts or reaches a terminal state).
+		var stuck bool
+		if firstSeen, ok := pendingTaskFirstSeen(uuid); ok {
+			stuck = time.Since(firstSeen) > defaultTaskTimeout
+		} else if task.StartedAt != nil {
+			stuck = time.Since(*task.StartedAt) > defaultTaskTimeout
+		}
+		if stuck {
 			// Refetch a fresh snapshot before reconciling (the `server` snapshot was
 			// taken BEFORE GetTask), mirroring the terminal branch.
 			fresh, ferr := r.client.GetServer(ctx, id)
@@ -981,11 +1034,13 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 
 	if shouldWaitRetained {
 		// A real retained task UUID + wait flipped to true: wait on it without
-		// re-issuing the command.
+		// re-issuing the command. Strip the marker's embedded first-seen suffix to
+		// recover the bare UUID SCP knows (thread r3639673890).
+		bareUUID := pendingTaskUUID(priorUUID)
 		waitCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
 		defer cancel()
-		if _, err := r.client.WaitForTask(waitCtx, priorUUID); err != nil {
-			if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, priorUUID); persist {
+		if _, err := r.client.WaitForTask(waitCtx, bareUUID); err != nil {
+			if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, bareUUID); persist {
 				// INDETERMINATE wait on the retained task: retain the marker + warn,
 				// preserving the NEW wait value. A later refresh/apply reconciles.
 				desired.PendingTaskID = priorMarker
