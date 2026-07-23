@@ -1130,6 +1130,70 @@ func TestServerPowerResource_Read_PendingNonTerminalStuckPastTimeoutReconciles(t
 	}
 }
 
+// TestServerPowerResource_Read_PendingNonTerminalStuckSameStateSurfacesDrift
+// verifies thread r3639343085 (P2): when a same-state RESET task is stuck non-terminal
+// past defaultTaskTimeout and the refetched server is RUNNING (== desired ON),
+// clearing only the marker would leave state=ON and state_option=RESET both equal to
+// config — so Terraform would report no drift and the possibly-never-executed reboot
+// would never be retried. Read must instead BLANK state_option (mirroring the
+// terminal-failure branch) to force a corrective null→RESET plan diff.
+func TestServerPowerResource_Read_PendingNonTerminalStuckSameStateSurfacesDrift(t *testing.T) {
+	startedAt := time.Now().Add(-defaultTaskTimeout - time.Minute).UTC().Format(time.RFC3339Nano)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/336":
+			w.WriteHeader(http.StatusOK)
+			out, _ := json.Marshal(map[string]interface{}{
+				"id": 336, "name": "vps",
+				// Live RUNNING (== desired ON): a same-state reboot's live state proves
+				// nothing, so the stuck op must still surface as a corrective diff.
+				"serverLiveInfo": map[string]interface{}{"state": "RUNNING"},
+			})
+			_, _ = w.Write(out)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-stuck-reset":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-stuck-reset","state":"RUNNING","startedAt":"` + startedAt + `"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerPowerResource(t, client)
+
+	ctx := context.Background()
+	st := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "336"),
+		"state":           tftypes.NewValue(tftypes.String, "ON"),
+		"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+		"wait":            tftypes.NewValue(tftypes.Bool, false),
+		"id":              tftypes.NewValue(tftypes.String, "336"),
+		"pending_task_id": tftypes.NewValue(tftypes.String, "task-stuck-reset"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Read(ctx, resource.ReadRequest{State: st}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var result serverPowerResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
+	if !result.PendingTaskID.IsNull() {
+		t.Errorf("PendingTaskID = %q, want null (stuck marker cleared past defaultTaskTimeout)", result.PendingTaskID.ValueString())
+	}
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (state keeps meaning live power state)", result.State.ValueString())
+	}
+	// state_option blanked so config RESET vs stored null yields a corrective diff.
+	if !result.StateOption.IsNull() {
+		t.Errorf("StateOption = %q, want null (blanked to surface the stuck same-state reboot)", result.StateOption.ValueString())
+	}
+}
+
 // TestServerPowerResource_Read_PendingNonTerminalWithinTimeoutRetains verifies the
 // other side of thread r3638659469: a task still running WITHIN defaultTaskTimeout of
 // its StartedAt is in flight, not stuck, so Read retains the marker and keeps the

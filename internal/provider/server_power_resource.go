@@ -688,6 +688,19 @@ func (r *serverPowerResource) reconcilePendingTask(
 				// longer withhold live mapping.
 				server = fresh
 				state.PendingTaskID = types.StringNull()
+
+				// Thread r3639343085 (P2): mirror the terminal-FAILURE branch for a
+				// SAME-STATE op. A stuck RESET/POWERCYCLE reconciled from a RUNNING refetch
+				// leaves BOTH state = ON and state_option = RESET (== config), so Terraform
+				// would report NO drift and the possibly-never-executed reboot would never
+				// be retried — and a later refresh that catches the still-running task in
+				// SHUTOFF could even record OFF and trigger an unwanted reboot. BLANK
+				// state_option to force a corrective plan diff (null → RESET re-runs Update
+				// and re-issues the reboot), exactly as the failed-same-state path does.
+				// NON-same-state ops already surface via the live-state reconcile above.
+				if sameState {
+					state.StateOption = types.StringNull()
+				}
 			}
 		} else {
 			mapLiveState = false
