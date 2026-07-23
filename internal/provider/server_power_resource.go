@@ -344,9 +344,36 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 		PendingTaskID: types.StringNull(),
 	}
 
+	// Submit the power command and reconcile the accepted task. Create and Update
+	// share this identical submit-and-classify flow (thread r3637429687).
+	r.submitPowerCommand(ctx, id, state, stateOption, plan.Wait.ValueBool(), &desired, &resp.State, &resp.Diagnostics)
+}
+
+// submitPowerCommand issues a power command (SetPowerState) and reconciles the
+// accepted task, writing the FINAL resource state (or an error) into respState /
+// diags. It is the shared submit-and-classify flow used by BOTH Create and Update:
+// SetPowerState → handleSetPowerStateError → pendingMarkerFor → WaitForTask →
+// classifyTaskWaitError. Extracting it (thread r3637429687) keeps that sequence in
+// one place so a new wait outcome or a change to how the marker is assigned is
+// edited once rather than in two copy-pasted branches that could silently diverge.
+//
+// Callers pass the fully-populated `desired` model (with pending_task_id defaulted
+// to null) and MUST return immediately after calling it. It never falls back to any
+// caller-specific tail (e.g. Update's prior-marker restore): every path here sets
+// its own marker per the unified rule (new task UUID / sentinel / null-for-sync).
+func (r *serverPowerResource) submitPowerCommand(
+	ctx context.Context,
+	id int32,
+	state netcup.PowerState,
+	stateOption string,
+	wait bool,
+	desired *serverPowerResourceModel,
+	respState *tfsdk.State,
+	diags *diag.Diagnostics,
+) {
 	task, err := r.client.SetPowerState(ctx, id, state, stateOption)
 	if err != nil {
-		handleSetPowerStateError(ctx, &resp.State, &resp.Diagnostics, err, &desired)
+		handleSetPowerStateError(ctx, respState, diags, err, desired)
 		return
 	}
 
@@ -355,13 +382,13 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 	// Persist the accepted task UUID alongside the desired state so a refresh that
 	// observes a transient live state consults the task (GetTask) before mapping
 	// it over the desired value and re-issuing the (possibly destructive) command.
-	if !plan.Wait.ValueBool() {
+	if !wait {
 		if task != nil {
 			// Thread A (P1): a 202 whose body omits `uuid` yields a non-nil task with
 			// an empty UUID; store the sentinel (not an empty marker Read would skip).
 			desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
 		}
-		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+		diags.Append(respState.Set(ctx, desired)...)
 		return
 	}
 
@@ -384,13 +411,13 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 				// empty (a 202 body without `uuid`), so Read never skips an empty marker
 				// and re-issues the command.
 				desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
-				persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
+				persistDesiredStateWithWarning(ctx, respState, diags, desired, indeterminateDiag)
 				return
 			} else {
 				// Confirmed terminal FAILURE: the operation definitively failed and
 				// the server state was not changed, so retrying is safe. Return an
 				// error without persisting desired state.
-				resp.Diagnostics.Append(terminalDiag)
+				diags.Append(terminalDiag)
 				return
 			}
 		}
@@ -406,14 +433,14 @@ func (r *serverPowerResource) Create(ctx context.Context, req resource.CreateReq
 		// from live (genuine drift). The marker is cleared by Read once live state
 		// catches up, so it does not linger.
 		desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
-		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+		diags.Append(respState.Set(ctx, desired)...)
 		return
 	}
 
 	// Synchronous 200 (task == nil): the command completed synchronously, so there
 	// is no async task to track — pending_task_id stays null (set on `desired`
 	// above).
-	resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+	diags.Append(respState.Set(ctx, desired)...)
 }
 
 func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -814,71 +841,13 @@ func (r *serverPowerResource) Update(ctx context.Context, req resource.UpdateReq
 		powerState := netcup.PowerState(plan.State.ValueString())
 		stateOption := plan.StateOption.ValueString()
 
-		task, err := r.client.SetPowerState(ctx, id, powerState, stateOption)
-		if err != nil {
-			handleSetPowerStateError(ctx, &resp.State, &resp.Diagnostics, err, &desired)
-			return
-		}
-
-		// wait=false: the async task has not completed. Persist the accepted task
-		// UUID alongside the NEW desired state so a refresh that observes a
-		// transient live state consults the task before overwriting the desired
-		// value and re-issuing the (possibly destructive) command.
-		if !plan.Wait.ValueBool() {
-			if task != nil {
-				// Thread A (P1): a 202 whose body omits `uuid` yields a non-nil task
-				// with an empty UUID; store the sentinel (not an empty marker Read skips).
-				desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
-			}
-			resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
-			return
-		}
-
-		if task != nil {
-			// Bound task polling with a finite deadline (see defaultTaskTimeout)
-			// so an apply/CI run can never hang if netcup leaves the task
-			// non-terminal. A hit deadline is INDETERMINATE, not a *TaskError.
-			waitCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
-			defer cancel()
-			if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
-				if terminalDiag, indeterminateDiag, persist := classifyTaskWaitError(err, task.UUID); persist {
-					// INDETERMINATE wait: the new power command was accepted (202)
-					// and may have taken effect. Persist the NEW desired state + the
-					// accepted task UUID + a warning so a later refresh consults the
-					// task and a later apply does not re-issue the command. (The old
-					// behaviour retained prior state, which caused a re-issue.)
-					//
-					// Thread A (P1): pendingMarkerFor stores the sentinel when task.UUID
-					// is empty (202 body without `uuid`), so Read never skips an empty
-					// marker and re-issues the command.
-					desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
-					persistDesiredStateWithWarning(ctx, &resp.State, &resp.Diagnostics, &desired, indeterminateDiag)
-					return
-				} else {
-					// Confirmed terminal FAILURE: the operation failed and the
-					// server state was not changed; return an error without
-					// persisting the new desired state.
-					resp.Diagnostics.Append(terminalDiag)
-					return
-				}
-			}
-
-			// wait=true SUCCESS (new task FINISHED). Thread A (P1): RETAIN the NEW
-			// finished task's UUID so Read's propagation-window logic governs
-			// convergence (see Create). Thread B (P2): this command-issued path sets
-			// its own marker and RETURNS — it must NOT fall through to the prior-marker
-			// restore tail below, which would resurrect the OBSOLETE prior task ID and
-			// suppress live-state mapping against the new operation.
-			desired.PendingTaskID = types.StringValue(pendingMarkerFor(task))
-			resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
-			return
-		}
-
-		// New command completed SYNChronously (HTTP 200, task == nil): no async task
-		// to track ⇒ marker stays null (set on `desired` above). Thread B (P2): this
-		// too is a command-issued path and must RETURN rather than fall through to the
-		// prior-marker restore tail (which would resurrect an obsolete prior UUID).
-		resp.Diagnostics.Append(resp.State.Set(ctx, &desired)...)
+		// A new command is issued: run the shared submit-and-classify flow (thread
+		// r3637429687) and RETURN. Every path inside submitPowerCommand sets its own
+		// marker per the unified rule (new task UUID / sentinel / null-for-sync), so we
+		// must NOT fall through to the prior-marker restore tail below — that would
+		// resurrect the OBSOLETE prior task ID and suppress live-state mapping against
+		// the new operation (Thread B P2).
+		r.submitPowerCommand(ctx, id, powerState, stateOption, plan.Wait.ValueBool(), &desired, &resp.State, &resp.Diagnostics)
 		return
 	}
 
