@@ -443,6 +443,308 @@ func (r *serverPowerResource) submitPowerCommand(
 	diags.Append(respState.Set(ctx, desired)...)
 }
 
+// liveConfirmsDesired reports whether the server's live power state maps to the
+// desired power state — the shared primitive of the same-state marker-clear
+// invariant (thread r3637428704). A nil server/live-info or a transitional live
+// state (liveStateToDesiredPower == "") does NOT confirm. Centralizing this one
+// check keeps the three reconciliation branches (sentinel / task-gone / terminal)
+// from each re-deriving it and drifting apart.
+func liveConfirmsDesired(server *netcup.Server, desired string) bool {
+	if server == nil || server.ServerLiveInfo == nil {
+		return false
+	}
+	mapped := liveStateToDesiredPower(server.ServerLiveInfo.State)
+	return mapped != "" && string(mapped) == desired
+}
+
+// reconcilePendingTask consults a possibly-pending power task before Read maps
+// the live state over the desired state (Thread B). When Create/Update submitted a
+// power command but could not confirm it terminally (wait=false, or a
+// bounded/indeterminate WaitForTask), it stored the task UUID (or the indeterminate
+// sentinel) in pending_task_id. While that async task runs the live ServerState is
+// transient and does NOT yet reflect the request, so mapping it over the desired
+// `state` would make the next plan re-issue the (possibly destructive) command.
+//
+// It returns the server snapshot Read should map from (possibly a fresh post-lookup
+// refetch), whether Read should map the live state (mapLiveState), and whether the
+// resource was removed (removed => Read must return immediately). It may mutate
+// *state (clear/adjust the marker, blank state_option) and append diagnostics.
+//
+// The core same-state invariant — for a same-state RESET/POWERCYCLE op, live-state
+// equality ALONE never clears a marker; only a TERMINAL task is authoritative — is
+// enforced across the sentinel / task-gone / terminal branches, all of which route
+// their live-equality question through the shared liveConfirmsDesired primitive.
+func (r *serverPowerResource) reconcilePendingTask(
+	ctx context.Context,
+	id int32,
+	state *serverPowerResourceModel,
+	server *netcup.Server,
+	sameState bool,
+	resp *resource.ReadResponse,
+) (updatedServer *netcup.Server, mapLiveState bool, removed bool) {
+	mapLiveState = true
+	pending := state.PendingTaskID
+	if pending.IsNull() || pending.IsUnknown() || pending.ValueString() == "" {
+		return server, mapLiveState, false
+	}
+	uuid := pending.ValueString()
+
+	// The pendingTaskIDIndeterminate sentinel is NOT a real UUID (Create stored
+	// it because the accepted response could not be decoded — no UUID was
+	// available). There is nothing to GetTask. RETAIN the desired state and the
+	// sentinel until a later refresh observes the live state actually matching
+	// the desired value, at which point the mapping below is a no-op and the
+	// sentinel is cleared by the "live matches desired" check.
+	//
+	// Residual limitation (deliberate, mirrors rescue): with no UUID we cannot
+	// query the task, so an indeterminate power op that genuinely never took
+	// effect keeps the desired state until the live state converges or an
+	// operator intervenes — safer than overwriting the desired state and
+	// re-issuing a destructive command.
+	if uuid == pendingTaskIDIndeterminate {
+		mapLiveState = false
+		// Thread C (P1): for a SAME-STATE op (RESET/POWERCYCLE on an ON server)
+		// the sentinel must NOT self-clear on live-equality. An accepted-but-
+		// untrackable reboot transits ON → SHUTOFF → ON; the FIRST refresh can
+		// observe the pre-op RUNNING (== desired ON) before the reboot even
+		// begins. Clearing the sentinel then would let a LATER refresh during the
+		// reboot's SHUTOFF phase record OFF, and the next apply would submit a
+		// SECOND reboot. The sentinel carries no task/FinishedAt to bound a window
+		// against, so — consistent with the same-state GetTask-404 branch below,
+		// which also retains rather than trusting a live-equality signal — RETAIN
+		// the sentinel and the desired state until an operator re-applies.
+		//
+		// Residual tradeoff (deliberate, documented): a same-state indeterminate
+		// op that genuinely never took effect keeps the desired ON under the
+		// sentinel until the operator re-applies — the safe choice (never silently
+		// drop a possibly-unfinished reboot), matching the same-state 404 branch's
+		// unbounded retain. Adding a first-seen timestamp to bound this would
+		// require a new schema attribute; the existing safe-retain tradeoff is
+		// reused instead.
+		//
+		// For a NON-same-state op live-equality genuinely proves convergence (the
+		// pre-/post-op power states differ), so clear the sentinel as before.
+		if !sameState && liveConfirmsDesired(server, state.State.ValueString()) {
+			state.PendingTaskID = types.StringNull()
+		}
+	} else if task, terr := r.client.GetTask(ctx, uuid); terr != nil {
+		// A 404/gone means the task record no longer exists (including a brief
+		// 404 right after an accepted task): reconcile from the live state and
+		// clear the pending marker.
+		d, gone := apiErrorToDiag(terr, false)
+		if gone {
+			// Thread B (P2) fix: REFETCH the live server before reconciling and
+			// clearing the marker — mirror the terminal-success branch below. The
+			// `server` snapshot above was taken BEFORE this GetTask; if the task
+			// disappeared between the two calls (e.g. it completed and was purged,
+			// or a transient 404 right after acceptance), that snapshot can still be
+			// a mid-transition state (e.g. RUNNING or SHUTOFF captured mid-OFF /
+			// mid-POWERCYCLE for a wait=false op). Reconciling from it would record
+			// the wrong power state and make the next apply re-issue the (possibly
+			// destructive) command. Take a fresh POST-lookup snapshot and reconcile
+			// from THAT.
+			//
+			// On refetch failure: 404/gone ⇒ the server itself disappeared, remove
+			// the resource; any other error ⇒ KEEP the marker + surface a diagnostic
+			// and do NOT map stale state, so the next refresh retries.
+			fresh, ferr := r.client.GetServer(ctx, id)
+			if ferr != nil {
+				fd, fgone := apiErrorToDiag(ferr, false)
+				if fgone {
+					resp.State.RemoveResource(ctx)
+					return server, false, true
+				}
+				resp.Diagnostics.Append(fd)
+				mapLiveState = false
+			} else {
+				// Thread B (P1 follow-up) fix: the fresh POST-lookup snapshot can
+				// STILL show the operation's pre-op/intermediate live state — SCP
+				// live-state propagation lags a purged/404 task just as it lags a
+				// FINISHED one (e.g. a POWERCYCLE whose refetch is still SHUTOFF
+				// before the server comes back RUNNING). Clearing the marker
+				// unconditionally would record the wrong state (OFF) and make the
+				// next apply reboot again. So only CLEAR + reconcile when the fresh
+				// live state CONFIRMS the desired `state`; otherwise fall back to the
+				// indeterminate sentinel and RETAIN the desired state (map nothing).
+				//
+				// Unlike the terminal-success branch there is no task.FinishedAt to
+				// bound a time window here (the task record is gone), so the bound is
+				// the sentinel's own convergence check above: the next refresh clears
+				// the sentinel as soon as the live state matches the desired value —
+				// the same deliberate residual limitation the sentinel path documents.
+				server = fresh
+				if sameState {
+					// Thread A (P1): SAME-STATE op (RESET/POWERCYCLE on an ON server).
+					// The refetched live state being RUNNING (== desired ON) does NOT
+					// prove the reboot converged — the server may be ON only because the
+					// reboot has not begun (or has already finished). Clearing the marker
+					// on that live-equality would let a later refresh during the reboot's
+					// SHUTOFF phase record OFF, and the next apply would submit a SECOND
+					// reboot. So do NOT clear on live-equality here: only a TERMINAL task
+					// is authoritative for a same-state op.
+					//
+					// A GetTask 404 gives no FinishedAt to bound a time window, so bound
+					// retention by RE-QUERYING the task: keep the REAL UUID marker (not the
+					// sentinel) so the NEXT refresh calls GetTask again. A 404 right after
+					// acceptance is typically transient — the task record reappears and,
+					// once it reaches FINISHED, the terminal-FINISHED branch clears the
+					// marker (treating FINISHED itself as convergence for same-state ops).
+					// Retaining the queryable UUID (rather than degrading to the sentinel,
+					// whose live-equality self-clear would fire on the false RUNNING signal)
+					// is the bound: retention lasts only until the task is terminal-
+					// confirmed on a later refresh.
+					//
+					// Tradeoff: if the task record NEVER reappears (permanently purged
+					// while the server sits RUNNING), the marker is retained indefinitely
+					// and Terraform keeps the desired ON without re-issuing the reboot —
+					// the deliberately safe choice (never silently drop a possibly-
+					// unfinished reboot), matching the sentinel path's documented residual
+					// limitation. An operator can force reconciliation with a re-apply.
+					mapLiveState = false
+					// state.PendingTaskID left unchanged (retain the real UUID).
+				} else if liveConfirmsDesired(fresh, state.State.ValueString()) {
+					// NON-same-state op: live-equality genuinely proves convergence
+					// (the pre-/post-op power states differ), so clear + reconcile.
+					state.PendingTaskID = types.StringNull()
+				} else {
+					state.PendingTaskID = types.StringValue(pendingTaskIDIndeterminate)
+					mapLiveState = false
+				}
+			}
+		} else {
+			// Transient error: we cannot tell whether the op is still pending.
+			// Surface a diagnostic, KEEP the desired state and the marker so the
+			// next refresh retries.
+			resp.Diagnostics.Append(d)
+			mapLiveState = false
+		}
+	} else if !task.State.IsTerminal() {
+		// The task is still running (PENDING/RUNNING/WAITING_FOR_CANCEL): the
+		// power op is in flight and the live state is transient. KEEP the desired
+		// state and retain the marker so the next refresh re-checks.
+		mapLiveState = false
+	} else {
+		// Terminal task: the op finished (FINISHED) or failed
+		// (ERROR/CANCELED/ROLLBACK).
+		//
+		// Thread B (P1) fix: REFETCH the live server before reconciling. The
+		// `server` snapshot above was taken BEFORE GetTask; if the task
+		// transitioned to terminal in the window between those two calls, that
+		// snapshot is a stale PRE-completion state (e.g. SHUTOFF captured
+		// mid-POWERCYCLE even though the task has since restored RUNNING).
+		// Reconciling from it would record the wrong power state and make the
+		// next apply re-issue the command. Take a fresh POST-completion snapshot
+		// and reconcile from THAT.
+		//
+		// If the refetch fails we KEEP the marker and surface a diagnostic so the
+		// next refresh retries, rather than reconcile from a stale snapshot.
+		fresh, ferr := r.client.GetServer(ctx, id)
+		if ferr != nil {
+			d, gone := apiErrorToDiag(ferr, false)
+			if gone {
+				// Server disappeared post-completion: remove the resource.
+				resp.State.RemoveResource(ctx)
+				return server, false, true
+			}
+			resp.Diagnostics.Append(d)
+			mapLiveState = false
+		} else if task.State == netcup.TaskStateFinished {
+			// SUCCESS terminal. Thread B (P1) refinement: the task is FINISHED and
+			// we have a fresh snapshot, but SCP live-state propagation can still LAG
+			// — the single refetch may STILL report the operation's intermediate
+			// state (e.g. a POWERCYCLE whose refetch is still SHUTOFF before the
+			// server comes back RUNNING). Clearing the marker unconditionally then
+			// records the wrong state (OFF) and the next apply reboots again.
+			//
+			// So only CLEAR the marker + reconcile if the fresh live state CONFIRMS
+			// the desired `state` (converged). If it does NOT yet match, this is
+			// either propagation lag or genuine drift — bound the ambiguity by the
+			// task's own FinishedAt: within powerPropagationWindow, treat it as lag
+			// and RETAIN the marker + KEEP the desired state (map nothing); once
+			// the window elapses (or FinishedAt is absent), treat the mismatch as
+			// GENUINE drift and reconcile from the live state (so a real
+			// externally-stopped server still surfaces), clearing the marker.
+			// Mirrors rescue's bounded post-terminal propagation handling.
+			server = fresh
+			// Thread B (P1) correction to 25afe91: for BOTH same-state and
+			// non-same-state ops, a FINISHED task alone is NOT sufficient to clear
+			// the marker — SCP live-state propagation can lag, so the post-FINISHED
+			// refetch may still report the operation's intermediate state (e.g. a
+			// POWERCYCLE whose refetch is still SHUTOFF before the server comes back
+			// RUNNING). 25afe91 cleared the same-state marker UNCONDITIONALLY on
+			// FINISHED; that records OFF on a lagged SHUTOFF refetch and the next
+			// apply reboots again. So gate the clear on the SAME bounded window the
+			// non-same-state path uses:
+			//   converged (fresh live == desired) ⇒ clear + reconcile;
+			//   mismatch within powerPropagationWindow of FinishedAt ⇒ RETAIN the
+			//     marker + keep the desired state (map nothing) — propagation lag;
+			//   past the window (or no FinishedAt) ⇒ clear + reconcile (genuine drift).
+			//
+			// This reconciles with the round-1 same-state intent: FINISHED is
+			// REQUIRED to clear a same-state marker (a bare live-RUNNING without a
+			// terminal task never clears it — see the non-terminal and sentinel
+			// branches), AND after FINISHED the live state must confirm the desired
+			// value (or the window must expire) before clearing. `sameState` no
+			// longer changes THIS branch's clear/retain decision (the window logic is
+			// identical for both); it still governs the FAILURE branch below.
+			converged := liveConfirmsDesired(fresh, state.State.ValueString())
+			withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
+			if converged || !withinWindow {
+				// Converged (live matches desired) or past the propagation window
+				// (treat mismatch as genuine drift): clear the marker and reconcile
+				// from the fresh live state below.
+				state.PendingTaskID = types.StringNull()
+			} else {
+				// Still mismatched but within the window: propagation is in flight.
+				// Retain the marker and keep the desired state (do not map).
+				mapLiveState = false
+			}
+		} else {
+			// FAILURE terminal (ERROR/CANCELED/ROLLBACK).
+			//
+			// Thread B (P2) fix: EXCLUDE failed tasks from the propagation window.
+			// The b50a937 window logic exists to absorb SCP live-state propagation
+			// LAG after a SUCCESSFUL operation — but a task that reached a failure
+			// terminal did NOT succeed, so a still-mismatched live state is not lag,
+			// it is the definitive outcome (e.g. a failed power-on leaving the
+			// server SHUTOFF while desired is ON). Applying the window here would
+			// RETAIN the desired state for up to powerPropagationWindow (2m), so
+			// `terraform refresh`/plan would report NO changes despite the known
+			// failure. Instead IMMEDIATELY clear the marker and reconcile from the
+			// (refetched) live state — with no window — so the drift surfaces right
+			// away for a corrective apply.
+			server = fresh
+			state.PendingTaskID = types.StringNull()
+
+			// Thread B (P2) fix: a FAILED SAME-STATE op (RESET/POWERCYCLE on an ON
+			// server) leaves the server RUNNING (== desired ON) even though the reboot
+			// never happened. Reconciling from live would keep state = ON and
+			// state_option = RESET (both == config), and Terraform would report NO
+			// changes — the failed reboot would NEVER be retried. For a NON-same-state
+			// failure the live state already diverges from desired (e.g. failed
+			// power-on ⇒ SHUTOFF ⇒ OFF ≠ ON), so clear+reconcile-from-live above
+			// already surfaces drift and we leave those unchanged.
+			//
+			// To surface drift for the same-state failure, FORCE a corrective plan by
+			// BLANKING the stored operation-specific field: clear state_option to null.
+			// state_option is Optional (no Default/Computed), so config `state_option =
+			// "RESET"` vs stored null yields a real plan diff (null → RESET), which
+			// re-runs Update (stateChanged||optionChanged ⇒ optionChanged true) and
+			// re-issues the reboot. We deliberately blank state_option rather than
+			// `state`: `state` must keep meaning the live power state (ON), and its
+			// validator only accepts ON/OFF/SUSPENDED — corrupting it would misreport
+			// the server's power state. On a SUCCESSFUL same-state op the FINISHED
+			// branch above keeps state_option intact (it is never blanked there), so a
+			// succeeded reboot leaves no perpetual diff.
+			if sameState {
+				state.StateOption = types.StringNull()
+			}
+		}
+	}
+
+	return server, mapLiveState, false
+}
+
 func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	if r.client == nil {
 		resp.Diagnostics.AddError(
@@ -475,293 +777,15 @@ func (r *serverPowerResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	// Thread B fix: reconcile a possibly-pending power task before mapping the live
-	// state over the desired state.
-	//
-	// When Create/Update submitted a power command but could not confirm it
-	// terminally (wait=false, or a bounded/indeterminate WaitForTask), it stored
-	// the task UUID in pending_task_id. While that async task runs, the live
-	// ServerState is transient and does NOT yet reflect the request (e.g. RUNNING
-	// right after requesting OFF, or SHUTOFF mid-POWERCYCLE). Mapping that live
-	// value over the desired `state` here would make the next plan re-issue the
-	// destructive command. So: if a task is pending, consult it and KEEP the
-	// desired `state` while it is still running; only reconcile from the live
-	// state once the task is terminal / gone.
-	mapLiveState := true
-	// Threads A & B (P1/P2): a RESET/POWERCYCLE on an ON server is a SAME-STATE op
-	// — the server is ON at rest both before and after, transiting through SHUTOFF
-	// mid-reboot. For such ops liveStateToDesiredPower(server) == desired can NOT
-	// prove convergence (the server may be ON only because the reboot has not begun,
-	// or has already finished), so the TASK reaching a terminal state is the ONLY
-	// authoritative completion signal. The branches below use this to gate their
-	// convergence/clear decisions.
+	// Reconcile a possibly-pending power task before mapping the live state over the
+	// desired state (Thread B). While an async power task is still in flight the live
+	// ServerState is transient and must not be mapped over the desired `state`;
+	// reconcilePendingTask consults the task and decides map/retain/reconcile (and may
+	// refetch or remove the server). See its doc for the same-state invariant.
 	sameState := isSameStatePowerOp(state.State.ValueString(), state.StateOption.ValueString())
-	if pending := state.PendingTaskID; !pending.IsNull() && !pending.IsUnknown() && pending.ValueString() != "" {
-		uuid := pending.ValueString()
-
-		// The pendingTaskIDIndeterminate sentinel is NOT a real UUID (Create stored
-		// it because the accepted response could not be decoded — no UUID was
-		// available). There is nothing to GetTask. RETAIN the desired state and the
-		// sentinel until a later refresh observes the live state actually matching
-		// the desired value, at which point the mapping below is a no-op and the
-		// sentinel is cleared by the "live matches desired" check.
-		//
-		// Residual limitation (deliberate, mirrors rescue): with no UUID we cannot
-		// query the task, so an indeterminate power op that genuinely never took
-		// effect keeps the desired state until the live state converges or an
-		// operator intervenes — safer than overwriting the desired state and
-		// re-issuing a destructive command.
-		if uuid == pendingTaskIDIndeterminate {
-			mapLiveState = false
-			// Thread C (P1): for a SAME-STATE op (RESET/POWERCYCLE on an ON server)
-			// the sentinel must NOT self-clear on live-equality. An accepted-but-
-			// untrackable reboot transits ON → SHUTOFF → ON; the FIRST refresh can
-			// observe the pre-op RUNNING (== desired ON) before the reboot even
-			// begins. Clearing the sentinel then would let a LATER refresh during the
-			// reboot's SHUTOFF phase record OFF, and the next apply would submit a
-			// SECOND reboot. The sentinel carries no task/FinishedAt to bound a window
-			// against, so — consistent with the same-state GetTask-404 branch below,
-			// which also retains rather than trusting a live-equality signal — RETAIN
-			// the sentinel and the desired state until an operator re-applies.
-			//
-			// Residual tradeoff (deliberate, documented): a same-state indeterminate
-			// op that genuinely never took effect keeps the desired ON under the
-			// sentinel until the operator re-applies — the safe choice (never silently
-			// drop a possibly-unfinished reboot), matching the same-state 404 branch's
-			// unbounded retain. Adding a first-seen timestamp to bound this would
-			// require a new schema attribute; the existing safe-retain tradeoff is
-			// reused instead.
-			//
-			// For a NON-same-state op live-equality genuinely proves convergence (the
-			// pre-/post-op power states differ), so clear the sentinel as before.
-			if !sameState && server.ServerLiveInfo != nil {
-				mapped := liveStateToDesiredPower(server.ServerLiveInfo.State)
-				if mapped != "" && string(mapped) == state.State.ValueString() {
-					state.PendingTaskID = types.StringNull()
-				}
-			}
-		} else if task, terr := r.client.GetTask(ctx, uuid); terr != nil {
-			// A 404/gone means the task record no longer exists (including a brief
-			// 404 right after an accepted task): reconcile from the live state and
-			// clear the pending marker.
-			d, gone := apiErrorToDiag(terr, false)
-			if gone {
-				// Thread B (P2) fix: REFETCH the live server before reconciling and
-				// clearing the marker — mirror the terminal-success branch below. The
-				// `server` snapshot above was taken BEFORE this GetTask; if the task
-				// disappeared between the two calls (e.g. it completed and was purged,
-				// or a transient 404 right after acceptance), that snapshot can still be
-				// a mid-transition state (e.g. RUNNING or SHUTOFF captured mid-OFF /
-				// mid-POWERCYCLE for a wait=false op). Reconciling from it would record
-				// the wrong power state and make the next apply re-issue the (possibly
-				// destructive) command. Take a fresh POST-lookup snapshot and reconcile
-				// from THAT.
-				//
-				// On refetch failure: 404/gone ⇒ the server itself disappeared, remove
-				// the resource; any other error ⇒ KEEP the marker + surface a diagnostic
-				// and do NOT map stale state, so the next refresh retries.
-				fresh, ferr := r.client.GetServer(ctx, id)
-				if ferr != nil {
-					fd, fgone := apiErrorToDiag(ferr, false)
-					if fgone {
-						resp.State.RemoveResource(ctx)
-						return
-					}
-					resp.Diagnostics.Append(fd)
-					mapLiveState = false
-				} else {
-					// Thread B (P1 follow-up) fix: the fresh POST-lookup snapshot can
-					// STILL show the operation's pre-op/intermediate live state — SCP
-					// live-state propagation lags a purged/404 task just as it lags a
-					// FINISHED one (e.g. a POWERCYCLE whose refetch is still SHUTOFF
-					// before the server comes back RUNNING). Clearing the marker
-					// unconditionally would record the wrong state (OFF) and make the
-					// next apply reboot again. So only CLEAR + reconcile when the fresh
-					// live state CONFIRMS the desired `state`; otherwise fall back to the
-					// indeterminate sentinel and RETAIN the desired state (map nothing).
-					//
-					// Unlike the terminal-success branch there is no task.FinishedAt to
-					// bound a time window here (the task record is gone), so the bound is
-					// the sentinel's own convergence check above: the next refresh clears
-					// the sentinel as soon as the live state matches the desired value —
-					// the same deliberate residual limitation the sentinel path documents.
-					server = fresh
-					mapped := ""
-					if fresh.ServerLiveInfo != nil {
-						mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
-					}
-					if sameState {
-						// Thread A (P1): SAME-STATE op (RESET/POWERCYCLE on an ON server).
-						// The refetched live state being RUNNING (== desired ON) does NOT
-						// prove the reboot converged — the server may be ON only because the
-						// reboot has not begun (or has already finished). Clearing the marker
-						// on that live-equality would let a later refresh during the reboot's
-						// SHUTOFF phase record OFF, and the next apply would submit a SECOND
-						// reboot. So do NOT clear on live-equality here: only a TERMINAL task
-						// is authoritative for a same-state op.
-						//
-						// A GetTask 404 gives no FinishedAt to bound a time window, so bound
-						// retention by RE-QUERYING the task: keep the REAL UUID marker (not the
-						// sentinel) so the NEXT refresh calls GetTask again. A 404 right after
-						// acceptance is typically transient — the task record reappears and,
-						// once it reaches FINISHED, the terminal-FINISHED branch clears the
-						// marker (treating FINISHED itself as convergence for same-state ops).
-						// Retaining the queryable UUID (rather than degrading to the sentinel,
-						// whose live-equality self-clear would fire on the false RUNNING signal)
-						// is the bound: retention lasts only until the task is terminal-
-						// confirmed on a later refresh.
-						//
-						// Tradeoff: if the task record NEVER reappears (permanently purged
-						// while the server sits RUNNING), the marker is retained indefinitely
-						// and Terraform keeps the desired ON without re-issuing the reboot —
-						// the deliberately safe choice (never silently drop a possibly-
-						// unfinished reboot), matching the sentinel path's documented residual
-						// limitation. An operator can force reconciliation with a re-apply.
-						mapLiveState = false
-						// state.PendingTaskID left unchanged (retain the real UUID).
-					} else if mapped != "" && mapped == state.State.ValueString() {
-						// NON-same-state op: live-equality genuinely proves convergence
-						// (the pre-/post-op power states differ), so clear + reconcile.
-						state.PendingTaskID = types.StringNull()
-					} else {
-						state.PendingTaskID = types.StringValue(pendingTaskIDIndeterminate)
-						mapLiveState = false
-					}
-				}
-			} else {
-				// Transient error: we cannot tell whether the op is still pending.
-				// Surface a diagnostic, KEEP the desired state and the marker so the
-				// next refresh retries.
-				resp.Diagnostics.Append(d)
-				mapLiveState = false
-			}
-		} else if !task.State.IsTerminal() {
-			// The task is still running (PENDING/RUNNING/WAITING_FOR_CANCEL): the
-			// power op is in flight and the live state is transient. KEEP the desired
-			// state and retain the marker so the next refresh re-checks.
-			mapLiveState = false
-		} else {
-			// Terminal task: the op finished (FINISHED) or failed
-			// (ERROR/CANCELED/ROLLBACK).
-			//
-			// Thread B (P1) fix: REFETCH the live server before reconciling. The
-			// `server` snapshot above was taken BEFORE GetTask; if the task
-			// transitioned to terminal in the window between those two calls, that
-			// snapshot is a stale PRE-completion state (e.g. SHUTOFF captured
-			// mid-POWERCYCLE even though the task has since restored RUNNING).
-			// Reconciling from it would record the wrong power state and make the
-			// next apply re-issue the command. Take a fresh POST-completion snapshot
-			// and reconcile from THAT.
-			//
-			// If the refetch fails we KEEP the marker and surface a diagnostic so the
-			// next refresh retries, rather than reconcile from a stale snapshot.
-			fresh, ferr := r.client.GetServer(ctx, id)
-			if ferr != nil {
-				d, gone := apiErrorToDiag(ferr, false)
-				if gone {
-					// Server disappeared post-completion: remove the resource.
-					resp.State.RemoveResource(ctx)
-					return
-				}
-				resp.Diagnostics.Append(d)
-				mapLiveState = false
-			} else if task.State == netcup.TaskStateFinished {
-				// SUCCESS terminal. Thread B (P1) refinement: the task is FINISHED and
-				// we have a fresh snapshot, but SCP live-state propagation can still LAG
-				// — the single refetch may STILL report the operation's intermediate
-				// state (e.g. a POWERCYCLE whose refetch is still SHUTOFF before the
-				// server comes back RUNNING). Clearing the marker unconditionally then
-				// records the wrong state (OFF) and the next apply reboots again.
-				//
-				// So only CLEAR the marker + reconcile if the fresh live state CONFIRMS
-				// the desired `state` (converged). If it does NOT yet match, this is
-				// either propagation lag or genuine drift — bound the ambiguity by the
-				// task's own FinishedAt: within powerPropagationWindow, treat it as lag
-				// and RETAIN the marker + KEEP the desired state (map nothing); once
-				// the window elapses (or FinishedAt is absent), treat the mismatch as
-				// GENUINE drift and reconcile from the live state (so a real
-				// externally-stopped server still surfaces), clearing the marker.
-				// Mirrors rescue's bounded post-terminal propagation handling.
-				server = fresh
-				// Thread B (P1) correction to 25afe91: for BOTH same-state and
-				// non-same-state ops, a FINISHED task alone is NOT sufficient to clear
-				// the marker — SCP live-state propagation can lag, so the post-FINISHED
-				// refetch may still report the operation's intermediate state (e.g. a
-				// POWERCYCLE whose refetch is still SHUTOFF before the server comes back
-				// RUNNING). 25afe91 cleared the same-state marker UNCONDITIONALLY on
-				// FINISHED; that records OFF on a lagged SHUTOFF refetch and the next
-				// apply reboots again. So gate the clear on the SAME bounded window the
-				// non-same-state path uses:
-				//   converged (fresh live == desired) ⇒ clear + reconcile;
-				//   mismatch within powerPropagationWindow of FinishedAt ⇒ RETAIN the
-				//     marker + keep the desired state (map nothing) — propagation lag;
-				//   past the window (or no FinishedAt) ⇒ clear + reconcile (genuine drift).
-				//
-				// This reconciles with the round-1 same-state intent: FINISHED is
-				// REQUIRED to clear a same-state marker (a bare live-RUNNING without a
-				// terminal task never clears it — see the non-terminal and sentinel
-				// branches), AND after FINISHED the live state must confirm the desired
-				// value (or the window must expire) before clearing. `sameState` no
-				// longer changes THIS branch's clear/retain decision (the window logic is
-				// identical for both); it still governs the FAILURE branch below.
-				mapped := ""
-				if fresh.ServerLiveInfo != nil {
-					mapped = string(liveStateToDesiredPower(fresh.ServerLiveInfo.State))
-				}
-				converged := mapped != "" && mapped == state.State.ValueString()
-				withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
-				if converged || !withinWindow {
-					// Converged (live matches desired) or past the propagation window
-					// (treat mismatch as genuine drift): clear the marker and reconcile
-					// from the fresh live state below.
-					state.PendingTaskID = types.StringNull()
-				} else {
-					// Still mismatched but within the window: propagation is in flight.
-					// Retain the marker and keep the desired state (do not map).
-					mapLiveState = false
-				}
-			} else {
-				// FAILURE terminal (ERROR/CANCELED/ROLLBACK).
-				//
-				// Thread B (P2) fix: EXCLUDE failed tasks from the propagation window.
-				// The b50a937 window logic exists to absorb SCP live-state propagation
-				// LAG after a SUCCESSFUL operation — but a task that reached a failure
-				// terminal did NOT succeed, so a still-mismatched live state is not lag,
-				// it is the definitive outcome (e.g. a failed power-on leaving the
-				// server SHUTOFF while desired is ON). Applying the window here would
-				// RETAIN the desired state for up to powerPropagationWindow (2m), so
-				// `terraform refresh`/plan would report NO changes despite the known
-				// failure. Instead IMMEDIATELY clear the marker and reconcile from the
-				// (refetched) live state — with no window — so the drift surfaces right
-				// away for a corrective apply.
-				server = fresh
-				state.PendingTaskID = types.StringNull()
-
-				// Thread B (P2) fix: a FAILED SAME-STATE op (RESET/POWERCYCLE on an ON
-				// server) leaves the server RUNNING (== desired ON) even though the reboot
-				// never happened. Reconciling from live would keep state = ON and
-				// state_option = RESET (both == config), and Terraform would report NO
-				// changes — the failed reboot would NEVER be retried. For a NON-same-state
-				// failure the live state already diverges from desired (e.g. failed
-				// power-on ⇒ SHUTOFF ⇒ OFF ≠ ON), so clear+reconcile-from-live above
-				// already surfaces drift and we leave those unchanged.
-				//
-				// To surface drift for the same-state failure, FORCE a corrective plan by
-				// BLANKING the stored operation-specific field: clear state_option to null.
-				// state_option is Optional (no Default/Computed), so config `state_option =
-				// "RESET"` vs stored null yields a real plan diff (null → RESET), which
-				// re-runs Update (stateChanged||optionChanged ⇒ optionChanged true) and
-				// re-issues the reboot. We deliberately blank state_option rather than
-				// `state`: `state` must keep meaning the live power state (ON), and its
-				// validator only accepts ON/OFF/SUSPENDED — corrupting it would misreport
-				// the server's power state. On a SUCCESSFUL same-state op the FINISHED
-				// branch above keeps state_option intact (it is never blanked there), so a
-				// succeeded reboot leaves no perpetual diff.
-				if sameState {
-					state.StateOption = types.StringNull()
-				}
-			}
-		}
+	server, mapLiveState, removed := r.reconcilePendingTask(ctx, id, &state, server, sameState, resp)
+	if removed {
+		return
 	}
 
 	// Map the live ServerState to the desired PowerState equivalent.
