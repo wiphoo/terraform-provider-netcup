@@ -270,8 +270,38 @@ func (r *serverPowerResource) ModifyPlan(ctx context.Context, req resource.Modif
 		!stateServerID.IsNull() && !stateServerID.IsUnknown() &&
 		stateServerID.ValueString() == planServerID.ValueString()
 	if sameServer {
-		// In-place update (server_id unchanged and known): leave the plan as-is so
-		// stock UseStateForUnknown keeps the computed values stable.
+		// In-place update (server_id unchanged and known). id stays stable (id ==
+		// server_id, which is unchanged), so stock UseStateForUnknown correctly copies
+		// it forward.
+		//
+		// pending_task_id, however, is NOT stable when the power command itself is
+		// changing. If state or state_option differs from prior state, Update submits a
+		// new power command and writes a freshly-computed pending_task_id (a new task
+		// UUID, the indeterminate sentinel, or null). Stock UseStateForUnknown has
+		// already copied the PRIOR pending_task_id — including null — into the plan, so
+		// for the normal asynchronous 202 the applied value differs from the planned one
+		// and Terraform rejects the apply with "Provider produced inconsistent result
+		// after apply" — AFTER the disruptive command has already run. Force
+		// pending_task_id UNKNOWN whenever an in-place update will issue a new command so
+		// the recomputed value is accepted. A wait-only / no-op update (state and
+		// state_option unchanged) issues no command and preserves the prior marker, so
+		// leaving UseStateForUnknown's stable copy in place keeps that plan clean.
+		var stateState, planState types.String
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("state"), &stateState)...)
+		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("state"), &planState)...)
+		var stateOption, planOption types.String
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("state_option"), &stateOption)...)
+		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("state_option"), &planOption)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		// Equal treats an unknown planned value (e.g. state_option derived from another
+		// resource's not-yet-known output) as NOT equal, so an unprovable change forces
+		// the marker unknown — the safe direction (an unknown plan value accepts any
+		// applied result, whereas a wrongly-stable one risks the inconsistency above).
+		if !planState.Equal(stateState) || !planOption.Equal(stateOption) {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("pending_task_id"), types.StringUnknown())...)
+		}
 		return
 	}
 

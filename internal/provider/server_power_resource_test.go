@@ -2328,6 +2328,60 @@ func TestServerPowerResource_ModifyPlan_InPlaceUpdatePreserves(t *testing.T) {
 	}
 }
 
+// TestServerPowerResource_ModifyPlan_InPlaceCommandChangeForcesMarkerUnknown
+// verifies the P1 fix (thread r3635966365): on an in-place update (server_id
+// unchanged) where the power command itself changes — here state_option flips from
+// null to RESET — Update will submit a new command and write a freshly-computed
+// pending_task_id. Stock UseStateForUnknown would copy the PRIOR marker into the
+// plan, so a normal async 202 (new UUID) would differ from it and Terraform would
+// reject the apply with "inconsistent result after apply" AFTER the disruptive
+// command ran. ModifyPlan must force pending_task_id UNKNOWN, while keeping id
+// stable (id == server_id, unchanged).
+func TestServerPowerResource_ModifyPlan_InPlaceCommandChangeForcesMarkerUnknown(t *testing.T) {
+	r, schemaResp := configureServerPowerResource(t, netcup.New(netcup.WithAPIEndpoint("http://example.invalid"), netcup.WithAccessToken("tok")))
+	ctx := context.Background()
+
+	req := resource.ModifyPlanRequest{
+		State: resourceState(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, nil),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, "task-prior"),
+		}),
+		// In-place command change: server_id unchanged, state_option null → RESET.
+		// Stock UseStateForUnknown copies the prior marker forward (the bug this fix
+		// corrects).
+		Plan: resourcePlan(schemaResp, map[string]tftypes.Value{
+			"server_id":       tftypes.NewValue(tftypes.String, "12345"),
+			"state":           tftypes.NewValue(tftypes.String, "ON"),
+			"state_option":    tftypes.NewValue(tftypes.String, "RESET"),
+			"wait":            tftypes.NewValue(tftypes.Bool, true),
+			"id":              tftypes.NewValue(tftypes.String, "12345"),
+			"pending_task_id": tftypes.NewValue(tftypes.String, "task-prior"),
+		}),
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.(resource.ResourceWithModifyPlan).ModifyPlan(ctx, req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var planned serverPowerResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Plan.Get() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !planned.PendingTaskID.IsUnknown() {
+		t.Errorf("pending_task_id must be unknown when an in-place update issues a new command, got %q", planned.PendingTaskID.ValueString())
+	}
+	// id must stay stable (server_id unchanged) — only the marker is forced unknown.
+	if planned.ID.IsUnknown() || planned.ID.ValueString() != "12345" {
+		t.Errorf("id must stay stable at 12345 on an in-place command change, got unknown=%v value=%q", planned.ID.IsUnknown(), planned.ID.ValueString())
+	}
+}
+
 // TestServerPowerResource_ModifyPlan_UnknownServerIDForcesUnknown verifies Thread A
 // (P1): an UNKNOWN planned server_id (derived from another resource's not-yet-known
 // output) cannot be proven equal, so ModifyPlan treats it as a potential
