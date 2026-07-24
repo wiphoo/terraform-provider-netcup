@@ -184,5 +184,6 @@ func (p *netcupProvider) Resources(_ context.Context) []func() resource.Resource
 	return []func() resource.Resource{
 		NewRDNSResource,
 		NewRescueResource,
+		NewServerPowerResource,
 	}
 }
