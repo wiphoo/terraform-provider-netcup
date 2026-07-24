@@ -734,14 +734,12 @@ func (r *serverPowerResource) reconcilePendingTask(
 				resp.Diagnostics.Append(d)
 				mapLiveState = false
 			} else {
-				// Stuck past the bound: degrade to a timestamped indeterminate sentinel
-				// so the next refresh re-evaluates through the sentinel's bounded-age
-				// convergence logic rather than immediately clearing the marker and
-				// nulling state_option, which would force a corrective plan diff and
-				// resubmit a (possibly destructive) power command while the original
-				// task is still known to be non-terminal (discussion_r3641096600).
+				// Stuck past the bound but the task is confirmed non-terminal
+				// (PENDING/RUNNING) — keep the original marker so the next
+				// refresh re-checks GetTask rather than degrading or clearing,
+				// which would lose the task UUID and potentially submit a
+				// duplicate command (discussion_r3646364033).
 				server = fresh
-				state.PendingTaskID = types.StringValue(newIndeterminateMarker())
 				mapLiveState = false
 			}
 		} else {
