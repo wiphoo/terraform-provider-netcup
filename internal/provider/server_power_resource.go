@@ -734,26 +734,15 @@ func (r *serverPowerResource) reconcilePendingTask(
 				resp.Diagnostics.Append(d)
 				mapLiveState = false
 			} else {
-				// Stuck past the bound: clear the marker and reconcile from the fresh
-				// live state (mapLiveState stays true) so a never-completing op or
-				// external drift surfaces. Past defaultTaskTimeout (15m) even a same-state
-				// reboot is long over, so — as in the sentinel past-window path — we no
-				// longer withhold live mapping.
+				// Stuck past the bound: degrade to a timestamped indeterminate sentinel
+				// so the next refresh re-evaluates through the sentinel's bounded-age
+				// convergence logic rather than immediately clearing the marker and
+				// nulling state_option, which would force a corrective plan diff and
+				// resubmit a (possibly destructive) power command while the original
+				// task is still known to be non-terminal (discussion_r3641096600).
 				server = fresh
-				state.PendingTaskID = types.StringNull()
-
-				// Thread r3639343085 (P2): mirror the terminal-FAILURE branch for a
-				// SAME-STATE op. A stuck RESET/POWERCYCLE reconciled from a RUNNING refetch
-				// leaves BOTH state = ON and state_option = RESET (== config), so Terraform
-				// would report NO drift and the possibly-never-executed reboot would never
-				// be retried — and a later refresh that catches the still-running task in
-				// SHUTOFF could even record OFF and trigger an unwanted reboot. BLANK
-				// state_option to force a corrective plan diff (null → RESET re-runs Update
-				// and re-issues the reboot), exactly as the failed-same-state path does.
-				// NON-same-state ops already surface via the live-state reconcile above.
-				if sameState {
-					state.StateOption = types.StringNull()
-				}
+				state.PendingTaskID = types.StringValue(newIndeterminateMarker())
+				mapLiveState = false
 			}
 		} else {
 			mapLiveState = false

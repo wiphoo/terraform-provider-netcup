@@ -1074,11 +1074,13 @@ func TestServerPowerResource_Read_PendingNonTerminalKeepsDesired(t *testing.T) {
 }
 
 // TestServerPowerResource_Read_PendingNonTerminalStuckPastTimeoutReconciles
-// verifies thread r3638659469 (P2): a wait=false task left non-terminal (RUNNING)
-// far longer than defaultTaskTimeout is treated as STUCK — Read stops retaining the
-// marker, refetches live, and reconciles from it so drift surfaces. Here the task
-// started 16m ago (> 15m bound) and the live server is now SHUTOFF (never powered on,
-// or externally stopped), so desired ON is reconciled to OFF and the marker cleared.
+// verifies thread r3638659469 (P2) refined by discussion_r3641096600: a wait=false
+// task left non-terminal (RUNNING) far longer than defaultTaskTimeout is treated as
+// STUCK — but instead of immediately clearing the marker + reconciling from live
+// (which would force a corrective plan diff), Read degrades the marker to a
+// timestamped indeterminate sentinel so the next refresh re-evaluates through the
+// sentinel's bounded-age convergence logic. This avoids resubmitting a (possibly
+// destructive) power command while the original task is still known to be running.
 func TestServerPowerResource_Read_PendingNonTerminalStuckPastTimeoutReconciles(t *testing.T) {
 	startedAt := time.Now().Add(-defaultTaskTimeout - time.Minute).UTC().Format(time.RFC3339Nano)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1122,21 +1124,22 @@ func TestServerPowerResource_Read_PendingNonTerminalStuckPastTimeoutReconciles(t
 	}
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	if !result.PendingTaskID.IsNull() {
-		t.Errorf("PendingTaskID = %q, want null (stuck non-terminal task cleared past defaultTaskTimeout)", result.PendingTaskID.ValueString())
+	if result.PendingTaskID.IsNull() || !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
+		t.Errorf("PendingTaskID = %q, want indeterminate sentinel (stuck non-terminal task degraded to sentinel instead of clearing, per discussion_r3641096600)", result.PendingTaskID.ValueString())
 	}
-	if result.State.ValueString() != "OFF" {
-		t.Errorf("State = %q, want OFF (drift surfaced from live SHUTOFF once the task timed out)", result.State.ValueString())
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired state retained through sentinel, not yet reconciled from live)", result.State.ValueString())
 	}
 }
 
 // TestServerPowerResource_Read_PendingNonTerminalStuckSameStateSurfacesDrift
-// verifies thread r3639343085 (P2): when a same-state RESET task is stuck non-terminal
-// past defaultTaskTimeout and the refetched server is RUNNING (== desired ON),
-// clearing only the marker would leave state=ON and state_option=RESET both equal to
-// config — so Terraform would report no drift and the possibly-never-executed reboot
-// would never be retried. Read must instead BLANK state_option (mirroring the
-// terminal-failure branch) to force a corrective null→RESET plan diff.
+// verifies thread r3639343085 (P2) refined by discussion_r3641096600: when a
+// same-state RESET task is stuck non-terminal past defaultTaskTimeout and the
+// refetched server is RUNNING (== desired ON), instead of immediately blanking
+// state_option to force a corrective plan diff (potentially resubmitting a
+// destructive reboot while the original task is still running), Read degrades
+// the marker to a timestamped indeterminate sentinel that retains state_option
+// and lets the sentinel's bounded-age window expire naturally before reconciling.
 func TestServerPowerResource_Read_PendingNonTerminalStuckSameStateSurfacesDrift(t *testing.T) {
 	startedAt := time.Now().Add(-defaultTaskTimeout - time.Minute).UTC().Format(time.RFC3339Nano)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1182,15 +1185,17 @@ func TestServerPowerResource_Read_PendingNonTerminalStuckSameStateSurfacesDrift(
 	}
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	if !result.PendingTaskID.IsNull() {
-		t.Errorf("PendingTaskID = %q, want null (stuck marker cleared past defaultTaskTimeout)", result.PendingTaskID.ValueString())
+	if result.PendingTaskID.IsNull() || !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
+		t.Errorf("PendingTaskID = %q, want indeterminate sentinel (stuck same-state marker degraded to sentinel instead of clearing, per discussion_r3641096600)", result.PendingTaskID.ValueString())
 	}
 	if result.State.ValueString() != "ON" {
-		t.Errorf("State = %q, want ON (state keeps meaning live power state)", result.State.ValueString())
+		t.Errorf("State = %q, want ON (state unchanged, drift not forced)", result.State.ValueString())
 	}
-	// state_option blanked so config RESET vs stored null yields a corrective diff.
-	if !result.StateOption.IsNull() {
-		t.Errorf("StateOption = %q, want null (blanked to surface the stuck same-state reboot)", result.StateOption.ValueString())
+	// state_option preserved (not blanked) — the sentinel's convergence window absorbs
+	// the check and expires naturally, avoiding an immediate resubmission of the
+	// (possibly destructive) reboot command (discussion_r3641096600).
+	if result.StateOption.ValueString() != "RESET" {
+		t.Errorf("StateOption = %q, want RESET (state_option preserved, not blanked)", result.StateOption.ValueString())
 	}
 }
 
@@ -1251,12 +1256,14 @@ func TestServerPowerResource_Read_PendingNonTerminalWithinTimeoutRetains(t *test
 }
 
 // TestServerPowerResource_Read_PendingQueuedNeverStartedStuckReconciles verifies
-// thread r3639673890 (P2): a wait=false task stuck in PENDING with StartedAt nil
-// (never started) is bounded by the marker's persisted first-seen (acceptance) time,
-// NOT StartedAt. Here the marker was accepted 16m ago (> 15m defaultTaskTimeout) and
-// the task is still PENDING with no startedAt, so Read treats it as stuck — the
-// StartedAt-only bound could never expire it — refetches live (SHUTOFF) and reconciles
-// desired OFF to OFF... here desired is ON so the never-run command surfaces as OFF.
+// thread r3639673890 (P2) refined by discussion_r3641096600: a wait=false task stuck
+// in PENDING with StartedAt nil (never started) is bounded by the marker's persisted
+// first-seen (acceptance) time. Here the marker was accepted 16m ago (> 15m
+// defaultTaskTimeout) and the task is still PENDING with no startedAt, so Read treats
+// it as stuck — the StartedAt-only bound could never expire it — but instead of
+// immediately clearing the marker + reconciling from live, Read degrades to a
+// timestamped indeterminate sentinel so the next refresh re-evaluates through the
+// sentinel's bounded-age logic rather than immediately resubmitting a command.
 func TestServerPowerResource_Read_PendingQueuedNeverStartedStuckReconciles(t *testing.T) {
 	// Real-task marker (uuid + "@" + unixnano) first-seen 16m ago.
 	marker := "task-queued" + indeterminateMarkerSep + strconv.FormatInt(time.Now().Add(-defaultTaskTimeout-time.Minute).UnixNano(), 10)
@@ -1302,11 +1309,11 @@ func TestServerPowerResource_Read_PendingQueuedNeverStartedStuckReconciles(t *te
 	}
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	if !result.PendingTaskID.IsNull() {
-		t.Errorf("PendingTaskID = %q, want null (indefinitely-queued task expired via acceptance time)", result.PendingTaskID.ValueString())
+	if result.PendingTaskID.IsNull() || !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
+		t.Errorf("PendingTaskID = %q, want indeterminate sentinel (indefinitely-queued task degraded to sentinel instead of clearing, per discussion_r3641096600)", result.PendingTaskID.ValueString())
 	}
-	if result.State.ValueString() != "OFF" {
-		t.Errorf("State = %q, want OFF (never-run command surfaced from live SHUTOFF once the acceptance timeout elapsed)", result.State.ValueString())
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired state retained through sentinel, not yet reconciled from live)", result.State.ValueString())
 	}
 }
 
