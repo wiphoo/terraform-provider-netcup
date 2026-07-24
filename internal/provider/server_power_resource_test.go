@@ -1427,8 +1427,11 @@ func TestServerPowerResource_Read_PendingTerminalReconciles(t *testing.T) {
 }
 
 // TestServerPowerResource_Read_PendingTerminalReconcilesDrift verifies the
-// terminal-task path also surfaces DRIFT: desired ON but the task finished and
-// the live state is SHUTOFF ⇒ Read maps to OFF so Terraform proposes a fix.
+// terminal-task path when FinishedAt is absent: desired ON but the task finished
+// and the live state is SHUTOFF. Without a completion timestamp we cannot
+// distinguish propagation lag from genuine drift, so Read degrades to a
+// timestamped indeterminate sentinel (discussion_r3646310296) — the sentinel's
+// bounded window will resolve the ambiguity on the next refresh.
 func TestServerPowerResource_Read_PendingTerminalReconcilesDrift(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1471,11 +1474,11 @@ func TestServerPowerResource_Read_PendingTerminalReconcilesDrift(t *testing.T) {
 	}
 	var result serverPowerResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &result)...)
-	if result.State.ValueString() != "OFF" {
-		t.Errorf("State = %q, want OFF (drift surfaced from live SHUTOFF after terminal task)", result.State.ValueString())
+	if result.State.ValueString() != "ON" {
+		t.Errorf("State = %q, want ON (desired retained through sentinel since FinishedAt is absent)", result.State.ValueString())
 	}
-	if !result.PendingTaskID.IsNull() {
-		t.Errorf("PendingTaskID = %q, want null", result.PendingTaskID.ValueString())
+	if result.PendingTaskID.IsNull() || !isIndeterminateMarker(result.PendingTaskID.ValueString()) {
+		t.Errorf("PendingTaskID = %q, want indeterminate sentinel (degraded from finished marker)", result.PendingTaskID.ValueString())
 	}
 }
 

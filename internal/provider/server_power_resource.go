@@ -785,9 +785,11 @@ func (r *serverPowerResource) reconcilePendingTask(
 			// either propagation lag or genuine drift — bound the ambiguity by the
 			// task's own FinishedAt: within powerPropagationWindow, treat it as lag
 			// and RETAIN the marker + KEEP the desired state (map nothing); once
-			// the window elapses (or FinishedAt is absent), treat the mismatch as
-			// GENUINE drift and reconcile from the live state (so a real
-			// externally-stopped server still surfaces), clearing the marker.
+			// the window elapses, treat the mismatch as GENUINE drift (known
+			// completion time ⇒ the server should have converged). When FinishedAt
+			// is absent, degrade to a timestamped indeterminate sentinel so the
+			// next refresh absorbs propagation lag through the sentinel's bounded
+			// logic (discussion_r3646310296).
 			// Mirrors rescue's bounded post-terminal propagation handling.
 			server = fresh
 			// Thread B (P1) correction to 25afe91: for BOTH same-state and
@@ -802,7 +804,8 @@ func (r *serverPowerResource) reconcilePendingTask(
 			//   converged (fresh live == desired) ⇒ clear + reconcile;
 			//   mismatch within powerPropagationWindow of FinishedAt ⇒ RETAIN the
 			//     marker + keep the desired state (map nothing) — propagation lag;
-			//   past the window (or no FinishedAt) ⇒ clear + reconcile (genuine drift).
+			//   past the window ⇒ clear + reconcile (genuine drift).
+			//   no FinishedAt + not converged ⇒ degrade to sentinel (unknown completion).
 			//
 			// This reconciles with the round-1 same-state intent: FINISHED is
 			// REQUIRED to clear a same-state marker (a bare live-RUNNING without a
@@ -812,15 +815,23 @@ func (r *serverPowerResource) reconcilePendingTask(
 			// longer changes THIS branch's clear/retain decision (the window logic is
 			// identical for both); it still governs the FAILURE branch below.
 			converged := liveConfirmsDesired(fresh, state.State.ValueString())
-			withinWindow := task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow
-			if converged || !withinWindow {
-				// Converged (live matches desired) or past the propagation window
-				// (treat mismatch as genuine drift): clear the marker and reconcile
-				// from the fresh live state below.
+			if task.FinishedAt != nil && time.Since(*task.FinishedAt) <= powerPropagationWindow && !converged {
+				// Still mismatched but within the propagation window: live state
+				// is still converging post-FINISHED. Retain the marker and keep
+				// the desired state (do not map) so the next refresh retries.
+				mapLiveState = false
+			} else if converged || task.FinishedAt != nil {
+				// Converged, or past the window with a known FinishedAt (genuine
+				// drift): clear the marker and reconcile from the live state.
 				state.PendingTaskID = types.StringNull()
 			} else {
-				// Still mismatched but within the window: propagation is in flight.
-				// Retain the marker and keep the desired state (do not map).
+				// FINISHED but FinishedAt absent and not yet converged: SCP may
+				// have omitted the completion timestamp; degrade to a timestamped
+				// indeterminate sentinel so the next refresh absorbs propagation
+				// lag through the sentinel's bounded-age window rather than
+				// immediately clearing and recording a stale intermediate state
+				// as drift (discussion_r3646310296).
+				state.PendingTaskID = types.StringValue(newIndeterminateMarker())
 				mapLiveState = false
 			}
 		} else {
