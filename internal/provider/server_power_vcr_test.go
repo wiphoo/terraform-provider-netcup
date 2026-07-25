@@ -12,6 +12,10 @@ import (
 )
 
 func TestServerPowerResource_VCRCreate(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("ON power cassette is a hand-authored fixture; recording sends a live ON command with no UUID redaction")
+	}
+
 	const cassetteName = "TestServerPowerResource_VCRCreate"
 	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
@@ -129,6 +133,10 @@ func TestServerPowerResource_VCRRead(t *testing.T) {
 }
 
 func TestServerPowerResource_VCRReadSuspended(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("SUSPENDED cassette is a hand-authored fixture; recording requires the server to be in SUSPENDED state")
+	}
+
 	const cassetteName = "TestServerPowerResource_VCRReadSuspended"
 	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
