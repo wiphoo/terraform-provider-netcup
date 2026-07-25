@@ -1,0 +1,50 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1681695467/imageflavours
+    method: GET
+  response:
+    body: '[{"alias":"Minimal","id":1465480614,"image":{"id":1380956033,"name":"server-aa26b363"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"Minimal","id":949084823,"image":{"id":1817062080,"name":"server-6849ae56"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":1720175140,"image":{"id":783650547,"name":"server-7ed696f1"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":1324611346,"image":{"id":115389621,"name":"server-020d7007"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"Minimal","id":783650547,"image":{"id":1981590762,"name":"server-e9082d17"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":2130036589,"image":{"id":1274511773,"name":"server-d40bfbb3"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":1250086833,"image":{"id":1354217128,"name":"server-07b64300"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":1195966621,"image":{"id":91776803,"name":"server-47e69c85"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":1120405480,"image":{"id":2107032402,"name":"server-7bdc807c"},"name":"server-57e63944","text":"Minimal
+      image"},{"alias":"Minimal","id":741790834,"image":{"id":2130036589,"name":"server-f363b765"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":1234572639,"image":{"id":1842830807,"name":"server-082ed39e"},"name":"server-57e63944","text":"Minimal"},{"alias":"Minimal","id":1107246423,"image":{"id":1765741825,"name":"server-b1164e1d"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":68988143,"image":{"id":1561852450,"name":"server-bd02f2c3"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":2013772621,"image":{"id":1534516657,"name":"server-15cd608d"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"minimal","id":729743613,"image":{"id":2105666430,"name":"server-5bdb1c25"},"name":"server-57e63944","text":"Minimal"},{"alias":"Minimal","id":523354969,"image":{"id":31902648,"name":"server-f87bea04"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"Minimal","id":527567261,"image":{"id":1820305088,"name":"server-d33c02df"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":434251152,"image":{"id":131068878,"name":"server-64823a28"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":441556213,"image":{"id":1809801137,"name":"server-6a06f259"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"minimal","id":25092853,"image":{"id":303164574,"name":"server-e48ef166"},"name":"server-57e63944","text":"Minimal"},{"alias":"Minimal","id":131068878,"image":{"id":779581482,"name":"server-bfc8b461"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":106830628,"image":{"id":915843672,"name":"server-d3484a33"},"name":"server-57e63944","text":"minimal
+      system with ssh preinstalled"},{"alias":"Minimal","id":110805789,"image":{"id":783187249,"name":"server-e9bb8197"},"name":"server-57e63944","text":"Minimal
+      image"},{"alias":"Minimal","id":1311229633,"image":{"id":101173669,"name":"server-908e21f9"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"Minimal","id":1617765436,"image":{"id":1893921477,"name":"server-5d6bef96"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"Minimal","id":319995149,"image":{"id":179694983,"name":"server-ee8102aa"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"Minimal","id":88800823,"image":{"id":2057362838,"name":"server-3e740c88"},"name":"server-57e63944","text":"Minimal
+      installation"},{"alias":"Minimal","id":2089188874,"image":{"id":930936440,"name":"server-55fe1724"},"name":"server-57e63944","text":"Minimal
+      installation"}]'
+    headers:
+      Content-Length:
+      - "3782"
+      Content-Type:
+      - application/json
+      Date:
+      - Sat, 25 Jul 2026 03:53:55 GMT
+      X-Frame-Options:
+      - SAMEORIGIN
+    status: 200 OK
+    code: 200
+    duration: ""

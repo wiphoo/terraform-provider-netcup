@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 	vcr "github.com/wiphoo/terraform-provider-netcup/tests/vcr"
@@ -48,6 +49,44 @@ func configureServersDataSource(t *testing.T, client *netcup.Client) (datasource
 func configureServerDataSource(t *testing.T, client *netcup.Client) (datasource.DataSourceWithConfigure, datasource.SchemaResponse) {
 	t.Helper()
 	return configureDataSource(t, NewServerDataSource().(datasource.DataSourceWithConfigure), client)
+}
+
+func configureServerImagesDataSource(t *testing.T, client *netcup.Client) (datasource.DataSourceWithConfigure, datasource.SchemaResponse) {
+	t.Helper()
+	return configureDataSource(t, NewServerImagesDataSource().(datasource.DataSourceWithConfigure), client)
+}
+
+func configureServerSnapshotsDataSource(t *testing.T, client *netcup.Client) (datasource.DataSourceWithConfigure, datasource.SchemaResponse) {
+	t.Helper()
+	return configureDataSource(t, NewServerSnapshotsDataSource().(datasource.DataSourceWithConfigure), client)
+}
+
+func configureServerPowerResourceVCR(t *testing.T, client *netcup.Client) (resource.ResourceWithConfigure, resource.SchemaResponse) {
+	t.Helper()
+	ctx := context.Background()
+	r := NewServerPowerResource().(resource.ResourceWithConfigure)
+	var configResp resource.ConfigureResponse
+	r.Configure(ctx, resource.ConfigureRequest{ProviderData: client}, &configResp)
+	if configResp.Diagnostics.HasError() {
+		t.Fatalf("Configure() unexpected diagnostics: %v", configResp.Diagnostics.Errors())
+	}
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	return r, schemaResp
+}
+
+func configureRescueResourceVCR(t *testing.T, client *netcup.Client) (resource.ResourceWithConfigure, resource.SchemaResponse) {
+	t.Helper()
+	ctx := context.Background()
+	r := NewRescueResource().(resource.ResourceWithConfigure)
+	var configResp resource.ConfigureResponse
+	r.Configure(ctx, resource.ConfigureRequest{ProviderData: client}, &configResp)
+	if configResp.Diagnostics.HasError() {
+		t.Fatalf("Configure() unexpected diagnostics: %v", configResp.Diagnostics.Errors())
+	}
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	return r, schemaResp
 }
 
 // configureDataSource runs the Configure→check-diagnostics→Schema boilerplate

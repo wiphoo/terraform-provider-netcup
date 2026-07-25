@@ -1,0 +1,37 @@
+---
+version: 1
+interactions:
+- request:
+    body: '{"state":"ON"}'
+    form: {}
+    headers:
+      Accept:
+      - application/json
+      Content-Type:
+      - application/merge-patch+json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1681695467
+    method: PATCH
+  response:
+    body: '{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"SetServerState","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 202 Accepted
+    code: 202
+    duration: ""
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+    method: GET
+  response:
+    body: '{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"SetServerState","state":"FINISHED","startedAt":"2026-07-17T10:00:00Z","finishedAt":"2026-07-17T10:00:25Z","executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-07-17T10:00:25Z","progressInPercent":100},"result":{"state":"ON"},"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""
