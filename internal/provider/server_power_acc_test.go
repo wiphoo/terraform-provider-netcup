@@ -1,11 +1,14 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 func TestAccServerPowerResource(t *testing.T) {
@@ -18,7 +21,7 @@ func TestAccServerPowerResource(t *testing.T) {
 		t.Skip("NETCUP_TEST_SERVER_ID not set")
 	}
 
-	resource.ParallelTest(t, resource.TestCase{
+	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactory(),
 		Steps: []resource.TestStep{
 			{
@@ -52,7 +55,33 @@ func TestAccServerPowerResource_OffAndOn(t *testing.T) {
 		t.Skip("NETCUP_TEST_SERVER_ID not set")
 	}
 
-	resource.ParallelTest(t, resource.TestCase{
+	// The serverPowerResource Delete is intentionally a no-op, so if this
+	// test stalls or fails midway through the OFF step the shared
+	// acceptance-test server stays powered off. Register a cleanup that
+	// unconditionally powers it back ON before exiting.
+	id, err := parseServerID(serverID)
+	if err != nil {
+		t.Fatalf("invalid NETCUP_TEST_SERVER_ID %q: %v", serverID, err)
+	}
+	cleanupClient := netcup.New(
+		netcup.WithAccessToken(os.Getenv("NETCUP_ACCESS_TOKEN")),
+	)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultTaskTimeout)
+	t.Cleanup(func() {
+		defer cancel()
+		task, cErr := cleanupClient.SetPowerState(cleanupCtx, id, netcup.PowerOn, "")
+		if cErr != nil {
+			t.Errorf("cleanup SetPowerState(ON) failed: %v", cErr)
+			return
+		}
+		if task != nil {
+			if _, wErr := cleanupClient.WaitForTask(cleanupCtx, task.UUID); wErr != nil {
+				t.Errorf("cleanup WaitForTask after power-on failed: %v", wErr)
+			}
+		}
+	})
+
+	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactory(),
 		Steps: []resource.TestStep{
 			{

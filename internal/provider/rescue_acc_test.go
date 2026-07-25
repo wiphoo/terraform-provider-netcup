@@ -18,7 +18,7 @@ func TestAccRescueResource(t *testing.T) {
 		t.Skip("NETCUP_TEST_SERVER_ID not set")
 	}
 
-	resource.ParallelTest(t, resource.TestCase{
+	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactory(),
 		Steps: []resource.TestStep{
 			{
