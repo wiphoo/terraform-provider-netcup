@@ -66,8 +66,8 @@ func TestAccServerPowerResource_OffAndOn(t *testing.T) {
 	cleanupClient := netcup.New(
 		netcup.WithAccessToken(os.Getenv("NETCUP_ACCESS_TOKEN")),
 	)
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultTaskTimeout)
 	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultTaskTimeout)
 		defer cancel()
 		task, cErr := cleanupClient.SetPowerState(cleanupCtx, id, netcup.PowerOn, "")
 		if cErr != nil {

@@ -12,6 +12,10 @@ import (
 )
 
 func TestRescueResource_VCRActive(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("active rescue cassette is a hand-authored fixture; recording requires enabling rescue mode (reboot)")
+	}
+
 	const cassetteName = "TestRescueResource_VCRActive"
 	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()

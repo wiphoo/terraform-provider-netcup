@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"testing"
 
@@ -49,6 +50,10 @@ func TestServerPowerResource_VCRCreate(t *testing.T) {
 }
 
 func TestServerPowerResource_VCRCreateWithPowerOff(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("power-off cassette is a hand-authored fixture; recording sends a live OFF command with no power-on cleanup")
+	}
+
 	const cassetteName = "TestServerPowerResource_VCRCreateWithPowerOff"
 	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()

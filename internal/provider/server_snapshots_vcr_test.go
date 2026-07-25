@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"testing"
 
@@ -10,6 +11,10 @@ import (
 )
 
 func TestServerSnapshotsDataSource(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("snapshots cassette is a hand-authored fixture; snapshot UUIDs have no redaction rule, mirroring the SDK-level TestListSnapshots")
+	}
+
 	const cassetteName = "TestServerSnapshotsDataSource"
 	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
