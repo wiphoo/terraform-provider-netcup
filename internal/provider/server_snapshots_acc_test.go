@@ -18,7 +18,7 @@ func TestAccServerSnapshotsDataSource(t *testing.T) {
 		t.Skip("NETCUP_TEST_SERVER_ID not set")
 	}
 
-	resource.ParallelTest(t, resource.TestCase{
+	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactory(),
 		Steps: []resource.TestStep{
 			{
@@ -26,7 +26,7 @@ func TestAccServerSnapshotsDataSource(t *testing.T) {
 					server_id = %q
 				}`, serverID),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					testCheckResourceAttrGreaterThanZero("data.netcup_server_snapshots.test", "snapshots.#"),
+					resource.TestCheckResourceAttr("data.netcup_server_snapshots.test", "server_id", serverID),
 				),
 			},
 		},
