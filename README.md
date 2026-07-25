@@ -10,11 +10,12 @@ and other Netcup APIs planned in later releases.
 
 ## Status
 
-**v0.3.0 — netcupctl operations are available.**
+**v0.4.0 — Terraform provider operations are available.**
 
 The `netcupctl` CLI, shared Go SDK, CI, and release automation shipped in v0.1.0.
 The Terraform provider (data sources, rDNS resource, examples, and docs) shipped in v0.2.0 on top of the same SDK.
 v0.3.0 adds `netcupctl` operations: power state management, rescue mode, and image/snapshot listing.
+v0.4.0 brings those operations to the Terraform provider: `netcup_server_power`, `netcup_server_rescue`, `netcup_server_images`, and `netcup_server_snapshots`.
 
 See the [Roadmap](docs/ROADMAP.md) for the full release plan.
 
@@ -203,15 +204,24 @@ export NETCUP_REFRESH_TOKEN="..."   # pre-issued; optional when using auth login
 Treat the refresh token like a password: it can mint new access tokens without
 another browser approval. Never log or commit tokens.
 
-## Terraform provider (v0.2.0 — available)
+## Terraform provider (v0.4.0 — available)
 
 The Terraform provider is built on the same Go SDK as `netcupctl` and ships in
-v0.2.0. See [examples/](examples/) for ready-to-use configurations:
+v0.2.0 (data sources and rDNS), with provider power/rescue/images/snapshots
+support added in v0.4.0. See [examples/](examples/) for ready-to-use configurations:
 
-- [Provider configuration](examples/provider.tf)
-- [netcup_servers data source](examples/servers.tf)
-- [netcup_server data source](examples/server.tf)
-- [netcup_rdns resource](examples/rdns.tf)
+### Resources
+
+- [netcup_rdns resource](examples/rdns.tf) — manage reverse DNS (v0.2.0)
+- [netcup_server_power resource](examples/server_power.tf) — manage power state (v0.4.0)
+- [netcup_server_rescue resource](examples/server_rescue.tf) — manage rescue system (v0.4.0)
+
+### Data Sources
+
+- [netcup_servers data source](examples/servers.tf) — list servers (v0.2.0)
+- [netcup_server data source](examples/server.tf) — get server details (v0.2.0)
+- [netcup_server_images data source](examples/server_images.tf) — list installable images (v0.4.0)
+- [netcup_server_snapshots data source](examples/server_snapshots.tf) — list snapshots (v0.4.0)
 
 ```hcl
 terraform {
@@ -285,7 +295,45 @@ terraform plan -var 'server_id=123456'
 
 # Manage a PTR record for an IP you own.
 terraform plan -var 'rdns_ip_address=203.0.113.10' -var 'rdns_hostname=host.example.com'
+
+# Manage power state (v0.4.0; see risk table below).
+terraform plan -var 'server_id=123456' -var 'power_state=OFF'
+
+# Manage rescue mode (v0.4.0; reboots the server).
+terraform plan -var 'server_id=123456'
 ```
+
+### Provider operational risk & downtime
+
+The Terraform provider exposes the same power and rescue operations as
+`netcupctl`, with the same downtime profile. Additionally, the Terraform
+lifecycle introduces specific failure modes:
+
+| Resource | Operation | Downtime | Notes |
+|----------|-----------|----------|-------|
+| `netcup_server_power` | Creating / updating to `OFF` or `SUSPENDED` | **Yes** | Server goes offline until changed back to `ON` |
+| `netcup_server_power` | Creating / updating to `ON` | No | — |
+| `netcup_server_power` | **Destroy** | **No** | **No-op.** The resource is removed from state but the server is NOT powered off. This is a deliberate safety measure — see the resource description. |
+| `netcup_server_power` | `state_option = "POWEROFF"` (hard off) | **Yes** | Forced poweroff, no guest OS shutdown |
+| `netcup_server_power` | `state_option = "RESET"` / `"POWERCYCLE"` (reboot) | **Yes** | Brief outage during reboot |
+| `netcup_server_rescue` | Create (enable) | **Yes** | **Reboots** into rescue environment |
+| `netcup_server_rescue` | Destroy (disable) | **Yes** | **Reboots** back to normal OS |
+| `netcup_server_images` / `netcup_server_snapshots` | Read | No | Read-only data sources |
+
+Key semantics:
+
+- **`wait` attribute** — defaults to `true`. When true, the resource blocks
+  `terraform apply` until the underlying async SCP task reaches a terminal state
+  (FINISHED, ERROR, or canceled). Set `wait = false` to fire-and-forget the
+  command and return immediately; the resource retains the task UUID so a
+  subsequent refresh can reconcile.
+- **Destroy is not power-off.** Deleting `netcup_server_power` from your
+  configuration or running `terraform destroy` only removes the resource from
+  state — it does not change the server's power state. To explicitly power a
+  server off, set `state = "OFF"` instead.
+- **Rescue enable/disable both reboot.** Creating `netcup_server_rescue`
+  enables rescue mode (reboot), and destroying it disables rescue mode (another
+  reboot). Consider the downtime budget before applying rescue changes.
 
 ## Design principles
 
