@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 
@@ -63,9 +64,26 @@ func TestAccServerPowerResource_OffAndOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invalid NETCUP_TEST_SERVER_ID %q: %v", serverID, err)
 	}
-	cleanupClient := netcup.New(
-		netcup.WithAccessToken(os.Getenv("NETCUP_ACCESS_TOKEN")),
-	)
+	cleanupAPIEndpoint := os.Getenv("NETCUP_API_ENDPOINT")
+	if cleanupAPIEndpoint == "" {
+		cleanupAPIEndpoint = netcup.DefaultAPIEndpoint
+	}
+	cleanupOIDCEndpoint := os.Getenv("NETCUP_OIDC_ENDPOINT")
+	if cleanupOIDCEndpoint == "" {
+		cleanupOIDCEndpoint = netcup.DefaultOIDCEndpoint
+	}
+	cleanupOpts := []netcup.Option{
+		netcup.WithAPIEndpoint(cleanupAPIEndpoint),
+		netcup.WithOIDCEndpoint(cleanupOIDCEndpoint),
+	}
+	cleanupAccessToken := os.Getenv("NETCUP_ACCESS_TOKEN")
+	cleanupRefreshToken := os.Getenv("NETCUP_REFRESH_TOKEN")
+	var cleanupExpiry time.Time
+	if p, err := netcup.ParseAccessTokenExpiry(cleanupAccessToken); err == nil {
+		cleanupExpiry = p
+	}
+	cleanupTokenSource := netcup.NewTokenSource(netcup.New(cleanupOpts...), cleanupAccessToken, cleanupRefreshToken, cleanupExpiry)
+	cleanupClient := netcup.New(append(cleanupOpts, netcup.WithTokenSource(cleanupTokenSource))...)
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultTaskTimeout)
 		defer cancel()
