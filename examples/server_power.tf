@@ -4,11 +4,11 @@
 # Destroying this resource is a no-op — it does NOT power the server off
 # (state-only removal).
 #
-# This example is opt-in: it is skipped unless you supply a real server ID, so
-# a bare `terraform plan` does not fail on an account that lacks a placeholder
-# server. Enable it with:
+# This example is opt-in: it is skipped unless you supply a real server ID
+# and a desired power state, so a bare `terraform plan` does not fail on an
+# account that lacks a placeholder server. Enable it with:
 #
-#   terraform plan -var 'server_id=123456'
+#   terraform plan -var 'server_id=123456' -var 'power_state=ON'
 #
 # To set a specific state:
 #

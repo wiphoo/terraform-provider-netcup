@@ -300,7 +300,7 @@ terraform plan -var 'rdns_ip_address=203.0.113.10' -var 'rdns_hostname=host.exam
 terraform plan -var 'server_id=123456' -var 'power_state=OFF'
 
 # Manage rescue mode (v0.4.0; reboots the server).
-terraform plan -var 'server_id=123456'
+terraform plan -var 'server_id=123456' -var 'rescue_enable=true'
 ```
 
 ### Provider operational risk & downtime
