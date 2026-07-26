@@ -77,7 +77,7 @@ Scope:
 
 Power and rescue features must document downtime and operational risk.
 
-## v0.4.0 - Operations (Terraform provider)
+## v0.4.0 - Operations (Terraform provider) (shipped)
 
 Scope:
 

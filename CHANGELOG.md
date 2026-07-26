@@ -24,6 +24,31 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-25
+
+### Added
+
+- **Terraform provider operations (v0.4.0 milestone).** Provider resources and
+  data sources for power, rescue, images, and snapshots, mirroring the v0.3.0
+  CLI operations:
+  - `netcup_server_power` resource — manage a server's power state (`ON`/`OFF`/
+    `SUSPENDED`). Delete is a documented no-op (state-only removal). Supports
+     `state_option` for reboot (`POWERCYCLE`) and hard variants (`POWEROFF`, `RESET`) and
+    `wait` for async task polling.
+  - `netcup_server_rescue` resource — enable and disable the rescue system.
+    Both operations reboot the server. Reads back the sensitive rescue password
+    after enable.
+  - `netcup_server_images` data source — list image flavours installable on
+    a server.
+  - `netcup_server_snapshots` data source — list a server's snapshots.
+  - go-vcr replay cassettes covering the new provider surface with the same
+    deterministic PII redaction as the SDK tier.
+  - Acceptance tests for all four resources/data sources, gated by `TF_ACC`.
+  - Documented downtime and operational-risk guidance for power and rescue
+    resources in the README, with the no-power-off-on-destroy semantics called
+    out prominently.
+  - Examples for all four resources/data sources under `examples/`.
+
 ## [0.3.0] - 2026-07-21
 
 ### Added
@@ -83,7 +108,8 @@ Initial release: `netcupctl` CLI, shared Go SDK, CI, and release automation.
 See the
 [v0.1.0 release notes](https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0
