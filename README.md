@@ -312,7 +312,7 @@ lifecycle introduces specific failure modes:
 | Resource | Operation | Downtime | Notes |
 |----------|-----------|----------|-------|
 | `netcup_server_power` | Creating / updating to `OFF` or `SUSPENDED` | **Yes** | Server goes offline until changed back to `ON` |
-| `netcup_server_power` | Creating / updating to `ON` | No | — |
+| `netcup_server_power` | Creating / updating to `ON` (plain, no `state_option`) | No | — |
 | `netcup_server_power` | **Destroy** | **No** | **No-op.** The resource is removed from state but the server is NOT powered off. This is a deliberate safety measure — see the resource description. |
 | `netcup_server_power` | `state_option = "POWEROFF"` (hard off) | **Yes** | Forced poweroff, no guest OS shutdown |
 | `netcup_server_power` | `state_option = "RESET"` / `"POWERCYCLE"` (reboot) | **Yes** | Brief outage during reboot |
