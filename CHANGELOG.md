@@ -33,7 +33,7 @@ This file is the human-curated companion to those release notes:
   CLI operations:
   - `netcup_server_power` resource — manage a server's power state (`ON`/`OFF`/
     `SUSPENDED`). Delete is a documented no-op (state-only removal). Supports
-    `state_option` for hard variants (`POWEROFF`, `RESET`, `POWERCYCLE`) and
+     `state_option` for reboot (`POWERCYCLE`) and hard variants (`POWEROFF`, `RESET`) and
     `wait` for async task polling.
   - `netcup_server_rescue` resource — enable and disable the rescue system.
     Both operations reboot the server. Reads back the sensitive rescue password
