@@ -8,7 +8,16 @@
 # This example is opt-in TWICE: you must supply both a real server ID AND
 # set rescue_enable to true, so a bare `terraform plan` and other examples
 # that only pass -var 'server_id=...' cannot accidentally schedule this
-# disruptive operation. Enable it with:
+# disruptive operation.
+#
+# ⚠️ IMPORTANT: Once applied with rescue_enable=true, a subsequent plan
+# THAT OMITS rescue_enable (or sets it to false) changes count from 1 to 0,
+# which schedules DESTRUCTION of the rescue resource and TRIGGERS ANOTHER
+# REBOOT to disable rescue mode. Keep rescue_enable=true in your
+# configuration for any server that should remain in rescue mode, or
+# explicitly accept the reboot when removing it.
+#
+# Enable it with:
 #
 #   terraform plan -var 'server_id=123456' -var 'rescue_enable=true'
 #
