@@ -228,12 +228,70 @@ scope here. The SDK exposes this as `ListSnapshots` and the CLI as
 
 - An **empty list is valid** (no error); non-2xx → `*APIError`.
 
+## OS install / reinstall
+
+Native OS install/reinstall for a server — the target of the v0.5.0 (CLI) and
+v0.6.0 (provider) provisioning milestones. The SDK will expose this as
+`ReinstallServer` and the CLI as `netcupctl server reinstall`.
+
+> ⚠️ **DESTRUCTIVE.** A reinstall **wipes the server** — all data on it is lost
+> and the machine is down for the duration of the install. Every mutating
+> command must warn and require confirmation (bypassable with `--force`/`--yes`),
+> mirroring the power/rescue write-ups.
+
+### Install — `POST /v1/servers/{serverId}/image`
+
+- **Content type:** `application/json` (⚠️ **not** merge-patch — unlike the
+  power-state `PATCH`; this is a plain `POST`).
+- **Request body** `ServerImageSetup`. `imageFlavourId` is **required**; every
+  other field is optional:
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `imageFlavourId` | int32 | **yes** | the image flavour to install — from `GET /v1/servers/{id}/imageflavours` (see [Image flavours](#image-flavours)) |
+| `diskName` | string | no | target disk |
+| `rootPartitionFullDiskSize` | bool | no | allocate the full disk to the root partition |
+| `hostname` | string | no | FQDN; `maxLength 255`, label/TLD pattern enforced |
+| `locale` | string | no | |
+| `timezone` | string | no | |
+| `additionalUserUsername` | string | no | pattern `^[a-z][a-z0-9_]{0,30}$` (lowercase, starts with a letter, ≤31 chars) |
+| `additionalUserPassword` | string | no | `minLength 8`, must contain upper + lower + digit (pattern `^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9!-~]{8,}$`) |
+| `sshKeyIds` | []int32 | no | references to existing SSH keys (the `ssh-keys` endpoint), not inline public keys |
+| `sshPasswordAuthentication` | bool | no | enable SSH password auth |
+| `customScript` | string | no | native netcup **post-install bootstrap** script |
+| `emailToExecutingUser` | bool | no | email the executing user on completion |
+
+- **Responses:** `202 TaskInfo` ("Server image setup successfully started") —
+  **async**; poll with `GET /v1/tasks/{uuid}`, reusing the existing `WaitForTask`
+  (`pkg/netcup/tasks.go`) for `--wait`. `422 ValidationError` on bad input. Other
+  non-2xx surface as `*APIError`.
+
+#### Install inputs (epic #99 open questions — RESOLVED by the spec)
+
+- **Image selection comes only from `imageflavours`.** `imageFlavourId` is
+  populated from `GET /v1/servers/{id}/imageflavours` (shipped v0.3.0 — reuse
+  `ListImageFlavours` / `netcupctl server images`). No new list endpoint is
+  needed.
+- **User images are NOT required for this milestone.**
+  `GET /v1/users/{userId}/images` is **not** an install input for
+  `ServerImageSetup`; it stays deferred. SSH keys are referenced by id via
+  `sshKeyIds` (the `ssh-keys` endpoint), not passed inline.
+- **`customScript` and the user/hostname/SSH fields all exist** with the types
+  above, so `customScript` folds into the SDK install options (exposed as
+  `--custom-script` / `--custom-script-file` on the CLI) rather than needing a
+  separate issue.
+
+> Confirmed against live OpenAPI `2026.0721.085458`. Recheck with
+> `curl -H 'accept: application/json' "$NETCUP_API_ENDPOINT/v1/openapi"` and
+> inspect the `POST /v1/servers/{serverId}/image` request body
+> (`ServerImageSetup`) and its responses.
+
 ## Other endpoints (for later milestones)
 
-The spec also exposes (later-milestone territory): `servers/{id}/image` (OS
-install), `servers/{id}/iso`/`isoimages`, `servers/{id}/interfaces*/firewall`,
-`servers/{id}/metrics/*`, `users/{userId}/failoverips/*`, `ssh-keys`, `vlans`.
-Not in scope through v0.3.0.
+The spec also exposes (later-milestone territory):
+`servers/{id}/iso`/`isoimages` (ISO-based install), `servers/{id}/interfaces*/firewall`,
+`servers/{id}/metrics/*`, `users/{userId}/failoverips/*`, `users/{userId}/images`
+(user images), `ssh-keys`, `vlans`. Not in scope through the current milestones.
 
 > Async task polling (`GET /v1/tasks/{uuid}`) shipped in v0.3.0 as the
 > foundation for `--wait` on the power/rescue commands; see `TaskInfo` /
