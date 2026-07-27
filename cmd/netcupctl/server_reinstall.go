@@ -48,8 +48,17 @@ func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
 	waitFlag := fs.Bool("wait", false, "poll the task to a terminal state")
 	forceFlag := fs.Bool("force", false, "skip the confirmation prompt")
 	yesFlag := fs.Bool("yes", false, "alias for --force")
-	imageFlag := fs.Int("image", 0, "imageFlavourId to install (REQUIRED)")
-	imageSet := false
+	var imageVal int32
+	var imageSet bool
+	fs.Func("image", "imageFlavourId to install (REQUIRED, must fit int32)", func(s string) error {
+		parsed, err := strconv.ParseInt(s, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid --image value %q: must be an int32", s)
+		}
+		imageVal = int32(parsed)
+		imageSet = true
+		return nil
+	})
 	hostnameFlag := fs.String("hostname", "", "hostname to set on the reinstalled server")
 	customScriptFlag := fs.String("custom-script", "", "post-install bootstrap script (inline)")
 	customScriptFileFlag := fs.String("custom-script-file", "", "post-install bootstrap script from a file ('-' for stdin)")
@@ -83,7 +92,7 @@ func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
 	}
 
 	setup := netcup.ServerImageSetup{}
-	image := int32(*imageFlag)
+	image := imageVal
 	setup.ImageFlavourID = &image
 	if *hostnameFlag != "" {
 		setup.Hostname = hostnameFlag
@@ -93,18 +102,6 @@ func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
 	}
 	if sshPasswordAuthSet {
 		setup.SSHPasswordAuthentication = sshPasswordAuthFlag
-	}
-
-	switch {
-	case *customScriptFlag != "":
-		script := *customScriptFlag
-		setup.CustomScript = &script
-	case *customScriptFileFlag != "":
-		script, err := readCustomScript(*customScriptFileFlag, in)
-		if err != nil {
-			return err
-		}
-		setup.CustomScript = &script
 	}
 
 	if !*forceFlag && !*yesFlag {
@@ -118,6 +115,18 @@ func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
 			fmt.Fprintln(errW, "Aborted; no changes made.")
 			return fmt.Errorf("aborted by user")
 		}
+	}
+
+	switch {
+	case *customScriptFlag != "":
+		script := *customScriptFlag
+		setup.CustomScript = &script
+	case *customScriptFileFlag != "":
+		script, err := readCustomScript(*customScriptFileFlag, in)
+		if err != nil {
+			return err
+		}
+		setup.CustomScript = &script
 	}
 
 	client, err := clientWithToken()
