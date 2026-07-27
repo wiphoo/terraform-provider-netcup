@@ -628,6 +628,7 @@ func TestRedactJSONBodyReinstallRequestFields(t *testing.T) {
 		"imageFlavourId": 42,
 		"additionalUserUsername": "deploybot",
 		"additionalUserPassword": "s3cr3t-user-pw",
+		"sshKeyIds": [4711, 4712],
 		"customScript": "#!/bin/sh\nexport TOKEN=abc123\ncurl https://198.51.100.7/bootstrap"
 	}`
 
@@ -648,6 +649,24 @@ func TestRedactJSONBodyReinstallRequestFields(t *testing.T) {
 	}
 	if got["customScript"] != redactedCustomScriptPlaceholder {
 		t.Errorf("customScript = %v, want %q", got["customScript"], redactedCustomScriptPlaceholder)
+	}
+	// sshKeyIds are account-scoped resource identifiers: each element must be
+	// rewritten to a synthetic id (not the real value), deterministically.
+	keys, ok := got["sshKeyIds"].([]interface{})
+	if !ok || len(keys) != 2 {
+		t.Fatalf("sshKeyIds = %v, want a 2-element array", got["sshKeyIds"])
+	}
+	for i, orig := range []float64{4711, 4712} {
+		if keys[i] == orig {
+			t.Errorf("sshKeyIds[%d] = %v, want a redacted id (not the real value)", i, keys[i])
+		}
+	}
+	// Deterministic: the same real id always maps to the same fake. Compare
+	// numerically — values are <= 2^31 so float64 (plain json.Unmarshal) is
+	// exact — to avoid %v scientific-notation formatting on large ids.
+	want0, _ := fakeServerID(json.Number("4711")).Int64()
+	if k0, ok := keys[0].(float64); !ok || k0 != float64(want0) {
+		t.Errorf("sshKeyIds[0] = %v, want deterministic fake %d", keys[0], want0)
 	}
 	// imageFlavourId is a structural identifier, not a secret: it must survive so
 	// the request stays intelligible. (Plain json.Unmarshal decodes numbers as

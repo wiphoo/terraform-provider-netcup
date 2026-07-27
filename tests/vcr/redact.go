@@ -342,6 +342,13 @@ func redactField(key string, val interface{}) interface{} {
 			return val
 		}
 		return fakeServerID(num)
+	case key == "sshKeyIds":
+		// sshKeyIds (ServerImageSetup reinstall request) is an array of
+		// account-scoped SSH-key resource ids. redactValue only rewrites a number
+		// whose own object key is "id", so array elements never reach a key-based
+		// case; fake each element here, consistent with how every other id is
+		// mapped (fakeServerID).
+		return redactNumberArray(val)
 	case key == "name":
 		s, ok := val.(string)
 		if !ok || s == "" {
@@ -389,6 +396,28 @@ func redactField(key string, val interface{}) interface{} {
 	default:
 		return val
 	}
+}
+
+// redactNumberArray maps each numeric element of an array (e.g. sshKeyIds) to a
+// synthetic id via fakeServerID; the same real value always maps to the same
+// fake. A non-array value, or a non-numeric element, passes through unchanged.
+// There is deliberately no matching scrub-guard check: a faked id is
+// structurally indistinguishable from a real one (same reason the bare "id"
+// field has no scrub assertion), so a guard could not tell synthetic from real.
+func redactNumberArray(val interface{}) interface{} {
+	arr, ok := val.([]interface{})
+	if !ok {
+		return val
+	}
+	out := make([]interface{}, len(arr))
+	for i, elem := range arr {
+		if num, ok := elem.(json.Number); ok {
+			out[i] = fakeServerID(num)
+		} else {
+			out[i] = elem
+		}
+	}
+	return out
 }
 
 // redactIPValue redacts an ipLikeKeys value, which can be a bare address
