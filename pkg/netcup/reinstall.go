@@ -32,7 +32,12 @@ type ServerImageSetup struct {
 // POST /v1/servers/{serverId}/image. DESTRUCTIVE — this wipes the server.
 // Asynchronous: a 202 returns the *TaskInfo the caller can poll with
 // WaitForTask. Non-2xx (including 422 ValidationError) surfaces as *APIError.
+//
+// ImageFlavourID is required by the SCP API; returns ErrPreDispatch when nil.
 func (c *Client) ReinstallServer(ctx context.Context, id int32, setup ServerImageSetup) (*TaskInfo, error) {
+	if setup.ImageFlavourID == nil {
+		return nil, fmt.Errorf("%w: imageFlavourId is required", ErrPreDispatch)
+	}
 	encoded, err := json.Marshal(setup)
 	if err != nil {
 		return nil, err

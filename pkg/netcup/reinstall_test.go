@@ -3,10 +3,10 @@ package netcup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -65,15 +65,8 @@ func TestReinstallServer202ReturnsTask(t *testing.T) {
 	}
 }
 
-func TestReinstallServerValidationError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = w.Write([]byte(`{"code":"VALIDATION","message":"imageFlavourId is required"}`))
-	}))
-	defer srv.Close()
-
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
+func TestReinstallServerRequiresImageFlavourID(t *testing.T) {
+	c := New(WithAccessToken("tok123"))
 	task, err := c.ReinstallServer(context.Background(), 9, ServerImageSetup{})
 	if err == nil {
 		t.Fatal("ReinstallServer() error = nil, want error")
@@ -81,12 +74,8 @@ func TestReinstallServerValidationError(t *testing.T) {
 	if task != nil {
 		t.Errorf("task = %+v, want nil on error", task)
 	}
-	apiErr, ok := err.(*APIError)
-	if !ok {
-		t.Fatalf("error type = %T, want *APIError", err)
-	}
-	if apiErr.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("StatusCode = %d, want 422", apiErr.StatusCode)
+	if !errors.Is(err, ErrPreDispatch) {
+		t.Errorf("errors.Is(err, ErrPreDispatch) = false, want true; err = %v", err)
 	}
 }
 
@@ -98,8 +87,9 @@ func TestReinstallServerInvalidIDAPIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	flavour := int32(42)
 	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
-	task, err := c.ReinstallServer(context.Background(), 999999, ServerImageSetup{})
+	task, err := c.ReinstallServer(context.Background(), 999999, ServerImageSetup{ImageFlavourID: &flavour})
 	if err == nil {
 		t.Fatal("ReinstallServer() error = nil, want error")
 	}
@@ -117,21 +107,13 @@ func TestReinstallServerInvalidIDAPIError(t *testing.T) {
 
 // TestReinstallServerEmptySetupSendsEmptyObject confirms an all-nil setup
 // marshals to {} — no fields leak into the request body.
-func TestReinstallServerEmptySetupSendsEmptyObject(t *testing.T) {
-	var gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		gotBody = strings.TrimSpace(string(b))
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(TaskInfo{UUID: "t1", State: TaskStatePending})
-	}))
-	defer srv.Close()
-
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("tok123"))
-	if _, err := c.ReinstallServer(context.Background(), 1, ServerImageSetup{}); err != nil {
-		t.Fatalf("ReinstallServer() error = %v", err)
+func TestReinstallServerEmptySetupRejectedBeforeDispatch(t *testing.T) {
+	c := New(WithAccessToken("tok123"))
+	_, err := c.ReinstallServer(context.Background(), 1, ServerImageSetup{})
+	if err == nil {
+		t.Fatal("ReinstallServer() error = nil, want pre-dispatch error")
 	}
-	if gotBody != `{}` {
-		t.Errorf("body = %q, want {}", gotBody)
+	if !errors.Is(err, ErrPreDispatch) {
+		t.Errorf("errors.Is(err, ErrPreDispatch) = false, want true; err = %v", err)
 	}
 }
