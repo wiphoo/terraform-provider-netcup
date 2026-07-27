@@ -44,6 +44,13 @@ func (f *int32SliceFlag) Set(value string) error {
 // stays parseable.
 func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
 	fs := flag.NewFlagSet("server-reinstall", flag.ContinueOnError)
+	// Route the flag parser's help/error output through the reinstall-specific
+	// usage so the advertised `server reinstall --help` path (which surfaces as
+	// flag.ErrHelp) shows the syntax, image-discovery hint, and — critically for
+	// this destructive command — the data-loss warning, rather than flag's bare
+	// default usage.
+	fs.SetOutput(errW)
+	fs.Usage = func() { usageServerReinstall(errW) }
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	waitFlag := fs.Bool("wait", false, "poll the task to a terminal state")
 	forceFlag := fs.Bool("force", false, "skip the confirmation prompt")

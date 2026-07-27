@@ -237,6 +237,24 @@ func TestServerReinstallMissingImage(t *testing.T) {
 	}
 }
 
+// TestServerReinstallHelpShowsUsage guards that the advertised
+// `server reinstall --help` path routes through usageServerReinstall — so the
+// data-loss warning and image-discovery hint appear — rather than flag's bare
+// default usage. --help is a clean exit (no error, no reinstall issued).
+func TestServerReinstallHelpShowsUsage(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if err := serverReinstall([]string{"--help"}, &out, &errBuf, nil); err != nil {
+		t.Fatalf("serverReinstall --help error = %v", err)
+	}
+	e := errBuf.String()
+	if !strings.Contains(strings.ToUpper(e), "WIPES THE SERVER") {
+		t.Errorf("--help output missing data-loss warning:\n%s", e)
+	}
+	if !strings.Contains(e, "netcupctl server images") {
+		t.Errorf("--help output missing image-discovery hint:\n%s", e)
+	}
+}
+
 func TestServerReinstallConfirmYesWipesWarning(t *testing.T) {
 	rec := &reinstallRecorder{}
 	srv := newReinstallServer(rec)
