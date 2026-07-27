@@ -90,6 +90,9 @@ func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
 	if *customScriptFlag != "" && *customScriptFileFlag != "" {
 		return fmt.Errorf("--custom-script and --custom-script-file are mutually exclusive")
 	}
+	if *customScriptFileFlag == "-" && !*forceFlag && !*yesFlag {
+		return fmt.Errorf("--custom-script-file - (stdin) requires --force or --yes because stdin is also read for the confirmation prompt")
+	}
 
 	setup := netcup.ServerImageSetup{}
 	image := imageVal
