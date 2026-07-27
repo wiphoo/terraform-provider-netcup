@@ -171,6 +171,33 @@ func TestServerReinstallCustomScriptFromStdin(t *testing.T) {
 	}
 }
 
+// TestServerReinstallStdinScriptRequiresForce guards the fix for PR #107's P2
+// review thread: with confirmation enabled, confirmAction reads stdin through a
+// bufio.Reader that can read ahead past "y\n" and discard buffered bytes, which
+// would truncate a script also piped through stdin. The command rejects that
+// combination up front rather than silently submitting a mangled customScript.
+func TestServerReinstallStdinScriptRequiresForce(t *testing.T) {
+	rec := &reinstallRecorder{}
+	srv := newReinstallServer(rec)
+	defer srv.Close()
+	setReinstallEnv(t, srv.URL)
+
+	var out, errBuf bytes.Buffer
+	// Both the confirmation answer and the script are piped through stdin — the
+	// exact ambiguous case the guard rejects.
+	in := strings.NewReader("y\n#!/bin/sh\necho hi\n")
+	err := serverReinstall([]string{"5", "--image", "42", "--custom-script-file", "-"}, &out, &errBuf, in)
+	if err == nil {
+		t.Fatal("expected an error rejecting stdin script without --force, got nil")
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error = %v, want it to mention --force", err)
+	}
+	if rec.postCalls != 0 {
+		t.Errorf("postCalls = %d, want 0 (must reject before any reinstall)", rec.postCalls)
+	}
+}
+
 func TestServerReinstallMutuallyExclusiveScriptFlags(t *testing.T) {
 	rec := &reinstallRecorder{}
 	srv := newReinstallServer(rec)
