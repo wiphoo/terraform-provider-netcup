@@ -51,6 +51,16 @@ var (
 	descriptionFieldPattern = regexp.MustCompile(`"description"\s*:\s*"([^"]*)"`)
 )
 
+// The ServerImageSetup reinstall request (POST /v1/servers/{id}/image) carries
+// secret-bearing fields the generic "password" pattern above does not catch —
+// the key names differ, so `"password"` never matches `"additionalUserPassword"`.
+// These match each field's own string form (a null/absent field is ignored).
+var (
+	additionalUserUsernameFieldPattern = regexp.MustCompile(`"additionalUserUsername"\s*:\s*"([^"]*)"`)
+	additionalUserPasswordFieldPattern = regexp.MustCompile(`"additionalUserPassword"\s*:\s*"([^"]*)"`)
+	customScriptFieldPattern           = regexp.MustCompile(`"customScript"\s*:\s*"([^"]*)"`)
+)
+
 var (
 	_, fakeIPv4CIDR, _ = net.ParseCIDR("203.0.113.0/24")
 	_, fakeIPv6CIDR, _ = net.ParseCIDR("2001:db8::/32")
@@ -111,6 +121,7 @@ func TestCassettesAreScrubbed(t *testing.T) {
 					checkUsernamesAreSynthetic(t, body)
 					checkPasswordsAreSynthetic(t, body)
 					checkDescriptionsAreSynthetic(t, body)
+					checkReinstallSecretsAreSynthetic(t, body)
 				}
 				checkIPv4sInRange(t, ia.URL)
 				checkIPv6sInRange(t, ia.URL)
@@ -250,6 +261,32 @@ func checkDescriptionsAreSynthetic(t *testing.T, body string) {
 		v := m[1]
 		if v != "" && v != redactedDescriptionPlaceholder {
 			t.Errorf("found a non-synthetic description: %q (want %q)", truncate(v, 20), redactedDescriptionPlaceholder)
+		}
+	}
+}
+
+// checkReinstallSecretsAreSynthetic catches the secret-bearing fields of a
+// ServerImageSetup reinstall request (POST /v1/servers/{id}/image):
+// additionalUserPassword (a live account credential), additionalUserUsername (a
+// chosen account identifier), and customScript (arbitrary bootstrap text that
+// can embed secrets). The redactor collapses each to a fixed marker, so any
+// other non-empty value is an unredacted secret — from a live recording or a
+// hand-authored cassette.
+func checkReinstallSecretsAreSynthetic(t *testing.T, body string) {
+	t.Helper()
+	for _, m := range additionalUserPasswordFieldPattern.FindAllStringSubmatch(body, -1) {
+		if v := m[1]; v != "" && v != redactedPasswordPlaceholder {
+			t.Errorf("found a non-synthetic additionalUserPassword: %q (want %q)", truncate(v, 12), redactedPasswordPlaceholder)
+		}
+	}
+	for _, m := range additionalUserUsernameFieldPattern.FindAllStringSubmatch(body, -1) {
+		if v := m[1]; v != "" && v != redactedUsernamePlaceholder {
+			t.Errorf("found a non-synthetic additionalUserUsername: %q (want %q)", truncate(v, 20), redactedUsernamePlaceholder)
+		}
+	}
+	for _, m := range customScriptFieldPattern.FindAllStringSubmatch(body, -1) {
+		if v := m[1]; v != "" && v != redactedCustomScriptPlaceholder {
+			t.Errorf("found a non-synthetic customScript: %q (want %q)", truncate(v, 20), redactedCustomScriptPlaceholder)
 		}
 	}
 }

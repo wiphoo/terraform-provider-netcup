@@ -66,6 +66,14 @@ const redactedDescriptionPlaceholder = "vcr-redacted-description"
 // could be brute-forced back to the real identifier (PR #88 review).
 const redactedUsernamePlaceholder = "vcr-redacted-username"
 
+// redactedCustomScriptPlaceholder replaces every ServerImageSetup.customScript
+// value (POST /v1/servers/{id}/image, the OS-reinstall request). A custom script
+// is arbitrary maintainer-authored bootstrap text that can embed secrets
+// (passwords, tokens, keys) with no structure worth preserving for replay — the
+// request matcher keys on method+URL only — so it collapses to a single fixed
+// marker.
+const redactedCustomScriptPlaceholder = "vcr-redacted-custom-script"
+
 // fakeHostnameDomain is the fixed domain every hostname/nickname/PTR is
 // rewritten under.
 const fakeHostnameDomain = "example.com"
@@ -346,18 +354,30 @@ func redactField(key string, val interface{}) interface{} {
 			return val
 		}
 		return fakeMAC(s)
-	case key == "username":
+	case key == "username" || key == "additionalUserUsername":
+		// additionalUserUsername is the secondary account name in a
+		// ServerImageSetup reinstall request — a chosen identifier, redacted like
+		// the executingUser username.
 		s, ok := val.(string)
 		if !ok || s == "" {
 			return val
 		}
 		return redactedUsernamePlaceholder
-	case key == "password":
+	case key == "password" || key == "additionalUserPassword":
+		// additionalUserPassword is the secondary account credential in a
+		// ServerImageSetup reinstall request — as sensitive as the rescue
+		// password, so it gets the same fixed marker.
 		s, ok := val.(string)
 		if !ok || s == "" {
 			return val
 		}
 		return redactedPasswordPlaceholder
+	case key == "customScript":
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return redactedCustomScriptPlaceholder
 	case key == "description":
 		s, ok := val.(string)
 		if !ok || s == "" {
