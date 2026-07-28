@@ -619,6 +619,63 @@ func TestRedactJSONBodyV030Fields(t *testing.T) {
 	}
 }
 
+// TestRedactJSONBodyReinstallRequestFields confirms the secret-bearing fields of
+// a ServerImageSetup reinstall request (POST /v1/servers/{id}/image) are redacted
+// even though their key names differ from the generic username/password fields.
+// imageFlavourId (structural, not a secret) must survive unchanged.
+func TestRedactJSONBodyReinstallRequestFields(t *testing.T) {
+	body := `{
+		"imageFlavourId": 42,
+		"additionalUserUsername": "deploybot",
+		"additionalUserPassword": "s3cr3t-user-pw",
+		"sshKeyIds": [4711, 4712],
+		"customScript": "#!/bin/sh\nexport TOKEN=abc123\ncurl https://198.51.100.7/bootstrap"
+	}`
+
+	out, ok := redactJSONBody(body)
+	if !ok {
+		t.Fatalf("redactJSONBody: not recognized as JSON")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("redacted output is not valid JSON: %v\n%s", err, out)
+	}
+
+	if got["additionalUserUsername"] != redactedUsernamePlaceholder {
+		t.Errorf("additionalUserUsername = %v, want %q", got["additionalUserUsername"], redactedUsernamePlaceholder)
+	}
+	if got["additionalUserPassword"] != redactedPasswordPlaceholder {
+		t.Errorf("additionalUserPassword = %v, want %q", got["additionalUserPassword"], redactedPasswordPlaceholder)
+	}
+	if got["customScript"] != redactedCustomScriptPlaceholder {
+		t.Errorf("customScript = %v, want %q", got["customScript"], redactedCustomScriptPlaceholder)
+	}
+	// sshKeyIds are account-scoped resource identifiers: each element must be
+	// rewritten to a synthetic id (not the real value), deterministically.
+	keys, ok := got["sshKeyIds"].([]interface{})
+	if !ok || len(keys) != 2 {
+		t.Fatalf("sshKeyIds = %v, want a 2-element array", got["sshKeyIds"])
+	}
+	for i, orig := range []float64{4711, 4712} {
+		if keys[i] == orig {
+			t.Errorf("sshKeyIds[%d] = %v, want a redacted id (not the real value)", i, keys[i])
+		}
+	}
+	// Deterministic: the same real id always maps to the same fake. Compare
+	// numerically — values are <= 2^31 so float64 (plain json.Unmarshal) is
+	// exact — to avoid %v scientific-notation formatting on large ids.
+	want0, _ := fakeServerID(json.Number("4711")).Int64()
+	if k0, ok := keys[0].(float64); !ok || k0 != float64(want0) {
+		t.Errorf("sshKeyIds[0] = %v, want deterministic fake %d", keys[0], want0)
+	}
+	// imageFlavourId is a structural identifier, not a secret: it must survive so
+	// the request stays intelligible. (Plain json.Unmarshal decodes numbers as
+	// float64 — no UseNumber here, unlike redactJSONBody.)
+	if got["imageFlavourId"] != float64(42) {
+		t.Errorf("imageFlavourId = %v, want 42 preserved", got["imageFlavourId"])
+	}
+}
+
 // TestRedactJSONBodyNullPasswordPreserved confirms a null password (the rescue
 // system inactive) is meaningful state, not a secret, and survives redaction.
 func TestRedactJSONBodyNullPasswordPreserved(t *testing.T) {
