@@ -1,0 +1,53 @@
+---
+version: 1
+interactions:
+- request:
+    body: '{"imageFlavourId":42}'
+    form: {}
+    headers:
+      Accept:
+      - application/json
+      Content-Type:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/image
+    method: POST
+  response:
+    body: '{"uuid":"44444444-4444-4444-8444-444444444444","name":"ServerImageSetup","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 202 Accepted
+    code: 202
+    duration: ""
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/44444444-4444-4444-8444-444444444444
+    method: GET
+  response:
+    body: '{"uuid":"44444444-4444-4444-8444-444444444444","name":"ServerImageSetup","state":"RUNNING","startedAt":"2026-07-17T10:00:00Z","finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-07-17T10:05:00Z","progressInPercent":30},"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/44444444-4444-4444-8444-444444444444
+    method: GET
+  response:
+    body: '{"uuid":"44444444-4444-4444-8444-444444444444","name":"ServerImageSetup","state":"FINISHED","startedAt":"2026-07-17T10:00:00Z","finishedAt":"2026-07-17T10:04:30Z","executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-07-17T10:04:30Z","progressInPercent":100},"steps":[{"uuid":"s1-0000-4000-8000-000000000001","name":"wipe","state":"FINISHED","startedAt":"2026-07-17T10:00:00Z","finishedAt":"2026-07-17T10:01:00Z"},{"uuid":"s2-0000-4000-8000-000000000002","name":"install","state":"FINISHED","startedAt":"2026-07-17T10:01:00Z","finishedAt":"2026-07-17T10:04:30Z"}],"result":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""
