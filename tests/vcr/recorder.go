@@ -37,6 +37,33 @@ const clientTimeout = 30 * time.Second
 func NewClient(t *testing.T, cassetteName string, extraOpts ...netcup.Option) *netcup.Client {
 	t.Helper()
 
+	rec, token := newRecorder(t, cassetteName)
+
+	opts := []netcup.Option{
+		// Pinned explicitly rather than left to default resolution: netcup.New
+		// falls back to the NETCUP_API_ENDPOINT env var when set, which would
+		// change the request URL and break DefaultMatcher's method+URL match
+		// against whatever endpoint the cassette was actually recorded from.
+		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
+		netcup.WithHTTPClient(&http.Client{Transport: rec, Timeout: clientTimeout}),
+		netcup.WithAccessToken(token),
+	}
+	// Appended last so a caller-provided option wins on conflict, but see the
+	// doc comment: extraOpts must not replace the recorder transport/endpoint.
+	opts = append(opts, extraOpts...)
+	return netcup.New(opts...)
+}
+
+// newRecorder builds and fully wires the go-vcr recorder for the named cassette
+// — mode selection, missing-cassette guard, method+URL matcher, save-time PII
+// scrub, and the Stop cleanup — and resolves the access token (fake in replay
+// mode, the live NETCUP_ACCESS_TOKEN in record mode). It is the shared core of
+// NewClient; a test that needs to observe the on-the-wire request (which
+// matchInteraction, keyed on method+URL only, does not check) can wrap the
+// returned recorder in its own transport before handing it to netcup.New.
+func newRecorder(t *testing.T, cassetteName string) (*recorder.Recorder, string) {
+	t.Helper()
+
 	mode := recorder.ModeReplaying
 	if os.Getenv("VCR_RECORD") == "1" {
 		mode = recorder.ModeRecording
@@ -99,19 +126,7 @@ func NewClient(t *testing.T, cassetteName string, extraOpts ...netcup.Option) *n
 		}
 	}
 
-	opts := []netcup.Option{
-		// Pinned explicitly rather than left to default resolution: netcup.New
-		// falls back to the NETCUP_API_ENDPOINT env var when set, which would
-		// change the request URL and break DefaultMatcher's method+URL match
-		// against whatever endpoint the cassette was actually recorded from.
-		netcup.WithAPIEndpoint(netcup.DefaultAPIEndpoint),
-		netcup.WithHTTPClient(&http.Client{Transport: rec, Timeout: clientTimeout}),
-		netcup.WithAccessToken(token),
-	}
-	// Appended last so a caller-provided option wins on conflict, but see the
-	// doc comment: extraOpts must not replace the recorder transport/endpoint.
-	opts = append(opts, extraOpts...)
-	return netcup.New(opts...)
+	return rec, token
 }
 
 // checkCassetteFound returns a non-nil error when requestedMode asked for
