@@ -37,6 +37,10 @@ func cmdServer(args []string) error {
 	case "rescue":
 		return serverRescue(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "reinstall":
+		if len(args) > 1 && args[1] == "help" {
+			usageServerReinstall(os.Stdout)
+			return nil
+		}
 		return serverReinstall(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "help", "-h", "--help":
 		usageServer(os.Stdout)
@@ -64,7 +68,7 @@ WARNING: 'reinstall' WIPES THE SERVER (all data is permanently lost).
 
 Run 'netcupctl server power help' for power subcommands.
 Run 'netcupctl server rescue help' for rescue subcommands.
-Run 'netcupctl server reinstall --help' for reinstall flags.
+Run 'netcupctl server reinstall help' for reinstall flags.
 `)
 }
 
