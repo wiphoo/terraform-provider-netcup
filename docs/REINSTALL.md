@@ -56,8 +56,8 @@ netcupctl server reinstall <id> --image <flavourId> [flags]
 Without `--wait`, the command prints the accepted task UUID and returns
 immediately. The OS install continues in the background on the SCP API side.
 
-With `--wait`, `netcupctl` polls the task until it reaches a terminal state
-(`FINISHED`, `ERROR`, or canceled) and prints the final state:
+With `--wait`, `netcupctl` polls the task until it reaches a terminal state.
+Only a `FINISHED` task is printed; `ERROR`, `CANCELED`, and `ROLLBACK` states surface as command errors (check `echo $?` and stderr):
 
 ```bash
 netcupctl server reinstall <id> --image 123 --wait
@@ -130,7 +130,7 @@ netcupctl server reinstall 42 --image 123 --force --wait --json
 ### Machine-readable output
 
 ```bash
-netcupctl server reinstall 42 --image 123 --json
+netcupctl server reinstall 42 --image 123 --wait --json
 ```
 
 ```json
@@ -158,9 +158,12 @@ netcupctl server reinstall 42 --image 123 --ssh-key 1 --ssh-key 2
 ```
 
 To list your available SSH key ids, use the SCP API directly (the CLI does not
-yet surface this):
+yet surface this). First export the tokens from the `auth login` store and set
+the API endpoint:
 
 ```bash
+eval "$(netcupctl auth export)"
+export NETCUP_API_ENDPOINT="https://www.servercontrolpanel.de/scp-core/api"
 curl -H "Authorization: Bearer $NETCUP_ACCESS_TOKEN" \
   "$NETCUP_API_ENDPOINT/v1/ssh-keys"
 ```
