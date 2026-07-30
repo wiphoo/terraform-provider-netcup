@@ -10,12 +10,13 @@ and other Netcup APIs planned in later releases.
 
 ## Status
 
-**v0.4.0 — Terraform provider operations are available.**
+**v0.5.0-rc1 — Server reinstallation (CLI) is available as a release candidate.**
 
 The `netcupctl` CLI, shared Go SDK, CI, and release automation shipped in v0.1.0.
 The Terraform provider (data sources, rDNS resource, examples, and docs) shipped in v0.2.0 on top of the same SDK.
 v0.3.0 adds `netcupctl` operations: power state management, rescue mode, and image/snapshot listing.
 v0.4.0 brings those operations to the Terraform provider: `netcup_server_power`, `netcup_server_rescue`, `netcup_server_images`, and `netcup_server_snapshots`.
+v0.5.0-rc1 adds `netcupctl server reinstall` for native OS reinstallation, including `customScript` post-install bootstrap and image selection.
 
 See the [Roadmap](docs/ROADMAP.md) for the full release plan.
 
@@ -75,7 +76,8 @@ server `<id>` (from `netcupctl server list`) and support `--json` for scripting.
 > ℹ️ **Availability:** these operations require `netcupctl` **v0.3.0 or newer**.
 > Earlier releases (v0.2.0 and before) do **not** include these subcommands, so
 > running them there fails with an unknown-subcommand error — download the latest
-> release or build from source (`make build`).
+> release or build from source (`make build`). The `server reinstall` command is
+> available in **v0.5.0-rc1 or newer**.
 
 > ⚠️ **Some of these commands cause downtime.** Read
 > [Operational risk & downtime](#operational-risk--downtime) before running the
@@ -148,6 +150,50 @@ netcupctl server snapshots <id> --json
 Snapshot listing is read-only; snapshot create/delete/restore is planned for a
 later release. See the [Roadmap](docs/ROADMAP.md).
 
+### Reinstall
+
+> ⚠️ **DESTRUCTIVE — data loss and downtime.** A reinstall **wipes the server
+> entirely**. All data on it is permanently lost and cannot be recovered. The
+> server is down for the duration of the OS install. This is far more destructive
+> than a power or rescue reboot. Read [Operational risk & downtime](#operational-risk--downtime)
+> before running this command.
+
+```bash
+# Discover valid image IDs first (see 'server images').
+netcupctl server images <id>
+
+# Reinstall with the required --image flag (prompts for confirmation).
+netcupctl server reinstall <id> --image <flavourId>
+
+# Reinstall in full: set hostname, install SSH keys, wait for completion.
+netcupctl server reinstall <id> --image 123 --hostname server.example.com \
+  --ssh-key 42 --wait
+
+# Reinstall with a post-install bootstrap script (inline).
+netcupctl server reinstall <id> --image 123 \
+  --custom-script '#!/bin/sh
+apt-get update && apt-get install -y docker.io'
+
+# Reinstall with a bootstrap script from a file (or '-' for stdin).
+netcupctl server reinstall <id> --image 123 \
+  --custom-script-file /path/to/bootstrap.sh
+
+# Skip the confirmation prompt for scripted use.
+netcupctl server reinstall <id> --image 123 --force
+
+# Machine-readable output.
+netcupctl server reinstall <id> --image 123 --json
+```
+
+Detailed guidance for the reinstall workflow and custom-script bootstrap is in
+[docs/REINSTALL.md](docs/REINSTALL.md).
+
+Flags: `--image <flavourId>` is **required** (valid ids from `netcupctl server
+images <id>`); `--hostname`, `--ssh-key` (repeatable), `--ssh-password-auth`,
+`--custom-script` (inline), `--custom-script-file` (file path or `-` for stdin),
+`--wait` (polls the async task to completion), `--force`/`--yes` (skip the
+data-loss confirmation prompt), `--json` for machine-readable output.
+
 ### Operational risk & downtime
 
 Several `netcupctl` commands are **operationally destructive** — they interrupt
@@ -162,12 +208,13 @@ equivalent action from the SCP web panel.
 | `server power on` | Powers the server on | No |
 | `server rescue enable` | **Reboots** the server into the rescue environment | **Yes** — the normal OS is not running while in rescue mode |
 | `server rescue disable` | **Reboots** the server back into the normal OS | **Yes** — brief outage during the reboot |
+| `server reinstall` | **Wipes the server** and reinstalls the OS | **Yes** — the server is down for the duration of the OS install; all data is lost |
 | `server power status` / `rescue status` / `images` / `snapshots` | Read-only | No |
 
 Safeguards built into the CLI:
 
 - **Confirmation prompts.** `power off`, `power suspend`, `power reboot`,
-  `rescue enable`, and `rescue disable` prompt for confirmation before acting.
+  `rescue enable`, `rescue disable`, and `server reinstall` prompt before acting.
   The warning and prompt are written to **stderr**, so `--json` output on stdout
   stays clean.
 - **`--force` / `--yes`** skips the confirmation prompt for non-interactive or
