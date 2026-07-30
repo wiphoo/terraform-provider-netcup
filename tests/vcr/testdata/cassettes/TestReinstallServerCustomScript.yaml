@@ -1,0 +1,21 @@
+---
+version: 1
+interactions:
+- request:
+    body: '{"imageFlavourId":42,"hostname":"host-0a0b0c0d.example.com","additionalUserUsername":"vcr-redacted-username","additionalUserPassword":"vcr-redacted-password","customScript":"vcr-redacted-custom-script"}'
+    form: {}
+    headers:
+      Accept:
+      - application/json
+      Content-Type:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/image
+    method: POST
+  response:
+    body: '{"uuid":"55555555-5555-4555-8555-555555555555","name":"ServerImageSetup","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 202 Accepted
+    code: 202
+    duration: ""

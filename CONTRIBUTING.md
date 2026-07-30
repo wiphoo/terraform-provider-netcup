@@ -171,7 +171,10 @@ yields identical cassettes.
 | `id` (any JSON number under key `"id"`: server id, template id, address id, site id) | mapped to a deterministic synthetic integer |
 | `name` | mapped to a deterministic synthetic prefix (`server-<hash>`) |
 | `username` (`TaskInfo.executingUser` — the CCP customer number, on every async task response) | fixed placeholder (`vcr-redacted-username`) — a non-derived constant, since the customer number's small numeric space would make an unsalted hash reversible |
-| `password` (`RescueSystemStatus`, populated while rescue is active — a live root credential) | fixed placeholder (`vcr-redacted-password`) |
+| `password` / `additionalUserPassword` (`RescueSystemStatus` root credential; the `ServerImageSetup` reinstall body's root/user credential) | fixed placeholder (`vcr-redacted-password`) |
+| `additionalUserUsername` (`ServerImageSetup` reinstall — a chosen account identifier) | fixed placeholder (`vcr-redacted-username`) |
+| `customScript` (`ServerImageSetup` reinstall bootstrap — arbitrary shell that can embed secrets) | fixed placeholder (`vcr-redacted-custom-script`) |
+| `sshKeyIds` (`ServerImageSetup` reinstall — account-scoped SSH-key ids) | each element mapped to a deterministic synthetic integer (like `id`) |
 | `description` (snapshot free-text — may carry arbitrary notes) | fixed placeholder (`vcr-redacted-description`) |
 
 **Preserved as-is:** `disabled`, `state`, `architecture`,
@@ -197,8 +200,8 @@ because the `"name"` key is redacted at all nesting levels.
 that scans every committed cassette (bodies, headers, and URLs) and fails on
 any IP outside the documentation ranges above, a non-scrubbed `Authorization`
 header, a JWT (`Bearer eyJ…`) shape, a `userId` outside the synthetic value, or
-a `username`, `password`, or snapshot `description` other than its fixed
-placeholder. It runs in PR CI alongside the rest of `go test ./...`, with no
+a `username`, `password`/`additionalUserPassword`, `additionalUserUsername`,
+`customScript`, or snapshot `description` other than its fixed placeholder. It runs in PR CI alongside the rest of `go test ./...`, with no
 credentials or network access.
 
 #### Recordable vs. authored cassettes (v0.3.0 async/rescue surface)
