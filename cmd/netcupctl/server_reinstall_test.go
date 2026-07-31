@@ -255,6 +255,22 @@ func TestServerReinstallHelpShowsUsage(t *testing.T) {
 	}
 }
 
+func TestServerReinstallHelpSubcommandShowsUsage(t *testing.T) {
+	// `server reinstall help` (subcommand style, like power/rescue) must show the
+	// same usage as `--help` — on stdout, and without being parsed as a server id.
+	var out, errBuf bytes.Buffer
+	if err := serverReinstall([]string{"help"}, &out, &errBuf, nil); err != nil {
+		t.Fatalf("serverReinstall help error = %v", err)
+	}
+	o := out.String()
+	if !strings.Contains(strings.ToUpper(o), "WIPES THE SERVER") {
+		t.Errorf("help output missing data-loss warning:\n%s", o)
+	}
+	if !strings.Contains(o, "netcupctl server images") {
+		t.Errorf("help output missing image-discovery hint:\n%s", o)
+	}
+}
+
 func TestServerReinstallConfirmYesWipesWarning(t *testing.T) {
 	rec := &reinstallRecorder{}
 	srv := newReinstallServer(rec)

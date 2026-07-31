@@ -37,10 +37,6 @@ func cmdServer(args []string) error {
 	case "rescue":
 		return serverRescue(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "reinstall":
-		if len(args) > 1 && args[1] == "help" {
-			usageServerReinstall(os.Stdout)
-			return nil
-		}
 		return serverReinstall(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "help", "-h", "--help":
 		usageServer(os.Stdout)
@@ -51,7 +47,7 @@ func cmdServer(args []string) error {
 	}
 }
 
-func usageServer(w *os.File) {
+func usageServer(w io.Writer) {
 	fmt.Fprint(w, `netcupctl server - manage servers
 
 Usage:
@@ -73,6 +69,9 @@ Run 'netcupctl server reinstall help' for reinstall flags.
 }
 
 func serverList(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageServer) {
+		return nil
+	}
 	fs := flag.NewFlagSet("server-list", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	if err := fs.Parse(args); err != nil {
@@ -123,6 +122,9 @@ func serverList(args []string, out io.Writer) error {
 }
 
 func serverGet(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageServer) {
+		return nil
+	}
 	fs := flag.NewFlagSet("server-get", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	positional, err := parsePositionalArgs(fs, args)
@@ -195,6 +197,9 @@ func serverGet(args []string, out io.Writer) error {
 }
 
 func serverImages(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageServer) {
+		return nil
+	}
 	fs := flag.NewFlagSet("server-images", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	positional, err := parsePositionalArgs(fs, args)
@@ -250,6 +255,9 @@ func serverImages(args []string, out io.Writer) error {
 }
 
 func serverSnapshots(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageServer) {
+		return nil
+	}
 	fs := flag.NewFlagSet("server-snapshots", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	positional, err := parsePositionalArgs(fs, args)

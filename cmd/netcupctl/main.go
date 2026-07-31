@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/wiphoo/terraform-provider-netcup/internal/version"
@@ -43,7 +44,7 @@ func run(args []string) error {
 	}
 }
 
-func usage(w *os.File) {
+func usage(w io.Writer) {
 	fmt.Fprint(w, `netcupctl - CLI for the netcup SCP REST API
 
 Usage:

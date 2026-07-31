@@ -223,3 +223,27 @@ func TestServerGet_NotFound(t *testing.T) {
 		t.Errorf("error should mention 404, got: %v", err)
 	}
 }
+
+// TestServerLeafSubcommandsHelp verifies the shared help pattern: every
+// positional `server` leaf subcommand treats a bare `help` word as a usage
+// request (via helpRequested), printing the server usage to stdout and exiting
+// clean — instead of parsing "help" as a server ID. No client/network needed.
+func TestServerLeafSubcommandsHelp(t *testing.T) {
+	leaves := map[string]func([]string, *bytes.Buffer) error{
+		"list":      func(a []string, w *bytes.Buffer) error { return serverList(a, w) },
+		"get":       func(a []string, w *bytes.Buffer) error { return serverGet(a, w) },
+		"images":    func(a []string, w *bytes.Buffer) error { return serverImages(a, w) },
+		"snapshots": func(a []string, w *bytes.Buffer) error { return serverSnapshots(a, w) },
+	}
+	for name, fn := range leaves {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := fn([]string{"help"}, &out); err != nil {
+				t.Fatalf("server %s help error = %v, want nil", name, err)
+			}
+			if !strings.Contains(out.String(), "netcupctl server") {
+				t.Errorf("server %s help output missing usage:\n%s", name, out.String())
+			}
+		})
+	}
+}

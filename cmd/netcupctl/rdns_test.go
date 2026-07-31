@@ -523,3 +523,25 @@ func TestRDNSDelete_DeleteFails(t *testing.T) {
 		t.Errorf("error should mention 404, got: %v", err)
 	}
 }
+
+// TestRDNSLeafSubcommandsHelp verifies the shared help pattern reaches the rdns
+// leaves: `rdns <verb> help` prints usage (via helpRequested) instead of parsing
+// "help" as an <ip>. No client/network needed.
+func TestRDNSLeafSubcommandsHelp(t *testing.T) {
+	leaves := map[string]func([]string, *bytes.Buffer) error{
+		"get":    func(a []string, w *bytes.Buffer) error { return rdnsGet(a, w) },
+		"set":    func(a []string, w *bytes.Buffer) error { return rdnsSet(a, w) },
+		"delete": func(a []string, w *bytes.Buffer) error { return rdnsDelete(a, w) },
+	}
+	for name, fn := range leaves {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := fn([]string{"help"}, &out); err != nil {
+				t.Fatalf("rdns %s help error = %v, want nil", name, err)
+			}
+			if !strings.Contains(out.String(), "netcupctl rdns") {
+				t.Errorf("rdns %s help output missing usage:\n%s", name, out.String())
+			}
+		})
+	}
+}

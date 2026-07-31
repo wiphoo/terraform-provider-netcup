@@ -1,6 +1,28 @@
 package main
 
-import "flag"
+import (
+	"flag"
+	"io"
+)
+
+// helpRequested reports whether args is a bare `help` word — the subcommand-style
+// help request (e.g. `netcupctl server reinstall help`, `netcupctl rdns get help`),
+// the sibling of the `-h`/`--help` flags that flag.Parse already recognizes. When
+// it is, usage is written to out and the caller returns nil.
+//
+// Positional leaf commands (which parse an <ip>/<id>/flags rather than dispatching
+// a sub-subcommand) call this first, so `<cmd> help` prints usage instead of `help`
+// being consumed as a (non-numeric) argument and failing with "invalid server ID" /
+// an IP parse error. Group dispatchers (server, rdns, auth, power, rescue) instead
+// match "help"/"-h"/"--help" in their own subcommand switch; this is the equivalent
+// entry point for the leaves that have no such switch.
+func helpRequested(args []string, out io.Writer, usage func(io.Writer)) bool {
+	if len(args) > 0 && args[0] == "help" {
+		usage(out)
+		return true
+	}
+	return false
+}
 
 // parsePositionalArgs parses args into fs, accepting flags positioned before or
 // after positional arguments. Go's flag.Parse stops at the first non-flag

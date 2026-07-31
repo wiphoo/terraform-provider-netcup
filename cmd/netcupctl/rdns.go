@@ -35,7 +35,7 @@ func cmdRDNS(args []string) error {
 	}
 }
 
-func usageRDNS(w *os.File) {
+func usageRDNS(w io.Writer) {
 	fmt.Fprint(w, `netcupctl rdns - manage reverse DNS entries
 
 Usage:
@@ -47,6 +47,9 @@ Usage:
 }
 
 func rdnsGet(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageRDNS) {
+		return nil
+	}
 	fs := flag.NewFlagSet("rdns-get", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	positional, err := parsePositionalArgs(fs, args)
@@ -93,6 +96,9 @@ func rdnsGet(args []string, out io.Writer) error {
 }
 
 func rdnsSet(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageRDNS) {
+		return nil
+	}
 	fs := flag.NewFlagSet("rdns-set", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	positional, err := parsePositionalArgs(fs, args)
@@ -146,6 +152,9 @@ func rdnsSet(args []string, out io.Writer) error {
 }
 
 func rdnsDelete(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageRDNS) {
+		return nil
+	}
 	fs := flag.NewFlagSet("rdns-delete", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	positional, err := parsePositionalArgs(fs, args)
