@@ -185,5 +185,6 @@ func (p *netcupProvider) Resources(_ context.Context) []func() resource.Resource
 		NewRDNSResource,
 		NewRescueResource,
 		NewServerPowerResource,
+		NewServerReinstallResource,
 	}
 }
