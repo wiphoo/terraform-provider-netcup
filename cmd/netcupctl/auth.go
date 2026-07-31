@@ -43,7 +43,7 @@ func cmdAuth(args []string) error {
 	}
 }
 
-func usageAuth(w *os.File) {
+func usageAuth(w io.Writer) {
 	fmt.Fprint(w, `netcupctl auth - authenticate with the SCP API
 
 Usage:

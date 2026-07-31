@@ -43,6 +43,13 @@ func (f *int32SliceFlag) Set(value string) error {
 // warning, the confirmation prompt, abort notices) so that --json output on out
 // stays parseable.
 func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
+	// `server reinstall help` (subcommand style, like power/rescue) prints usage
+	// rather than parsing "help" as a server ID. Shared with the other positional
+	// subcommands via helpRequested (see server.go).
+	if helpRequested(args, out, usageServerReinstall) {
+		return nil
+	}
+
 	fs := flag.NewFlagSet("server-reinstall", flag.ContinueOnError)
 	// Route the flag parser's help/error output through the reinstall-specific
 	// usage so the advertised `server reinstall --help` path (which surfaces as
