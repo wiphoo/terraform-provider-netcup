@@ -24,6 +24,36 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-31
+
+### Added
+
+- **Server reinstallation (v0.5.0 milestone).** Native OS install/reinstall
+  through the SCP API with image selection and `customScript` post-install
+  bootstrap:
+  - `ReinstallServer` SDK method (`pkg/netcup`) — drives
+    `POST /v1/servers/{id}/image` with a `ServerImageSetup` body
+    (`imageFlavourId` required; optional `hostname`,
+    `additionalUserUsername`/`additionalUserPassword`, `sshKeyIds`,
+    `customScript`, …). Returns `*TaskInfo` on `202` and reuses `WaitForTask`
+    for async polling; non-2xx → `*APIError`.
+  - `netcupctl server reinstall` command — reinstall a server's OS with
+    `--image` (id or name), `--custom-script` / `--custom-script-file` (or `-`
+    for stdin), `--hostname`, `--ssh-key`, `--wait`, and `--json`. Warns and
+    requires confirmation before this **destructive** operation (wipes the
+    server); bypassable with `--force` / `--yes`.
+  - go-vcr replay cassettes + tests covering the reinstall surface with the
+    same deterministic PII redaction as the existing SDK/CLI tiers.
+  - Pinned the SCP OS install/reinstall API shape in
+    `docs/SCP-API-NOTES.md` and added `docs/REINSTALL.md` with the reinstall
+    workflow and `customScript` bootstrap guidance, including a prominent
+    data-loss/downtime warning.
+
+### Fixed
+
+- `netcupctl help` output is now consistent across all `server`/`rdns` leaf
+  subcommands (unified usage signatures).
+
 ## [0.4.0] - 2026-07-25
 
 ### Added
@@ -108,7 +138,8 @@ Initial release: `netcupctl` CLI, shared Go SDK, CI, and release automation.
 See the
 [v0.1.0 release notes](https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.1.0...v0.2.0
