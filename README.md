@@ -10,13 +10,13 @@ and other Netcup APIs planned in later releases.
 
 ## Status
 
-**v0.5.0-rc1 — Server reinstallation (CLI) is available as a release candidate.**
+**v0.5.0 — Server reinstallation (CLI) is available.**
 
 The `netcupctl` CLI, shared Go SDK, CI, and release automation shipped in v0.1.0.
 The Terraform provider (data sources, rDNS resource, examples, and docs) shipped in v0.2.0 on top of the same SDK.
 v0.3.0 adds `netcupctl` operations: power state management, rescue mode, and image/snapshot listing.
 v0.4.0 brings those operations to the Terraform provider: `netcup_server_power`, `netcup_server_rescue`, `netcup_server_images`, and `netcup_server_snapshots`.
-v0.5.0-rc1 adds `netcupctl server reinstall` for native OS reinstallation, including `customScript` post-install bootstrap and image selection.
+v0.5.0 adds `netcupctl server reinstall` for native OS reinstallation, including `customScript` post-install bootstrap and image selection.
 
 See the [Roadmap](docs/ROADMAP.md) for the full release plan.
 
@@ -77,7 +77,7 @@ server `<id>` (from `netcupctl server list`) and support `--json` for scripting.
 > Earlier releases (v0.2.0 and before) do **not** include these subcommands, so
 > running them there fails with an unknown-subcommand error — download the latest
 > release or build from source (`make build`). The `server reinstall` command is
-> available in **v0.5.0-rc1 or newer**.
+> available in **v0.5.0 or newer**.
 
 > ⚠️ **Some of these commands cause downtime.** Read
 > [Operational risk & downtime](#operational-risk--downtime) before running the

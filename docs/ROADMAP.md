@@ -86,7 +86,7 @@ Scope:
 - Image data sources
 - Snapshot data sources
 
-## v0.5.0 - Provisioning and Reinstallation (CLI) — rc1
+## v0.5.0 - Provisioning and Reinstallation (CLI) (shipped)
 
 Scope:
 
