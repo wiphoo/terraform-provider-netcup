@@ -291,6 +291,51 @@ func TestServerReinstallResource_Create_DispatchDecodeError(t *testing.T) {
 	}
 }
 
+// TestServerReinstallResource_Create_5xxAmbiguous verifies that a 5xx *APIError
+// (e.g. a reverse-proxy 502/504 where the upstream may have accepted the POST)
+// is treated as AMBIGUOUS: state is persisted with a warning rather than dropped,
+// so the next apply does not re-issue the destructive reinstall.
+func TestServerReinstallResource_Create_5xxAmbiguous(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/image" {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"message":"upstream timeout"}`))
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerReinstallResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":        tftypes.NewValue(tftypes.String, "123"),
+		"image_flavour_id": tftypes.NewValue(tftypes.Number, 1),
+		"wait":             tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ambiguous 5xx must not error; got: %v", resp.Diagnostics.Errors())
+	}
+	if len(resp.Diagnostics.Warnings()) == 0 {
+		t.Error("expected a warning diagnostic for an ambiguous 5xx response")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Error("expected state to be persisted after an ambiguous 5xx response")
+	}
+	var state serverReinstallResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.ID.ValueString() != "123" {
+		t.Errorf("ID = %q, want 123", state.ID.ValueString())
+	}
+}
+
 // TestServerReinstallResource_Create_OutOfRangeImageFlavourID verifies that an
 // image_flavour_id outside the signed 32-bit range is rejected before dispatch
 // rather than silently wrapping (4294967338 → 42), which would install the wrong

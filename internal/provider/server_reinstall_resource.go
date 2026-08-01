@@ -256,6 +256,24 @@ func int32ID(v types.Int64, field string, diags *diag.Diagnostics) (int32, bool)
 	return int32Range(v.ValueInt64(), field, diags)
 }
 
+// isDefinitiveReinstallRejection reports whether an error from ReinstallServer
+// PROVES the reinstall was not accepted by netcup. Only ErrPreDispatch (request
+// never built/dispatched) and a 4xx *APIError (a definitive client rejection,
+// e.g. 422 ValidationError) qualify. A 5xx *APIError does NOT: a reverse proxy
+// may have returned 502/504 after the upstream already accepted the POST, so
+// the destructive reinstall may be running and the outcome is indeterminate —
+// the caller must persist state + warn (see Create) rather than drop it.
+func isDefinitiveReinstallRejection(err error) bool {
+	if errors.Is(err, netcup.ErrPreDispatch) {
+		return true
+	}
+	var apiErr *netcup.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode < 500
+	}
+	return false
+}
+
 // buildSetup assembles a netcup.ServerImageSetup from the resource model, sending
 // only caller-set (non-null) fields so the request mirrors the config. Appends a
 // diagnostic and returns ok=false if a list element cannot be read or an ID is
@@ -363,16 +381,18 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 		//    or dispatched (token acquisition / request construction failed).
 		//    The install definitively did not start → error, persist NO state so
 		//    the next apply re-runs Create safely.
-		//  - *netcup.APIError (incl. 422 ValidationError): netcup answered with
-		//    a non-2xx — a definitive rejection → error, persist NO state.
-		//  - Anything else (a transport error from http.Do, or a decode failure
+		//  - *netcup.APIError with a 4xx status (incl. 422 ValidationError): a
+		//    definitive rejection by netcup → error, persist NO state.
+		//  - *netcup.APIError with a 5xx status (e.g. a reverse-proxy 502/504
+		//    where the upstream may have accepted the POST first): AMBIGUOUS →
+		//    persist state + warn (handled below, alongside transport/decode).
+		//  - Any other error (a transport error from http.Do, or a decode failure
 		//    on a truncated 2xx body): AMBIGUOUS — the POST may already have been
 		//    accepted by netcup and the destructive reinstall may already be
 		//    running. Persist state + warn (mirroring the indeterminate
 		//    WaitForTask branch below) so the next apply does NOT wipe the
 		//    server a second time.
-		var apiErr *netcup.APIError
-		if errors.Is(err, netcup.ErrPreDispatch) || errors.As(err, &apiErr) {
+		if isDefinitiveReinstallRejection(err) {
 			d, _ := apiErrorToDiag(err, true)
 			resp.Diagnostics.Append(d)
 			return
@@ -384,9 +404,9 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 		resp.Diagnostics.AddWarning(
 			"netcup reinstall dispatch outcome could not be confirmed",
 			fmt.Sprintf(
-				"The reinstall request may have been accepted by netcup, but the response could not be read (%s) "+
-					"— e.g. a network failure after dispatch or a truncated response. The reinstall is likely "+
-					"already running.\n\n"+
+				"The reinstall request may have been accepted by netcup, but the outcome could not be confirmed (%s) "+
+					"— e.g. a network failure or a truncated response after dispatch, or a 5xx from a reverse proxy "+
+					"after the request was forwarded. The reinstall is likely already running.\n\n"+
 					"The resource has been recorded in Terraform state to avoid re-issuing the (destructive) "+
 					"reinstall on the next apply. Check the server / task status in the SCP control panel.",
 				err.Error(),
