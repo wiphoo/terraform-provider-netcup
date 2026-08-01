@@ -245,6 +245,116 @@ func TestServerReinstallResource_Create_APIError(t *testing.T) {
 	}
 }
 
+// TestServerReinstallResource_Create_DispatchDecodeError verifies that a failure
+// AFTER the request was dispatched — here netcup accepted the POST (202) but the
+// response body cannot be decoded — is treated as AMBIGUOUS: the reinstall may
+// already be running, so state is persisted with a warning rather than dropped
+// (which would let the next apply wipe the server a second time).
+func TestServerReinstallResource_Create_DispatchDecodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/image" {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":`)) // truncated body → decode error
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerReinstallResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":        tftypes.NewValue(tftypes.String, "123"),
+		"image_flavour_id": tftypes.NewValue(tftypes.Number, 1),
+		"wait":             tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ambiguous post-dispatch failure must not error; got: %v", resp.Diagnostics.Errors())
+	}
+	if len(resp.Diagnostics.Warnings()) == 0 {
+		t.Error("expected a warning diagnostic for an ambiguous dispatch outcome")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Error("expected state to be persisted after an ambiguous dispatch failure")
+	}
+	var state serverReinstallResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.ID.ValueString() != "123" {
+		t.Errorf("ID = %q, want 123", state.ID.ValueString())
+	}
+}
+
+// TestServerReinstallResource_Create_OutOfRangeImageFlavourID verifies that an
+// image_flavour_id outside the signed 32-bit range is rejected before dispatch
+// rather than silently wrapping (4294967338 → 42), which would install the wrong
+// image while Terraform records the original value.
+func TestServerReinstallResource_Create_OutOfRangeImageFlavourID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerReinstallResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":        tftypes.NewValue(tftypes.String, "123"),
+		"image_flavour_id": tftypes.NewValue(tftypes.Number, 4294967338),
+		"wait":             tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic for an out-of-range image_flavour_id")
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("expected null state after validation error, got %v", resp.State.Raw)
+	}
+}
+
+// TestServerReinstallResource_Create_OutOfRangeSSHKeyID verifies that an
+// ssh_key_ids element outside the signed 32-bit range is rejected before dispatch
+// rather than silently wrapping.
+func TestServerReinstallResource_Create_OutOfRangeSSHKeyID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerReinstallResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":        tftypes.NewValue(tftypes.String, "123"),
+		"image_flavour_id": tftypes.NewValue(tftypes.Number, 1),
+		"ssh_key_ids":      sshKeyListVal(7, 8589934594), // > math.MaxInt32
+		"wait":             tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic for an out-of-range ssh_key_id")
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("expected null state after validation error, got %v", resp.State.Raw)
+	}
+}
+
 // TestServerReinstallResource_Delete_NoOp verifies Delete never calls the API.
 func TestServerReinstallResource_Delete_NoOp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

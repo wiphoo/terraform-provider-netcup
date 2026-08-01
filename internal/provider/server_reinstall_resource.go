@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -231,13 +232,41 @@ func (r *serverReinstallResource) Configure(_ context.Context, req resource.Conf
 	r.client = client
 }
 
+// int32Range validates that the given int64 value fits in the signed 32-bit
+// range used by the SCP API's integer fields (e.g. imageFlavourId, sshKeyIds).
+// A silent int32(v) conversion would wrap out-of-range values (e.g. 4294967338
+// → 42), which for a destructive reinstall would install the wrong image while
+// Terraform records the original value, so such values are rejected up front.
+// Appends a diagnostic and returns ok=false when the value is out of range.
+func int32Range(v int64, field string, diags *diag.Diagnostics) (int32, bool) {
+	if v < math.MinInt32 || v > math.MaxInt32 {
+		diags.AddError(
+			"Invalid "+field,
+			fmt.Sprintf("%s must be a signed 32-bit integer (between %d and %d), got %d.", field, math.MinInt32, math.MaxInt32, v),
+		)
+		return 0, false
+	}
+	return int32(v), true
+}
+
+// int32ID narrows a non-null, non-unknown types.Int64 attribute to int32 after
+// validating its range. Appends a diagnostic and returns ok=false when out of
+// range.
+func int32ID(v types.Int64, field string, diags *diag.Diagnostics) (int32, bool) {
+	return int32Range(v.ValueInt64(), field, diags)
+}
+
 // buildSetup assembles a netcup.ServerImageSetup from the resource model, sending
 // only caller-set (non-null) fields so the request mirrors the config. Appends a
-// diagnostic and returns ok=false if a list element cannot be read.
+// diagnostic and returns ok=false if a list element cannot be read or an ID is
+// outside the signed 32-bit range the SCP API uses.
 func buildSetup(ctx context.Context, model *serverReinstallResourceModel, diags *diag.Diagnostics) (netcup.ServerImageSetup, bool) {
 	var setup netcup.ServerImageSetup
 
-	flavour := int32(model.ImageFlavourID.ValueInt64())
+	flavour, ok := int32ID(model.ImageFlavourID, "image_flavour_id", diags)
+	if !ok {
+		return setup, false
+	}
 	setup.ImageFlavourID = &flavour
 
 	if !model.DiskName.IsNull() && !model.DiskName.IsUnknown() {
@@ -276,7 +305,11 @@ func buildSetup(ctx context.Context, model *serverReinstallResourceModel, diags 
 		}
 		keys := make([]int32, len(ids))
 		for i, id := range ids {
-			keys[i] = int32(id)
+			key, ok := int32Range(id, fmt.Sprintf("ssh_key_ids[%d]", i), diags)
+			if !ok {
+				return setup, false
+			}
+			keys[i] = key
 		}
 		setup.SSHKeyIDs = keys
 	}
@@ -324,12 +357,41 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 
 	task, err := r.client.ReinstallServer(ctx, id, setup)
 	if err != nil {
-		// Any error from ReinstallServer means the reinstall was NOT accepted:
-		// ErrPreDispatch (token/request build), a 4xx/5xx *APIError (incl. 422
-		// ValidationError), or a transport/decode error. The install did not start,
-		// so surface an error and persist NO state — the next apply re-runs Create.
-		d, _ := apiErrorToDiag(err, true)
-		resp.Diagnostics.Append(d)
+		// Distinguish a DEFINITIVE rejection from an AMBIGUOUS dispatch outcome:
+		//
+		//  - errors.Is(err, netcup.ErrPreDispatch): the request was never built
+		//    or dispatched (token acquisition / request construction failed).
+		//    The install definitively did not start → error, persist NO state so
+		//    the next apply re-runs Create safely.
+		//  - *netcup.APIError (incl. 422 ValidationError): netcup answered with
+		//    a non-2xx — a definitive rejection → error, persist NO state.
+		//  - Anything else (a transport error from http.Do, or a decode failure
+		//    on a truncated 2xx body): AMBIGUOUS — the POST may already have been
+		//    accepted by netcup and the destructive reinstall may already be
+		//    running. Persist state + warn (mirroring the indeterminate
+		//    WaitForTask branch below) so the next apply does NOT wipe the
+		//    server a second time.
+		var apiErr *netcup.APIError
+		if errors.Is(err, netcup.ErrPreDispatch) || errors.As(err, &apiErr) {
+			d, _ := apiErrorToDiag(err, true)
+			resp.Diagnostics.Append(d)
+			return
+		}
+
+		plan.ID = types.StringValue(plan.ServerID.ValueString())
+		plan.TaskID = types.StringNull()
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+		resp.Diagnostics.AddWarning(
+			"netcup reinstall dispatch outcome could not be confirmed",
+			fmt.Sprintf(
+				"The reinstall request may have been accepted by netcup, but the response could not be read (%s) "+
+					"— e.g. a network failure after dispatch or a truncated response. The reinstall is likely "+
+					"already running.\n\n"+
+					"The resource has been recorded in Terraform state to avoid re-issuing the (destructive) "+
+					"reinstall on the next apply. Check the server / task status in the SCP control panel.",
+				err.Error(),
+			),
+		)
 		return
 	}
 
