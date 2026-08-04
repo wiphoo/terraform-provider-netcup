@@ -120,6 +120,13 @@ require:
 - `NETCUP_TEST_SERVER_ID` (for `TestAccServerDataSource`)
 - `NETCUP_TEST_IP` (for `TestAccRDNSResource`)
 
+`TestAccServerReinstallResource` additionally **wipes the test server** on
+apply (native OS reinstall) and is therefore gated by an explicit opt-in:
+`NETCUP_TEST_REINSTALL_ALLOWED=1`. When `TF_ACC` is set but the opt-in is
+missing the test fails (rather than skips) so an accidental `make acc` can
+never destroy a server without deliberate intent. The image flavour is
+discovered at runtime via the `netcup_server_images` data source.
+
 Run with:
 
 ```bash
@@ -225,6 +232,18 @@ rescue **status (inactive)**, neither of which carries a UUID — are
 live-refreshable as usual. The redactor still covers every field the *live*
 responses of those would carry (see the `password`/`username` rows above), so
 switching them to a live recording later stays safe.
+
+The v0.6.0 **reinstall** surface is also replay-only at both tiers: the
+SDK-level reinstall cassettes (`TestReinstallServer*`) and the provider-tier
+`netcup_server_reinstall` cassettes (`TestServerReinstallResource_VCRCreate`,
+`_VCRCreateNoWait`, `_VCRCreateAPIError`, `_VCRDeleteNoOp`) are all
+hand-authored fixtures with the synthetic values above, because recording any
+of them would perform a **destructive OS reinstall** on the maintainer's
+server. They call `skipInRecordMode(t)` so `make acc-record` can never wipe a
+server. `TestServerReinstallResource_VCRCreate` additionally asserts the
+committed request body carries the redacted `customScript` marker, since the
+`method`+`URL`-only matcher would otherwise replay green even if the real
+script leaked into the cassette.
 
 ---
 

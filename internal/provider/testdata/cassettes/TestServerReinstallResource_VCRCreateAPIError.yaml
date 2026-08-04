@@ -1,0 +1,21 @@
+---
+version: 1
+interactions:
+- request:
+    body: '{"imageFlavourId":999999}'
+    form: {}
+    headers:
+      Accept:
+      - application/json
+      Content-Type:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/image
+    method: POST
+  response:
+    body: '{"code":"VALIDATION","message":"imageFlavourId 999999 is not a valid image flavour for this server"}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 422 Unprocessable Entity
+    code: 422
+    duration: ""
