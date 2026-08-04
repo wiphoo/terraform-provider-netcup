@@ -106,6 +106,14 @@ func TestServerReinstallResource_VCRCreateNoWait(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
+	// If Create regressed and polled the task despite wait=false, the absent GET
+	// interaction produces a go-vcr error that serverReinstallResource.Create
+	// classifies as INDETERMINATE and surfaces as a warning (state + task ID are
+	// still persisted), so neither the HasError check nor the task-ID assertion
+	// below would catch it. Assert zero warnings to pin the no-poll behavior.
+	if len(resp.Diagnostics.Warnings()) != 0 {
+		t.Fatalf("Create() emitted warnings (wait=false must not poll the task): %v", resp.Diagnostics.Warnings())
+	}
 
 	var state serverReinstallResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
