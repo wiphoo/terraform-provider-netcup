@@ -177,6 +177,10 @@ func TestServerReinstallResource_VCRCreateAPIError(t *testing.T) {
 // passing silently. The unit test asserts the same via httptest; this pins the
 // behavior against the recorder transport.
 func TestServerReinstallResource_VCRDeleteNoOp(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("reinstall cassette is a hand-authored fixture; recording would perform a destructive OS reinstall")
+	}
+
 	const cassetteName = "TestServerReinstallResource_VCRDeleteNoOp"
 	client := newVCRClient(t, cassetteName)
 	ctx := context.Background()
