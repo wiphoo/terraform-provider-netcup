@@ -17,8 +17,11 @@ import (
 // `make acc` can never destroy a server without deliberate intent. When TF_ACC
 // is set but the opt-in is missing, the test FAILS (not skips) to make the
 // missing guard loud. The image flavour is discovered at runtime via the
-// netcup_server_images data source (no hardcoded flavour), and wait=false keeps
-// the live apply from blocking on a multi-minute reinstall task.
+// netcup_server_images data source, and wait=true blocks the apply until the
+// reinstall task reaches a terminal state so a reinstall that ends in ERROR
+// fails this release-gate test instead of leaving `make acc` green (a wait=false
+// apply would return on the 202 before the task could fail, and the resource's
+// Delete is a no-op, so nothing downstream would catch it).
 func TestAccServerReinstallResource(t *testing.T) {
 	if os.Getenv("TF_ACC") == "" {
 		t.Skip("TF_ACC not set")
@@ -44,7 +47,7 @@ func TestAccServerReinstallResource(t *testing.T) {
 				resource "netcup_server_reinstall" "test" {
 					server_id        = %q
 					image_flavour_id = element(data.netcup_server_images.test.images[*].id, 0)
-					wait             = false
+					wait             = true
 				}`, serverID, serverID),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("netcup_server_reinstall.test", "server_id", serverID),

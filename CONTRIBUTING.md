@@ -125,7 +125,9 @@ apply (native OS reinstall) and is therefore gated by an explicit opt-in:
 `NETCUP_TEST_REINSTALL_ALLOWED=1`. When `TF_ACC` is set but the opt-in is
 missing the test fails (rather than skips) so an accidental `make acc` can
 never destroy a server without deliberate intent. The image flavour is
-discovered at runtime via the `netcup_server_images` data source.
+discovered at runtime via the `netcup_server_images` data source, and the apply
+uses `wait=true`, so the test blocks until the reinstall task reaches a
+terminal state — a reinstall that ends in `ERROR` fails the release gate.
 
 Run with:
 

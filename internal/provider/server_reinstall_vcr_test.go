@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
+
+	vcr "github.com/wiphoo/terraform-provider-netcup/tests/vcr"
 )
 
 // TestServerReinstallResource_VCRCreate replays a destructive OS reinstall
@@ -30,7 +33,8 @@ func TestServerReinstallResource_VCRCreate(t *testing.T) {
 	}
 
 	const cassetteName = "TestServerReinstallResource_VCRCreate"
-	client := newVCRClient(t, cassetteName)
+	var requests vcr.RequestLog
+	client := vcr.NewRequestLoggingClient(t, cassetteName, &requests)
 	ctx := context.Background()
 	r, schemaResp := configureServerReinstallResource(t, client)
 
@@ -63,6 +67,16 @@ func TestServerReinstallResource_VCRCreate(t *testing.T) {
 	}
 	if state.TaskID.ValueString() != "66666666-6666-4666-8666-666666666666" {
 		t.Errorf("TaskID = %q, want the cassette task UUID", state.TaskID.ValueString())
+	}
+
+	// wait=true must actually poll the reinstall task. go-vcr replay does NOT
+	// fail when a cassette interaction goes unconsumed, so a Create regression
+	// that stopped polling would replay green: the POST still returns the task
+	// UUID, and the task-ID assertion above still passes. Assert the task GET
+	// was issued to pin the wait path this test claims to exercise.
+	taskURL := "https://www.servercontrolpanel.de/scp-core/api/v1/tasks/66666666-6666-4666-8666-666666666666"
+	if !requests.Contains(http.MethodGet, taskURL) {
+		t.Errorf("Create() with wait=true did not poll the reinstall task (want GET %s); requests:\n%s", taskURL, &requests)
 	}
 
 	// The reinstall request body is secret-bearing (customScript), so the
