@@ -30,7 +30,7 @@ data "netcup_server_images" "reinstall" {
 }
 
 locals {
-  available_reinstall_images = try(one(data.netcup_server_images.reinstall[*].images), [])
+  available_reinstall_images = coalesce(one(data.netcup_server_images.reinstall[*].images), [])
   selected_reinstall_images = [
     for image in local.available_reinstall_images : image
     if var.reinstall_image_name != null && image.name == var.reinstall_image_name
