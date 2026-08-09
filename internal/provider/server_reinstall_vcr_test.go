@@ -53,6 +53,9 @@ func TestServerReinstallResource_VCRCreate(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
+	if len(resp.Diagnostics.Warnings()) != 0 {
+		t.Fatalf("Create() emitted warnings on the successful wait=true path: %v", resp.Diagnostics.Warnings())
+	}
 
 	var state serverReinstallResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
