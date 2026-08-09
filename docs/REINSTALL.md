@@ -168,7 +168,8 @@ durable server-install object.
 
 The complete opt-in configuration is in
 [`examples/server_reinstall.tf`](../examples/server_reinstall.tf). The example
-selects an image by its name and passes a native `custom_script` bootstrap.
+selects an image by its unique flavour ID and passes a native `custom_script`
+bootstrap.
 
 ### Example
 
@@ -180,7 +181,7 @@ data "netcup_server_images" "reinstall" {
 locals {
   image = one([
     for image in data.netcup_server_images.reinstall.images : image
-    if image.name == var.reinstall_image_name
+    if image.id == var.reinstall_image_flavour_id
   ])
 }
 

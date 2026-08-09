@@ -6,11 +6,11 @@
 # reinstall or wipe the server.
 #
 # This example is opt-in. Set reinstall_enabled=true and provide a real server
-# ID plus the exact image name returned by netcup_server_images before applying:
+# ID plus an exact image flavour ID returned by netcup_server_images before applying:
 #
 #   terraform plan -var 'server_id=123456' \
 #     -var 'reinstall_enabled=true' \
-#     -var 'reinstall_image_name=Ubuntu 24.04'
+#     -var 'reinstall_image_flavour_id=123'
 
 variable "reinstall_enabled" {
   description = "Set to true to enable the destructive reinstall example."
@@ -18,9 +18,9 @@ variable "reinstall_enabled" {
   default     = false
 }
 
-variable "reinstall_image_name" {
-  description = "Exact image flavour name returned by netcup_server_images."
-  type        = string
+variable "reinstall_image_flavour_id" {
+  description = "Exact image flavour ID returned by netcup_server_images."
+  type        = number
   default     = null
 }
 
@@ -33,9 +33,9 @@ locals {
   available_reinstall_images = coalesce(one(data.netcup_server_images.reinstall[*].images), [])
   selected_reinstall_images = [
     for image in local.available_reinstall_images : image
-    if var.reinstall_image_name != null && image.name == var.reinstall_image_name
+    if var.reinstall_image_flavour_id != null && image.id == var.reinstall_image_flavour_id
   ]
-  selected_reinstall_image = try(local.selected_reinstall_images[0], null)
+  selected_reinstall_image = one(local.selected_reinstall_images)
 }
 
 resource "netcup_server_reinstall" "example" {
