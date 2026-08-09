@@ -98,12 +98,15 @@ Scope:
 
 This uses Netcup's native install + `customScript` mechanism. It is not Terraform-driven SSH, Ansible, or configuration management — those remain non-goals.
 
-## v0.6.0 - Provisioning and Reinstallation (Terraform provider)
+## v0.6.0 - Provisioning and Reinstallation (Terraform provider) (shipped)
 
 Scope:
 
 - Provisioning / reinstall resource(s) with `customScript`
 - Image selection
+- go-vcr replay and acceptance tests
+- Provider documentation, examples, and destructive-operation guidance
+- Signed provider release artifacts via GoReleaser and cosign
 
 ## v0.7.0 - Snapshot Management
 

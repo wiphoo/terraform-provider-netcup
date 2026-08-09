@@ -146,6 +146,90 @@ netcupctl server reinstall 42 --image 123 --wait --json
 }
 ```
 
+## Terraform provider
+
+The `netcup_server_reinstall` resource performs the same native API operation
+from Terraform. It is a managed representation of a destructive action, not a
+durable server-install object.
+
+> **WARNING: applying or replacing this resource wipes the server.** All data
+> is permanently lost and the server is unavailable while the OS is installed.
+> Changing any install input runs another reinstall. Destroying the resource is
+> a no-op: it removes only Terraform state and never reinstalls or wipes the
+> server.
+
+### Workflow
+
+1. Use `netcup_server_images` to discover image flavours for the target server.
+2. Set the selected image's `id` as `image_flavour_id` on
+   `netcup_server_reinstall`.
+3. Apply the configuration and let the resource wait for the reinstall task, or
+   set `wait = false` to return after the API accepts the task.
+
+The complete opt-in configuration is in
+[`examples/server_reinstall.tf`](../examples/server_reinstall.tf). The example
+selects an image by its name and passes a native `custom_script` bootstrap.
+
+### Example
+
+```hcl
+data "netcup_server_images" "reinstall" {
+  server_id = var.server_id
+}
+
+locals {
+  image = one([
+    for image in data.netcup_server_images.reinstall.images : image
+    if image.name == var.reinstall_image_name
+  ])
+}
+
+resource "netcup_server_reinstall" "example" {
+  server_id        = var.server_id
+  image_flavour_id = local.image.id
+
+  custom_script = <<-SCRIPT
+    #!/bin/sh
+    set -eu
+    echo "bootstrap completed" >/var/log/netcup-bootstrap.log
+  SCRIPT
+}
+```
+
+Do not use a placeholder server ID or image name for a real apply. The
+`image_flavour_id` must come from the image-flavour list for the target server.
+The request body and endpoint shape are pinned in
+[SCP-API-NOTES.md](SCP-API-NOTES.md#os-install--reinstall).
+
+### Attributes
+
+| Attribute | Required | Description |
+| --- | --- | --- |
+| `server_id` | Yes | Numeric server ID as a string. Changes force a replacement. |
+| `image_flavour_id` | Yes | Image flavour ID from `netcup_server_images`. Changes force a replacement. |
+| `disk_name` | No | Target disk name. Changes force a replacement. |
+| `root_partition_full_disk_size` | No | Allocate the full disk to the root partition. Changes force a replacement. |
+| `hostname` | No | Hostname for the installed system. Changes force a replacement. |
+| `locale` | No | Locale for the installed system. Changes force a replacement. |
+| `timezone` | No | Timezone for the installed system. Changes force a replacement. |
+| `additional_user_username` | No | Additional non-root username. Changes force a replacement. |
+| `additional_user_password` | No | Password for the additional user. Sensitive; changes force a replacement. |
+| `ssh_key_ids` | No | List of SCP SSH key IDs to authorize. Changes force a replacement. |
+| `ssh_password_authentication` | No | Enable SSH password authentication. Changes force a replacement. |
+| `custom_script` | No | Native post-install bootstrap script. Sensitive because it may contain secrets; changes force a replacement. |
+| `email_to_executing_user` | No | Email the executing user when installation completes. Changes force a replacement. |
+| `triggers` | No | String map for deliberate reruns, such as a script hash. Changes force a replacement. |
+| `wait` | No | Defaults to `true`; wait for the async task to reach a terminal state. Changing only this attribute does not reinstall. |
+| `id` | Computed | Resource ID, equal to `server_id`. |
+| `task_id` | Computed | UUID of the most recent accepted reinstall task, when the API returned one. |
+
+All install inputs and `triggers` are `RequiresReplace`, so Terraform shows a
+replacement (`-/+`) before it performs another wipe. With `wait = false`, the
+resource records the accepted task UUID and returns without polling; it does
+not cancel the remote reinstall. A confirmed terminal task failure is returned
+as an error, while an interrupted or indeterminate wait is recorded with a
+warning to avoid issuing the destructive operation twice.
+
 ## SSH key management
 
 SSH keys are referenced by their numeric id from the SCP SSH-keys endpoint, not
