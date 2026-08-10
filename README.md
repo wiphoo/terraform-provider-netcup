@@ -188,12 +188,14 @@ for ready-to-use configurations.
 **Resources:** [`netcup_rdns`](examples/rdns.tf) (v0.2.0),
 [`netcup_server_power`](examples/server_power.tf) (v0.4.0),
 [`netcup_server_rescue`](examples/server_rescue.tf) (v0.4.0),
-[`netcup_server_reinstall`](examples/server_reinstall.tf) (v0.6.0; destructive).
+[`netcup_server_reinstall`](examples/server_reinstall.tf) (v0.6.0; destructive),
+[`netcup_ssh_key`](examples/ssh_key.tf) (upcoming in v0.6.1).
 
 **Data sources:** [`netcup_servers`](examples/servers.tf),
 [`netcup_server`](examples/server.tf) (v0.2.0),
 [`netcup_server_images`](examples/server_images.tf),
-[`netcup_server_snapshots`](examples/server_snapshots.tf) (v0.4.0).
+[`netcup_server_snapshots`](examples/server_snapshots.tf) (v0.4.0),
+[`netcup_ssh_keys`](examples/ssh_key.tf) (upcoming in v0.6.1).
 
 ```hcl
 terraform {
