@@ -70,6 +70,33 @@ func ParseAccessTokenExpiry(token string) (time.Time, error) {
 	return time.Unix(claims.Exp, 0), nil
 }
 
+// ParseAccessTokenUserID extracts the numeric SCP account id from the JWT
+// access token's "id" claim, without verifying its signature. It returns the
+// id as a string (used verbatim to build /v1/users/{userId}/ssh-keys), mirroring
+// how the legacy netcup-api.sh USERID helper derives the account from the token.
+//
+// It errors when token is not a well-formed JWT or has no "id" claim.
+func ParseAccessTokenUserID(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("access token is not a JWT: expected 3 dot-separated segments, got %d", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("decoding JWT payload: %w", err)
+	}
+	var claims struct {
+		ID json.Number `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("decoding JWT claims: %w", err)
+	}
+	if claims.ID.String() == "" {
+		return "", fmt.Errorf("JWT has no id claim")
+	}
+	return claims.ID.String(), nil
+}
+
 // staticTokenSource always returns the same token.
 type staticTokenSource string
 
