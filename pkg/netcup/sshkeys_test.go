@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -73,5 +74,62 @@ func TestEnsureSSHKeyReusesContentMatch(t *testing.T) {
 	}
 	if key.ID != 7 {
 		t.Fatalf("got id %d, want reused 7", key.ID)
+	}
+}
+
+func TestDeleteSSHKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %s, want DELETE", r.Method)
+		}
+		if r.URL.Path != "/v1/users/12345/ssh-keys/7" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken(tokenWithID("12345")))
+	if err := c.DeleteSSHKey(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEnsureSSHKeyDeletesStaleAndCreates(t *testing.T) {
+	var mu sync.Mutex
+	deleteCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":5,"name":"k8s","key":"ssh-ed25519 OLD"}]`))
+		case http.MethodDelete:
+			if r.URL.Path != "/v1/users/12345/ssh-keys/5" {
+				t.Errorf("unexpected delete path %q", r.URL.Path)
+			}
+			mu.Lock()
+			deleteCalled = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":8,"name":"k8s","key":"ssh-ed25519 NEW"}`))
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken(tokenWithID("12345")))
+	key, err := c.EnsureSSHKey(context.Background(), "k8s", "ssh-ed25519 NEW")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mu.Lock()
+	called := deleteCalled
+	mu.Unlock()
+	if !called {
+		t.Fatal("expected stale key DELETE to be called")
+	}
+	if key.ID != 8 {
+		t.Fatalf("got id %d, want 8", key.ID)
 	}
 }

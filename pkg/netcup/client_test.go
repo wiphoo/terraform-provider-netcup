@@ -244,6 +244,17 @@ func TestClientBearerToken(t *testing.T) {
 	}
 }
 
+func TestClientBearerTokenWithSource(t *testing.T) {
+	c := New(WithAccessToken("static-abc"), WithTokenSource(staticTokenSource("source-xyz")))
+	got, err := c.bearerToken(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "source-xyz" {
+		t.Fatalf("got %q, want %q (TokenSource should take precedence)", got, "source-xyz")
+	}
+}
+
 func TestDefaultAPIEndpointIsAPIRoot(t *testing.T) {
 	// The health check lives at {root}/ping. The default must be the
 	// /scp-core/api root, not the versioned /v1 base — otherwise Ping hits an
