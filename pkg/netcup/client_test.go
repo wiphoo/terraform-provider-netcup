@@ -233,6 +233,17 @@ func TestGetRDNSSurfacesTokenSourceError(t *testing.T) {
 	}
 }
 
+func TestClientBearerToken(t *testing.T) {
+	c := New(WithAccessToken("static-abc"))
+	got, err := c.bearerToken(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "static-abc" {
+		t.Fatalf("got %q, want %q", got, "static-abc")
+	}
+}
+
 func TestDefaultAPIEndpointIsAPIRoot(t *testing.T) {
 	// The health check lives at {root}/ping. The default must be the
 	// /scp-core/api root, not the versioned /v1 base — otherwise Ping hits an
