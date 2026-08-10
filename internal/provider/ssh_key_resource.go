@@ -52,8 +52,9 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"id": schema.StringAttribute{
-				Computed:    true,
-				Description: "The numeric SCP SSH-key id.",
+				Computed:      true,
+				Description:   "The numeric SCP SSH-key id.",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 		},
 	}
@@ -72,6 +73,11 @@ func (r *sshKeyResource) Configure(_ context.Context, req resource.ConfigureRequ
 }
 
 func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	if r.client == nil {
+		resp.Diagnostics.AddError("Unconfigured provider",
+			"The provider has not been configured. Please configure the netcup provider before using netcup_ssh_key.")
+		return
+	}
 	var plan sshKeyResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
@@ -88,6 +94,11 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 }
 
 func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	if r.client == nil {
+		resp.Diagnostics.AddError("Unconfigured provider",
+			"The provider has not been configured. Please configure the netcup provider before using netcup_ssh_key.")
+		return
+	}
 	var state sshKeyResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
@@ -116,6 +127,11 @@ func (r *sshKeyResource) Update(ctx context.Context, req resource.UpdateRequest,
 }
 
 func (r *sshKeyResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+	if r.client == nil {
+		resp.Diagnostics.AddError("Unconfigured provider",
+			"The provider has not been configured. Please configure the netcup provider before using netcup_ssh_key.")
+		return
+	}
 	var state sshKeyResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
