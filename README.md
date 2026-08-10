@@ -377,8 +377,10 @@ Key semantics:
 - **`wait` attribute** — defaults to `true`. When true, the resource blocks
   `terraform apply` until the underlying async SCP task reaches a terminal state
   (FINISHED, ERROR, or canceled). Set `wait = false` to fire-and-forget the
-  command and return immediately; the resource retains the task UUID so a
-  subsequent refresh can reconcile.
+  command and return immediately. The resource retains the task UUID, but
+  `netcup_server_reinstall` is an exception: its `Read` operation only confirms
+  that the server exists and does not poll or reconcile the reinstall task.
+  Monitor the task separately when using `wait = false`.
 - **Destroy is not power-off.** Deleting `netcup_server_power` from your
   configuration or running `terraform destroy` only removes the resource from
   state — it does not change the server's power state. To explicitly power a

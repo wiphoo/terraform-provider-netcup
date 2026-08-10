@@ -39,9 +39,18 @@ locals {
 }
 
 resource "netcup_server_reinstall" "example" {
-  count            = local.selected_reinstall_image == null ? 0 : 1
+  # Keep resource membership tied to explicit opt-in, not to a transient image
+  # catalog response. A missing image is rejected by the precondition below.
+  count            = var.server_id != null && var.reinstall_enabled ? 1 : 0
   server_id        = var.server_id
   image_flavour_id = local.selected_reinstall_image.id
+
+  lifecycle {
+    precondition {
+      condition     = length(local.selected_reinstall_images) == 1
+      error_message = "reinstall_image_flavour_id must match exactly one image flavour returned by netcup_server_images."
+    }
+  }
 
   custom_script = <<-SCRIPT
     #!/bin/sh
