@@ -2,11 +2,15 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 func TestRequiresReplaceIfNotTrimEqual(t *testing.T) {
@@ -40,5 +44,20 @@ func TestRequiresReplaceIfNotTrimEqual(t *testing.T) {
 	// Unknown prior state: conservatively replace.
 	if !run(types.StringUnknown(), types.StringValue("ssh-ed25519 AAAA")) {
 		t.Fatal("unknown prior state should conservatively require replacement")
+	}
+}
+
+func TestIsDefinitiveSSHKeyRejection(t *testing.T) {
+	if !isDefinitiveSSHKeyRejection(fmt.Errorf("%w: token", netcup.ErrPreDispatch)) {
+		t.Fatal("pre-dispatch error must be definitive")
+	}
+	if !isDefinitiveSSHKeyRejection(&netcup.APIError{StatusCode: 422}) {
+		t.Fatal("a 4xx APIError must be definitive")
+	}
+	if isDefinitiveSSHKeyRejection(&netcup.APIError{StatusCode: 502}) {
+		t.Fatal("a 5xx APIError must be ambiguous (not definitive)")
+	}
+	if isDefinitiveSSHKeyRejection(errors.New("connection reset after dispatch")) {
+		t.Fatal("a plain transport error must be ambiguous (not definitive)")
 	}
 }

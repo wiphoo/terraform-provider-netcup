@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,6 +53,41 @@ func requiresReplaceIfNotTrimEqual(_ context.Context, req planmodifier.StringReq
 		return
 	}
 	resp.RequiresReplace = strings.TrimSpace(req.StateValue.ValueString()) != strings.TrimSpace(req.PlanValue.ValueString())
+}
+
+// isDefinitiveSSHKeyRejection reports whether a CreateSSHKey error PROVES the key
+// was not created: a pre-dispatch failure (request never sent) or a 4xx client
+// rejection. A 5xx, transport, or decode error is ambiguous — netcup may have
+// accepted the POST before the failure — so it is NOT definitive and triggers
+// reconciliation instead.
+func isDefinitiveSSHKeyRejection(err error) bool {
+	if errors.Is(err, netcup.ErrPreDispatch) {
+		return true
+	}
+	var apiErr *netcup.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode < 500
+	}
+	return false
+}
+
+// reconcileCreatedSSHKey looks for a key matching (name, trimmed public key)
+// after an ambiguous create failure, returning it (or nil if none is found) so
+// an accepted-but-unconfirmed key is adopted into state rather than duplicated
+// on the next apply.
+func (r *sshKeyResource) reconcileCreatedSSHKey(ctx context.Context, name, publicKey string) (*netcup.SSHKey, error) {
+	keys, err := r.client.ListSSHKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	publicKey = strings.TrimSpace(publicKey)
+	for i := range keys {
+		if strings.TrimSpace(keys[i].Name) == name && strings.TrimSpace(keys[i].Key) == publicKey {
+			return &keys[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // NewSSHKeyResource returns a new netcup_ssh_key resource factory.
@@ -134,9 +170,31 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 	// Adopting a pre-existing SCP key is done via `terraform import`, not Create.
 	key, err := r.client.CreateSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
 	if err != nil {
-		d, _ := apiErrorToDiag(err, true)
-		resp.Diagnostics.Append(d)
-		return
+		// Definitive rejection (pre-dispatch or 4xx): the key was never created —
+		// surface the error and persist no state so the next apply retries safely.
+		if isDefinitiveSSHKeyRejection(err) {
+			d, _ := apiErrorToDiag(err, true)
+			resp.Diagnostics.Append(d)
+			return
+		}
+		// Ambiguous (5xx / transport / decode after dispatch): netcup may have
+		// created the key but the outcome could not be confirmed. Since Create
+		// always creates a fresh key, a blind retry would orphan the accepted key
+		// and duplicate / name-conflict. Reconcile by matching (name, trimmed
+		// content) and adopt it if found.
+		reconciled, rerr := r.reconcileCreatedSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
+		if rerr != nil || reconciled == nil {
+			d, _ := apiErrorToDiag(err, true)
+			resp.Diagnostics.Append(d)
+			return
+		}
+		key = reconciled
+		resp.Diagnostics.AddWarning(
+			"netcup SSH key creation outcome could not be confirmed",
+			fmt.Sprintf("The create request may have been accepted by netcup, but the outcome could not be confirmed (%s). "+
+				"A key matching the requested name and content was found and adopted into state to avoid creating a "+
+				"duplicate on the next apply.", err.Error()),
+		)
 	}
 	plan.ID = types.StringValue(strconv.FormatInt(int64(key.ID), 10))
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -189,6 +247,20 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 func (r *sshKeyResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan sshKeyResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	var state sshKeyResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Update runs only for non-replacement changes — per requiresReplaceIfNotTrimEqual
+	// that is a whitespace-only edit, which does not change the SCP key or its id.
+	// The computed `id` is planned unknown because a sibling attribute changed, so
+	// carry the prior id forward; otherwise the apply fails with an inconsistent
+	// (unknown) result.
+	plan.ID = state.ID
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -218,9 +290,13 @@ func (r *sshKeyResource) Delete(ctx context.Context, req resource.DeleteRequest,
 }
 
 func (r *sshKeyResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	if _, err := strconv.ParseInt(req.ID, 10, 32); err != nil {
+	n, err := strconv.ParseInt(req.ID, 10, 32)
+	if err != nil {
 		resp.Diagnostics.AddError("Invalid import ID", fmt.Sprintf("The import ID must be a numeric ssh-key id; got %q.", req.ID))
 		return
 	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
+	// Store the canonical base-10 form. Read matches against
+	// strconv.FormatInt(k.ID, 10), so a noncanonical spelling like "007" or "+7"
+	// would never match and the freshly-imported resource would be dropped.
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strconv.FormatInt(n, 10))...)
 }
