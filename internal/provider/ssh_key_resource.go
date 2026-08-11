@@ -71,33 +71,6 @@ func isDefinitiveSSHKeyRejection(err error) bool {
 	return false
 }
 
-// reconcileCreatedSSHKey looks for a key matching (name, trimmed public key)
-// after an ambiguous create failure, returning it (or nil if none is found) so
-// an accepted-but-unconfirmed key is adopted into state rather than duplicated
-// on the next apply.
-//
-// priorIDs is the set of key IDs that existed BEFORE the create was attempted.
-// Only a NEWLY-appeared matching key is adopted: a pre-existing (priorIDs) match
-// is an unmanaged key the create did not produce, and adopting it would make
-// Terraform wrongly own — and later delete — a key it never created.
-func (r *sshKeyResource) reconcileCreatedSSHKey(ctx context.Context, name, publicKey string, priorIDs map[int32]struct{}) (*netcup.SSHKey, error) {
-	keys, err := r.client.ListSSHKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	name = strings.TrimSpace(name)
-	publicKey = strings.TrimSpace(publicKey)
-	for i := range keys {
-		if _, existed := priorIDs[keys[i].ID]; existed {
-			continue // pre-existing unmanaged key — not the one this create made
-		}
-		if strings.TrimSpace(keys[i].Name) == name && strings.TrimSpace(keys[i].Key) == publicKey {
-			return &keys[i], nil
-		}
-	}
-	return nil, nil
-}
-
 // NewSSHKeyResource returns a new netcup_ssh_key resource factory.
 func NewSSHKeyResource() resource.Resource { return &sshKeyResource{} }
 
@@ -171,55 +144,33 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	// Always create a fresh key rather than reusing an existing one. Reuse would
-	// return a prior key's id; under create_before_destroy a semantic-only
-	// replacement (e.g. file(...) -> trimspace(file(...))) would then have the
-	// deposed instance's Delete remove the very key the replacement points to.
-	// Adopting a pre-existing SCP key is done via `terraform import`, not Create.
-	//
-	// Snapshot the key ids that exist BEFORE the create so that, if the outcome is
-	// ambiguous, reconciliation can adopt only a NEWLY-appeared key — never a
-	// pre-existing unmanaged one. If this pre-list fails, priorListErr is recorded
-	// and reconciliation is skipped (we cannot tell new from pre-existing).
-	priorKeys, priorListErr := r.client.ListSSHKeys(ctx)
-	priorIDs := make(map[int32]struct{}, len(priorKeys))
-	for _, k := range priorKeys {
-		priorIDs[k.ID] = struct{}{}
-	}
-
+	// Always create a fresh key. This resource owns the key it creates; adopting a
+	// pre-existing SCP key is done via `terraform import`, not Create.
 	key, err := r.client.CreateSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
 	if err != nil {
-		// Definitive rejection (pre-dispatch or 4xx): the key was never created —
-		// surface the error and persist no state so the next apply retries safely.
 		if isDefinitiveSSHKeyRejection(err) {
+			// Definitively not created (pre-dispatch or 4xx): plain error, no state,
+			// so the next apply retries safely.
 			d, _ := apiErrorToDiag(err, true)
 			resp.Diagnostics.Append(d)
 			return
 		}
-		// Ambiguous (5xx / transport / decode after dispatch): netcup may have
-		// created the key but the outcome could not be confirmed. Since Create
-		// always creates a fresh key, a blind retry would orphan the accepted key
-		// and duplicate / name-conflict. Reconcile by matching (name, trimmed
-		// content) — but only if we have a reliable pre-POST snapshot, and only
-		// adopting a NEWLY-appeared key (never a pre-existing unmanaged one).
-		if priorListErr != nil {
-			d, _ := apiErrorToDiag(err, true)
-			resp.Diagnostics.Append(d)
-			return
-		}
-		reconciled, rerr := r.reconcileCreatedSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString(), priorIDs)
-		if rerr != nil || reconciled == nil {
-			d, _ := apiErrorToDiag(err, true)
-			resp.Diagnostics.Append(d)
-			return
-		}
-		key = reconciled
-		resp.Diagnostics.AddWarning(
+		// Ambiguous (5xx / transport / decode after dispatch): netcup MAY have
+		// created the key, but the outcome could not be confirmed. Do NOT auto-adopt
+		// a matching key: the provider cannot prove a matching key was created by
+		// THIS request rather than pre-existing or created concurrently by another
+		// resource/client, and wrongly owning it would let a later replace/destroy
+		// delete a key it never created. Surface an actionable error and persist no
+		// state instead.
+		resp.Diagnostics.AddError(
 			"netcup SSH key creation outcome could not be confirmed",
 			fmt.Sprintf("The create request may have been accepted by netcup, but the outcome could not be confirmed (%s). "+
-				"A key matching the requested name and content was found and adopted into state to avoid creating a "+
-				"duplicate on the next apply.", err.Error()),
+				"A key may have been created. Check the SCP control panel: if a matching key exists, adopt it with "+
+				"`terraform import netcup_ssh_key.<name> <id>`; otherwise re-apply to create it. The provider does not "+
+				"auto-adopt a matching key because it cannot prove the key was created by this request rather than "+
+				"pre-existing or created concurrently.", err.Error()),
 		)
+		return
 	}
 	plan.ID = types.StringValue(strconv.FormatInt(int64(key.ID), 10))
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
