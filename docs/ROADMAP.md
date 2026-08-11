@@ -108,6 +108,22 @@ Scope:
 - Provider documentation, examples, and destructive-operation guidance
 - Signed provider release artifacts via GoReleaser and cosign
 
+## v0.6.1 - SSH Key Management (Terraform provider)
+
+Scope:
+
+- `netcup_ssh_key` resource — register an SSH public key in the SCP account
+  (fresh creation exposing a computed numeric `id`; adopt a pre-existing key
+  with `terraform import`)
+- `netcup_ssh_keys` data source — list the account's registered SSH keys
+- SDK support (`pkg/netcup`): SSH-key CRUD against the account-scoped
+  `/v1/users/{userId}/ssh-keys` endpoint (account id derived from the
+  access-token JWT `id` claim)
+
+This is a companion to v0.6.0 provisioning: the SSH-key `id` feeds
+`netcup_server_reinstall.ssh_key_ids`, so a reinstall can authorize keys managed
+entirely in Terraform (retiring the external ensure-ssh-key bootstrap script).
+
 ## v0.7.0 - Snapshot Management
 
 Scope:

@@ -177,6 +177,7 @@ func (p *netcupProvider) DataSources(_ context.Context) []func() datasource.Data
 		NewServerDataSource,
 		NewServerImagesDataSource,
 		NewServerSnapshotsDataSource,
+		NewSSHKeysDataSource,
 	}
 }
 
@@ -186,5 +187,6 @@ func (p *netcupProvider) Resources(_ context.Context) []func() resource.Resource
 		NewRescueResource,
 		NewServerPowerResource,
 		NewServerReinstallResource,
+		NewSSHKeyResource,
 	}
 }

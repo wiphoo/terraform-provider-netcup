@@ -24,6 +24,19 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+### Added
+
+- `netcup_ssh_key` resource — registers an SSH public key in the SCP account and
+  exposes a computed numeric `id` usable in `netcup_server_reinstall.ssh_key_ids`
+  (adopt a pre-existing key with `terraform import`).
+- `netcup_ssh_keys` data source — lists the account's registered SSH keys.
+- SDK (`pkg/netcup`): `ListSSHKeys`, `CreateSSHKey`, `DeleteSSHKey` against the
+  account-scoped `/v1/users/{userId}/ssh-keys` endpoint, plus `ResolveUserID` /
+  `ParseAccessTokenUserID` to derive the SCP account id from the access-token JWT
+  `id` claim.
+- go-vcr replay coverage for the SSH-key create/list/delete cycle, with the
+  account id, key id, key material, and create `Location` header redacted.
+
 ## [0.6.0] - 2026-08-09
 
 ### Added
