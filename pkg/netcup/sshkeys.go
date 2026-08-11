@@ -38,7 +38,15 @@ func (c *Client) ResolveUserID(ctx context.Context) (string, error) {
 	if token == "" {
 		return "", fmt.Errorf("%w: no access token available to resolve user id", ErrPreDispatch)
 	}
-	return ParseAccessTokenUserID(token)
+	userID, err := ParseAccessTokenUserID(token)
+	if err != nil {
+		// A malformed token / missing "id" claim fails before any request is built,
+		// so mark it pre-dispatch (like the failures above). Otherwise callers such
+		// as sshKeyResource.Create would misclassify this definitive
+		// token/configuration error as an ambiguous, possibly-dispatched one.
+		return "", fmt.Errorf("%w: resolving account id from access token: %w", ErrPreDispatch, err)
+	}
+	return userID, nil
 }
 
 // sshKeysPath builds /v1/users/{userId}/ssh-keys for the authenticated account.

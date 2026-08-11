@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,18 @@ import (
 func tokenWithID(id string) string {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"id":` + id + `,"exp":9999999999}`))
 	return "h." + payload + ".s"
+}
+
+func TestResolveUserIDMalformedTokenIsPreDispatch(t *testing.T) {
+	// A non-JWT / missing-"id"-claim token fails before any request is built, so
+	// the error must wrap ErrPreDispatch (a definitive, never-dispatched failure)
+	// rather than surfacing as an ambiguous, possibly-dispatched one.
+	for _, tok := range []string{"not-a-jwt", "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":1}`)) + ".s"} {
+		c := New(WithAccessToken(tok))
+		if _, err := c.ResolveUserID(context.Background()); err == nil || !errors.Is(err, ErrPreDispatch) {
+			t.Fatalf("token %q: want ErrPreDispatch-wrapped error, got %v", tok, err)
+		}
+	}
 }
 
 func TestListSSHKeys(t *testing.T) {
