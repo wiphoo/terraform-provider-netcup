@@ -47,6 +47,22 @@ func TestRequiresReplaceIfNotTrimEqual(t *testing.T) {
 	}
 }
 
+func TestTrimEqualPlanState(t *testing.T) {
+	if !trimEqualPlanState(types.StringValue("ssh-ed25519 AAAA\n"), types.StringValue("ssh-ed25519 AAAA")) {
+		t.Fatal("a trailing-newline-only difference must be trim-equal (in-place, id preserved)")
+	}
+	if trimEqualPlanState(types.StringValue("key-a"), types.StringValue("key-b")) {
+		t.Fatal("genuinely different values must not be trim-equal (replacement)")
+	}
+	// Unknown/null on either side can't be proven equal → treated as a replacement.
+	if trimEqualPlanState(types.StringUnknown(), types.StringValue("k")) {
+		t.Fatal("unknown planned value must not be trim-equal")
+	}
+	if trimEqualPlanState(types.StringValue("k"), types.StringNull()) {
+		t.Fatal("null state value must not be trim-equal")
+	}
+}
+
 func TestIsDefinitiveSSHKeyRejection(t *testing.T) {
 	if !isDefinitiveSSHKeyRejection(fmt.Errorf("%w: token", netcup.ErrPreDispatch)) {
 		t.Fatal("pre-dispatch error must be definitive")

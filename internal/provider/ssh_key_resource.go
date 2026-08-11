@@ -20,6 +20,7 @@ import (
 var _ resource.Resource = &sshKeyResource{}
 var _ resource.ResourceWithConfigure = &sshKeyResource{}
 var _ resource.ResourceWithImportState = &sshKeyResource{}
+var _ resource.ResourceWithModifyPlan = &sshKeyResource{}
 
 type sshKeyResource struct {
 	client *netcup.Client
@@ -71,8 +72,47 @@ func isDefinitiveSSHKeyRejection(err error) bool {
 	return false
 }
 
+// trimEqualPlanState reports whether a planned string equals its prior-state
+// value ignoring surrounding whitespace. An unknown or null value on either side
+// cannot be proven equal and returns false — the safe direction (treat as a
+// change/replacement).
+func trimEqualPlanState(planVal, stateVal types.String) bool {
+	if planVal.IsUnknown() || planVal.IsNull() || stateVal.IsUnknown() || stateVal.IsNull() {
+		return false
+	}
+	return strings.TrimSpace(planVal.ValueString()) == strings.TrimSpace(stateVal.ValueString())
+}
+
 // NewSSHKeyResource returns a new netcup_ssh_key resource factory.
 func NewSSHKeyResource() resource.Resource { return &sshKeyResource{} }
+
+// ModifyPlan forces the computed id UNKNOWN on a genuine replacement so a stale
+// id is not copied forward by UseStateForUnknown. Without this, a whitespace-only
+// (non-replacement) edit correctly keeps the id stable — but a real key change
+// would otherwise plan the old id, and a replacement's Create mints a new one,
+// producing an "inconsistent result after apply". Mirrors
+// netcup_server_power / netcup_server_rescue.
+func (r *sshKeyResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	// Nothing to do on create (no prior state) or destroy (null plan).
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	var state, plan sshKeyResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// A replacement is planned exactly when name or public_key changed by more than
+	// surrounding whitespace — the same criterion as requiresReplaceIfNotTrimEqual.
+	replacing := !trimEqualPlanState(plan.Name, state.Name) || !trimEqualPlanState(plan.PublicKey, state.PublicKey)
+	if replacing {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("id"), types.StringUnknown())...)
+	}
+	// Otherwise (whitespace-only in-place update) leave UseStateForUnknown's stable
+	// id copy in place so the key identity — and any dependent ssh_key_ids — is
+	// unchanged.
+}
 
 func (r *sshKeyResource) Metadata(_ context.Context, _ resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = "netcup_ssh_key"
@@ -108,14 +148,19 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"id": schema.StringAttribute{
 				Computed:    true,
 				Description: "The numeric SCP SSH-key id.",
-				// No UseStateForUnknown here: the SCP id is server-assigned and
-				// changes on every replace (both name and public_key are
-				// RequiresReplace), so on a replacement plan the id must be
-				// (known after apply). Copying the old id forward would make
-				// Create's new id an "inconsistent result after apply" error.
-				// There is no in-place-update path, so UseStateForUnknown would add
-				// no stability benefit anyway. Mirrors server_reinstall's plain
-				// Computed id.
+				PlanModifiers: []planmodifier.String{
+					// Keep the id stable on a whitespace-only in-place update (which
+					// requiresReplaceIfNotTrimEqual does NOT replace): otherwise the
+					// framework plans the computed id unknown because a sibling
+					// attribute changed, and that unknown propagates to a dependent
+					// netcup_server_reinstall.ssh_key_ids (RequiresReplace) — planning
+					// a destructive reinstall for a semantic no-op. On a GENUINE
+					// replacement the id must instead be unknown (the SCP id changes);
+					// ModifyPlan forces it unknown there, so this UseStateForUnknown
+					// only preserves the id for true in-place updates. Mirrors
+					// netcup_server_power / netcup_server_rescue.
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
