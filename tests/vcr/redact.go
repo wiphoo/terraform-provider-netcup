@@ -26,6 +26,12 @@ func redactInteraction(i *cassette.Interaction) error {
 	delete(i.Request.Headers, "Authorization")
 	delete(i.Request.Headers, "Cookie")
 	delete(i.Response.Headers, "Set-Cookie")
+	// The Location response header of a create (e.g. POST .../ssh-keys) echoes the
+	// new resource URL, which embeds the real account id and key id — redact it
+	// with the same URL rewriter used for the request URL.
+	for j, loc := range i.Response.Headers["Location"] {
+		i.Response.Headers["Location"][j] = redactURL(loc)
+	}
 	i.URL = redactURL(i.URL)
 	i.Request.Body = redactRequestBody(i.Request.Headers.Get("Content-Type"), i.Request.Body)
 	redactFormValues(i.Form)
@@ -73,6 +79,13 @@ const redactedUsernamePlaceholder = "vcr-redacted-username"
 // request matcher keys on method+URL only — so it collapses to a single fixed
 // marker.
 const redactedCustomScriptPlaceholder = "vcr-redacted-custom-script"
+
+// redactedSSHKeyPlaceholder replaces every SSH public-key value (the "key" field
+// of an SSH-key object, GET/POST /v1/users/{userId}/ssh-keys). A public key is
+// low-sensitivity but still account-identifying (its comment routinely carries a
+// user/host or email), and its exact bytes are irrelevant to replay (the request
+// matcher keys on method+URL only), so it collapses to a fixed marker.
+const redactedSSHKeyPlaceholder = "vcr-redacted-ssh-key"
 
 // fakeHostnameDomain is the fixed domain every hostname/nickname/PTR is
 // rewritten under.
@@ -385,6 +398,13 @@ func redactField(key string, val interface{}) interface{} {
 			return val
 		}
 		return redactedCustomScriptPlaceholder
+	case key == "key":
+		// The "key" field of an SSH-key object holds the public key content.
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return val
+		}
+		return redactedSSHKeyPlaceholder
 	case key == "description":
 		s, ok := val.(string)
 		if !ok || s == "" {
@@ -514,6 +534,15 @@ var rdnsURLPattern = regexp.MustCompile(`^(.*/v1/rdns/(ipv4|ipv6)/)([^/?]+)(.*)$
 // committing the real server id alongside the redacted body "id" field.
 var serverURLPattern = regexp.MustCompile(`^(.*/v1/servers/)([0-9]+)([/?].*)?$`)
 
+// usersSSHKeysURLPattern matches the account-scoped ssh-keys endpoints
+// (/v1/users/{userId}/ssh-keys and .../ssh-keys/{keyId}), which embed the real
+// account id — and, on delete, the real key id — directly in the URL. Group 2 is
+// the userId (rewritten to fakeUserIDValue, matching the "userId" body field);
+// group 4, when present, is the numeric key id (rewritten via fakeServerID,
+// matching how every other id is faked, so the URL id and the response body "id"
+// map to the same synthetic value).
+var usersSSHKeysURLPattern = regexp.MustCompile(`^(.*/v1/users/)([0-9]+)(/ssh-keys)(/[0-9]+)?([/?].*)?$`)
+
 // fakeServerID deterministically maps a real id value (e.g. server id,
 // template id, address id, site id) to a synthetic one. The same real
 // value always maps to the same fake.
@@ -556,6 +585,14 @@ func redactURL(rawURL string) string {
 		prefix, idStr, suffix := m[1], m[2], m[3]
 		fakeID := fakeServerID(json.Number(idStr))
 		return prefix + fakeID.String() + suffix
+	}
+	if m := usersSSHKeysURLPattern.FindStringSubmatch(rawURL); m != nil {
+		prefix, sshKeys, keyID, suffix := m[1], m[3], m[4], m[5]
+		out := prefix + strconv.Itoa(fakeUserIDValue) + sshKeys
+		if keyID != "" {
+			out += "/" + fakeServerID(json.Number(keyID[1:])).String()
+		}
+		return out + suffix
 	}
 	return rawURL
 }

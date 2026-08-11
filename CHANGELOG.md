@@ -34,6 +34,8 @@ This file is the human-curated companion to those release notes:
   account-scoped `/v1/users/{userId}/ssh-keys` endpoint, plus `ResolveUserID` /
   `ParseAccessTokenUserID` to derive the SCP account id from the access-token JWT
   `id` claim.
+- go-vcr replay coverage for the SSH-key create/list/delete cycle, with the
+  account id, key id, key material, and create `Location` header redacted.
 
 ## [0.6.0] - 2026-08-09
 
