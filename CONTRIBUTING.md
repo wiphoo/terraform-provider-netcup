@@ -22,8 +22,8 @@ started — from setting up a dev environment to opening a pull request.
 ## Code of conduct
 
 This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
-By participating you agree to uphold it. Please report unacceptable behavior
-privately to the project maintainers.
+By participating you agree to uphold it. Please report unacceptable behavior to
+[wiphoo@gmail.com](mailto:wiphoo@gmail.com).
 
 ---
 
