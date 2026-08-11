@@ -15,7 +15,7 @@ patch versions (e.g. `v0.1.1`) and announced in the GitHub Release notes.
 **Please do not open a public GitHub issue for security vulnerabilities.**
 
 Report security issues privately to
-[wiphoo.m@toffoli.co.th](mailto:wiphoo.m@toffoli.co.th). Include:
+[wiphoo@gmail.com](mailto:wiphoo@gmail.com). Include:
 
 - A description of the vulnerability and its impact.
 - Steps to reproduce or a proof-of-concept (not a working exploit).
