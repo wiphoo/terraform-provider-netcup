@@ -10,13 +10,15 @@ and other Netcup APIs planned in later releases.
 
 ## Status
 
-**v0.5.0 — Server reinstallation (CLI) is available.**
+**v0.6.0 — Server reinstallation (Terraform provider) is available.**
 
 The `netcupctl` CLI, shared Go SDK, CI, and release automation shipped in v0.1.0.
 The Terraform provider (data sources, rDNS resource, examples, and docs) shipped in v0.2.0 on top of the same SDK.
 v0.3.0 adds `netcupctl` operations: power state management, rescue mode, and image/snapshot listing.
 v0.4.0 brings those operations to the Terraform provider: `netcup_server_power`, `netcup_server_rescue`, `netcup_server_images`, and `netcup_server_snapshots`.
 v0.5.0 adds `netcupctl server reinstall` for native OS reinstallation, including `customScript` post-install bootstrap and image selection.
+v0.6.0 adds the `netcup_server_reinstall` resource with native `custom_script`
+bootstrap, image discovery, and async task waiting.
 
 See the [Roadmap](docs/ROADMAP.md) for the full release plan.
 
@@ -251,7 +253,7 @@ export NETCUP_REFRESH_TOKEN="..."   # pre-issued; optional when using auth login
 Treat the refresh token like a password: it can mint new access tokens without
 another browser approval. Never log or commit tokens.
 
-## Terraform provider (v0.4.0 — available)
+## Terraform provider (v0.6.0 — available)
 
 The Terraform provider is built on the same Go SDK as `netcupctl` and ships in
 v0.2.0 (data sources and rDNS), with provider power/rescue/images/snapshots
@@ -262,6 +264,7 @@ support added in v0.4.0. See [examples/](examples/) for ready-to-use configurati
 - [netcup_rdns resource](examples/rdns.tf) — manage reverse DNS (v0.2.0)
 - [netcup_server_power resource](examples/server_power.tf) — manage power state (v0.4.0)
 - [netcup_server_rescue resource](examples/server_rescue.tf) — manage rescue system (v0.4.0)
+- [netcup_server_reinstall resource](examples/server_reinstall.tf) — reinstall a server (v0.6.0; destructive)
 
 ### Data Sources
 
@@ -365,6 +368,8 @@ lifecycle introduces specific failure modes:
 | `netcup_server_power` | `state_option = "RESET"` / `"POWERCYCLE"` (reboot) | **Yes** | Brief outage during reboot |
 | `netcup_server_rescue` | Create (enable) | **Yes** | **Reboots** into rescue environment |
 | `netcup_server_rescue` | Destroy (disable) | **Yes** | **Reboots** back to normal OS |
+| `netcup_server_reinstall` | Create or replace | **Yes** | **Wipes the server** and reinstalls the OS; all data is lost |
+| `netcup_server_reinstall` | **Destroy** | **No** | **No-op.** Removes only Terraform state; it does not reinstall or wipe the server. |
 | `netcup_server_images` / `netcup_server_snapshots` | Read | No | Read-only data sources |
 
 Key semantics:
@@ -372,8 +377,10 @@ Key semantics:
 - **`wait` attribute** — defaults to `true`. When true, the resource blocks
   `terraform apply` until the underlying async SCP task reaches a terminal state
   (FINISHED, ERROR, or canceled). Set `wait = false` to fire-and-forget the
-  command and return immediately; the resource retains the task UUID so a
-  subsequent refresh can reconcile.
+  command and return immediately. The resource retains the task UUID, but
+  `netcup_server_reinstall` is an exception: its `Read` operation only confirms
+  that the server exists and does not poll or reconcile the reinstall task.
+  Monitor the task separately when using `wait = false`.
 - **Destroy is not power-off.** Deleting `netcup_server_power` from your
   configuration or running `terraform destroy` only removes the resource from
   state — it does not change the server's power state. To explicitly power a
@@ -381,6 +388,16 @@ Key semantics:
 - **Rescue enable/disable both reboot.** Creating `netcup_server_rescue`
   enables rescue mode (reboot), and destroying it disables rescue mode (another
   reboot). Consider the downtime budget before applying rescue changes.
+- **Reinstall is destructive.** Creating or replacing `netcup_server_reinstall`
+  permanently wipes the server and keeps it unavailable during OS installation.
+  Any changed install input, including `custom_script`, runs another reinstall.
+  The resource's destroy operation is deliberately a no-op.
+- **Reinstall secrets are Sensitive.** Treat `custom_script` as a secret because
+  bootstrap scripts may contain credentials, and never put
+  `additional_user_password` in logs or source control.
+
+See [Server Reinstall](docs/REINSTALL.md#terraform-provider) for the complete
+provider workflow and attribute reference.
 
 ## Design principles
 

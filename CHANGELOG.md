@@ -24,6 +24,23 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-09
+
+### Added
+
+- **Terraform provider provisioning and reinstallation.** Added the
+  `netcup_server_reinstall` resource for native OS installation through
+  `POST /v1/servers/{id}/image`, including:
+  - image selection through the existing `netcup_server_images` data source;
+  - native `custom_script` bootstrap support;
+  - optional install fields, `triggers`, and async task polling through `wait`;
+  - Sensitive handling for `custom_script` and `additional_user_password`;
+  - replacement-only reinstall semantics and a no-op destroy operation.
+- Added provider replay cassettes, a destructive-operation-gated acceptance test,
+  and an opt-in `examples/server_reinstall.tf` configuration.
+- Added provider reinstall documentation covering the image-discovery workflow,
+  all resource attributes, data-loss and downtime risks, and release guidance.
+
 ## [0.5.0] - 2026-07-31
 
 ### Added
@@ -138,7 +155,8 @@ Initial release: `netcupctl` CLI, shared Go SDK, CI, and release automation.
 See the
 [v0.1.0 release notes](https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.2.0...v0.3.0
