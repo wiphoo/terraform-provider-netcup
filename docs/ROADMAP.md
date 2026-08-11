@@ -108,7 +108,7 @@ Scope:
 - Provider documentation, examples, and destructive-operation guidance
 - Signed provider release artifacts via GoReleaser and cosign
 
-## v0.6.1 - SSH Key Management (Terraform provider)
+## v0.6.1 - SSH Key Management (Terraform provider) (shipped)
 
 Scope:
 

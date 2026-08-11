@@ -10,13 +10,14 @@ CCP/DNS support planned in later releases.
 
 ## Status
 
-**v0.6.0 — server reinstallation (Terraform provider) is available.**
+**v0.6.1 — SSH key management (Terraform provider) is available.**
 
 The `netcupctl` CLI, Go SDK, and release automation shipped in v0.1.0; the
 Terraform provider (data sources, rDNS resource) in v0.2.0. Later releases added
 power, rescue, and image/snapshot operations to the CLI (v0.3.0) and provider
-(v0.4.0), native OS reinstall to the CLI (v0.5.0), and the
-`netcup_server_reinstall` resource to the provider (v0.6.0). See the
+(v0.4.0), native OS reinstall to the CLI (v0.5.0), the
+`netcup_server_reinstall` resource to the provider (v0.6.0), and the
+`netcup_ssh_key` resource / `netcup_ssh_keys` data source (v0.6.1). See the
 [Roadmap](docs/ROADMAP.md) for the full plan.
 
 ## Quick start — netcupctl
@@ -180,7 +181,7 @@ export NETCUP_REFRESH_TOKEN="..."   # pre-issued; optional when using auth login
 Treat the refresh token like a password — it can mint new access tokens without
 another browser approval. Never log or commit tokens.
 
-## Terraform provider (v0.6.0 — available)
+## Terraform provider (v0.6.1 — available)
 
 The provider is built on the same Go SDK as `netcupctl`. See [examples/](examples/)
 for ready-to-use configurations.
@@ -189,13 +190,13 @@ for ready-to-use configurations.
 [`netcup_server_power`](examples/server_power.tf) (v0.4.0),
 [`netcup_server_rescue`](examples/server_rescue.tf) (v0.4.0),
 [`netcup_server_reinstall`](examples/server_reinstall.tf) (v0.6.0; destructive),
-[`netcup_ssh_key`](examples/ssh_key.tf) (upcoming in v0.6.1).
+[`netcup_ssh_key`](examples/ssh_key.tf) (v0.6.1).
 
 **Data sources:** [`netcup_servers`](examples/servers.tf),
 [`netcup_server`](examples/server.tf) (v0.2.0),
 [`netcup_server_images`](examples/server_images.tf),
 [`netcup_server_snapshots`](examples/server_snapshots.tf) (v0.4.0),
-[`netcup_ssh_keys`](examples/ssh_key.tf) (upcoming in v0.6.1).
+[`netcup_ssh_keys`](examples/ssh_key.tf) (v0.6.1).
 
 ```hcl
 terraform {

@@ -24,6 +24,8 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-11
+
 ### Added
 
 - `netcup_ssh_key` resource — registers an SSH public key in the SCP account and
@@ -36,6 +38,11 @@ This file is the human-curated companion to those release notes:
   `id` claim.
 - go-vcr replay coverage for the SSH-key create/list/delete cycle, with the
   account id, key id, key material, and create `Location` header redacted.
+
+### Changed
+
+- Updated security and conduct reporting documentation to use a personal contact
+  email address.
 
 ## [0.6.0] - 2026-08-09
 
@@ -168,7 +175,8 @@ Initial release: `netcupctl` CLI, shared Go SDK, CI, and release automation.
 See the
 [v0.1.0 release notes](https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.3.0...v0.4.0
