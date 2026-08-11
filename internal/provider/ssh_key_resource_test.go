@@ -2,8 +2,11 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -59,5 +62,39 @@ func TestIsDefinitiveSSHKeyRejection(t *testing.T) {
 	}
 	if isDefinitiveSSHKeyRejection(errors.New("connection reset after dispatch")) {
 		t.Fatal("a plain transport error must be ambiguous (not definitive)")
+	}
+}
+
+func TestReconcileCreatedSSHKeyAdoptsOnlyNewKey(t *testing.T) {
+	ctx := context.Background()
+	// The account contains both a pre-existing matching key (id 5) and a
+	// newly-created matching key (id 8) with identical name+content.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":5,"name":"k8s","key":"ssh-ed25519 AAAA"},{"id":8,"name":"k8s","key":"ssh-ed25519 AAAA"}]`))
+	}))
+	defer srv.Close()
+	// A JWT-shaped token with an "id" claim so the SDK can build the account-scoped
+	// /v1/users/{id}/ssh-keys path (the httptest handler ignores the path).
+	tok := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"id":12345,"exp":9999999999}`)) + ".s"
+	r := &sshKeyResource{client: netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken(tok))}
+
+	// id 5 existed before the create → only the NEW id 8 may be adopted.
+	got, err := r.reconcileCreatedSSHKey(ctx, "k8s", "ssh-ed25519 AAAA", map[int32]struct{}{5: {}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil || got.ID != 8 {
+		t.Fatalf("expected to adopt only the newly-appeared key id=8, got %+v", got)
+	}
+
+	// When every matching key pre-existed, adopt nothing (do not steal an
+	// unmanaged key).
+	got2, err := r.reconcileCreatedSSHKey(ctx, "k8s", "ssh-ed25519 AAAA", map[int32]struct{}{5: {}, 8: {}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got2 != nil {
+		t.Fatalf("must not adopt a pre-existing key, got %+v", got2)
 	}
 }

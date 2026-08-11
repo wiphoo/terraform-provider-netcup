@@ -75,7 +75,12 @@ func isDefinitiveSSHKeyRejection(err error) bool {
 // after an ambiguous create failure, returning it (or nil if none is found) so
 // an accepted-but-unconfirmed key is adopted into state rather than duplicated
 // on the next apply.
-func (r *sshKeyResource) reconcileCreatedSSHKey(ctx context.Context, name, publicKey string) (*netcup.SSHKey, error) {
+//
+// priorIDs is the set of key IDs that existed BEFORE the create was attempted.
+// Only a NEWLY-appeared matching key is adopted: a pre-existing (priorIDs) match
+// is an unmanaged key the create did not produce, and adopting it would make
+// Terraform wrongly own — and later delete — a key it never created.
+func (r *sshKeyResource) reconcileCreatedSSHKey(ctx context.Context, name, publicKey string, priorIDs map[int32]struct{}) (*netcup.SSHKey, error) {
 	keys, err := r.client.ListSSHKeys(ctx)
 	if err != nil {
 		return nil, err
@@ -83,6 +88,9 @@ func (r *sshKeyResource) reconcileCreatedSSHKey(ctx context.Context, name, publi
 	name = strings.TrimSpace(name)
 	publicKey = strings.TrimSpace(publicKey)
 	for i := range keys {
+		if _, existed := priorIDs[keys[i].ID]; existed {
+			continue // pre-existing unmanaged key — not the one this create made
+		}
 		if strings.TrimSpace(keys[i].Name) == name && strings.TrimSpace(keys[i].Key) == publicKey {
 			return &keys[i], nil
 		}
@@ -168,6 +176,17 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 	// replacement (e.g. file(...) -> trimspace(file(...))) would then have the
 	// deposed instance's Delete remove the very key the replacement points to.
 	// Adopting a pre-existing SCP key is done via `terraform import`, not Create.
+	//
+	// Snapshot the key ids that exist BEFORE the create so that, if the outcome is
+	// ambiguous, reconciliation can adopt only a NEWLY-appeared key — never a
+	// pre-existing unmanaged one. If this pre-list fails, priorListErr is recorded
+	// and reconciliation is skipped (we cannot tell new from pre-existing).
+	priorKeys, priorListErr := r.client.ListSSHKeys(ctx)
+	priorIDs := make(map[int32]struct{}, len(priorKeys))
+	for _, k := range priorKeys {
+		priorIDs[k.ID] = struct{}{}
+	}
+
 	key, err := r.client.CreateSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
 	if err != nil {
 		// Definitive rejection (pre-dispatch or 4xx): the key was never created —
@@ -181,8 +200,14 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 		// created the key but the outcome could not be confirmed. Since Create
 		// always creates a fresh key, a blind retry would orphan the accepted key
 		// and duplicate / name-conflict. Reconcile by matching (name, trimmed
-		// content) and adopt it if found.
-		reconciled, rerr := r.reconcileCreatedSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
+		// content) — but only if we have a reliable pre-POST snapshot, and only
+		// adopting a NEWLY-appeared key (never a pre-existing unmanaged one).
+		if priorListErr != nil {
+			d, _ := apiErrorToDiag(err, true)
+			resp.Diagnostics.Append(d)
+			return
+		}
+		reconciled, rerr := r.reconcileCreatedSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString(), priorIDs)
 		if rerr != nil || reconciled == nil {
 			d, _ := apiErrorToDiag(err, true)
 			resp.Diagnostics.Append(d)
