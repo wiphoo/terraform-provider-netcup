@@ -52,9 +52,16 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"id": schema.StringAttribute{
-				Computed:      true,
-				Description:   "The numeric SCP SSH-key id.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Computed:    true,
+				Description: "The numeric SCP SSH-key id.",
+				// No UseStateForUnknown here: the SCP id is server-assigned and
+				// changes on every replace (both name and public_key are
+				// RequiresReplace), so on a replacement plan the id must be
+				// (known after apply). Copying the old id forward would make
+				// Create's new id an "inconsistent result after apply" error.
+				// There is no in-place-update path, so UseStateForUnknown would add
+				// no stability benefit anyway. Mirrors server_reinstall's plain
+				// Computed id.
 			},
 		},
 	}
@@ -118,13 +125,18 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	want := state.ID.ValueString()
 	for _, k := range keys {
 		if strconv.FormatInt(int64(k.ID), 10) == want {
-			// Populate name/public_key from the matched API object so an
-			// imported resource (ImportState seeds only id) learns both values
-			// and so out-of-band changes are detected. Without this the null
-			// RequiresReplace attributes would force a spurious replacement on
-			// the next plan.
-			state.Name = types.StringValue(k.Name)
-			state.PublicKey = types.StringValue(k.Key)
+			// On import only `id` is seeded, so backfill name/public_key from the
+			// matched API object to make the RequiresReplace attributes known. On a
+			// normal refresh they already hold the configured values; leave them
+			// untouched so server-side normalization (e.g. SCP trimming the trailing
+			// newline of a file()-sourced key) does not diverge from config and
+			// force a perpetual replacement.
+			if state.Name.IsNull() {
+				state.Name = types.StringValue(k.Name)
+			}
+			if state.PublicKey.IsNull() {
+				state.PublicKey = types.StringValue(k.Key)
+			}
 			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 			return
 		}
