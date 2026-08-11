@@ -2,7 +2,7 @@
 # passed to netcup_server_reinstall.ssh_key_ids.
 resource "netcup_ssh_key" "worker" {
   name       = "toffoli-k3s-key"
-  public_key = file("~/.ssh/id_ed25519.pub")
+  public_key = file(pathexpand("~/.ssh/id_ed25519.pub"))
 }
 
 # List all SSH keys registered in the account.

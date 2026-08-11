@@ -106,13 +106,25 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 	keys, err := r.client.ListSSHKeys(ctx)
 	if err != nil {
-		d, _ := apiErrorToDiag(err, false)
+		// A failure of the account-level list endpoint (e.g. a 404 from an
+		// invalid account id or an unavailable route) does NOT prove the
+		// individual key is gone. Treat every list error as a hard error
+		// (notFoundIsError=true) rather than silently dropping the resource;
+		// absence is determined only from a successful list below.
+		d, _ := apiErrorToDiag(err, true)
 		resp.Diagnostics.Append(d)
 		return
 	}
 	want := state.ID.ValueString()
 	for _, k := range keys {
 		if strconv.FormatInt(int64(k.ID), 10) == want {
+			// Populate name/public_key from the matched API object so an
+			// imported resource (ImportState seeds only id) learns both values
+			// and so out-of-band changes are detected. Without this the null
+			// RequiresReplace attributes would force a spurious replacement on
+			// the next plan.
+			state.Name = types.StringValue(k.Name)
+			state.PublicKey = types.StringValue(k.Key)
 			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 			return
 		}
