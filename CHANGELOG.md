@@ -27,13 +27,11 @@ This file is the human-curated companion to those release notes:
 ### Added
 
 - `netcup_ssh_key` resource — registers an SSH public key in the SCP account
-  (create-or-reuse by name and content; exposes a computed numeric `id` usable
-  in `netcup_server_reinstall.ssh_key_ids`).
+  (idempotent: an exact name+content match is reused; exposes a computed numeric
+  `id` usable in `netcup_server_reinstall.ssh_key_ids`).
 - `netcup_ssh_keys` data source — lists the account's registered SSH keys.
 - SDK (`pkg/netcup`): `ListSSHKeys`, `CreateSSHKey`, `DeleteSSHKey`, and
-  `EnsureSSHKey` for idempotent key registration; `ResolveUserID` /
-  `ParseAccessTokenUserID` to derive the SCP account id from the access-token
-  JWT `id` claim.
+  `EnsureSSHKey` against the root `/v1/ssh-keys` endpoint.
 
 ## [0.6.0] - 2026-08-09
 

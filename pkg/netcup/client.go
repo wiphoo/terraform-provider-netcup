@@ -207,17 +207,6 @@ func (c *Client) newRequest(ctx context.Context, method, path, accept string, bo
 	return req, nil
 }
 
-// bearerToken returns the current access token, consulting the TokenSource when
-// configured (transparent refresh) and otherwise the static access token. It is
-// used by endpoints that must inspect the token itself (e.g. resolving the
-// account id for the ssh-keys path) rather than only attaching it as a header.
-func (c *Client) bearerToken(ctx context.Context) (string, error) {
-	if c.tokenSource != nil {
-		return c.tokenSource.Token(ctx)
-	}
-	return c.accessToken, nil
-}
-
 // Ping verifies that the SCP REST API is reachable by calling GET /ping. It does
 // not require authentication, but the IP allowlist gate still applies. A
 // TokenSource error is not treated as fatal here (unlike authenticated

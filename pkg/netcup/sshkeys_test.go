@@ -2,7 +2,6 @@ package netcup
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,21 +9,16 @@ import (
 	"testing"
 )
 
-func tokenWithID(id string) string {
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"id":` + id + `,"exp":9999999999}`))
-	return "h." + payload + ".s"
-}
-
 func TestListSSHKeys(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/users/12345/ssh-keys" {
+		if r.URL.Path != "/v1/ssh-keys" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":7,"name":"k8s","key":"ssh-ed25519 AAAA"}]`))
 	}))
 	defer srv.Close()
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken(tokenWithID("12345")))
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
 	keys, err := c.ListSSHKeys(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -36,7 +30,7 @@ func TestListSSHKeys(t *testing.T) {
 
 func TestCreateSSHKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/users/12345/ssh-keys" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/ssh-keys" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 		var body sshKeyCreateRequest
@@ -48,7 +42,7 @@ func TestCreateSSHKey(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":9,"name":"k8s","key":"ssh-ed25519 AAAA"}`))
 	}))
 	defer srv.Close()
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken(tokenWithID("12345")))
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
 	key, err := c.CreateSSHKey(context.Background(), "k8s", "ssh-ed25519 AAAA")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -67,7 +61,7 @@ func TestEnsureSSHKeyReusesContentMatch(t *testing.T) {
 		_, _ = w.Write([]byte(`[{"id":7,"name":"k8s","key":"ssh-ed25519 AAAA"}]`))
 	}))
 	defer srv.Close()
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken(tokenWithID("12345")))
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
 	key, err := c.EnsureSSHKey(context.Background(), "k8s", "ssh-ed25519 AAAA")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -82,19 +76,23 @@ func TestDeleteSSHKey(t *testing.T) {
 		if r.Method != http.MethodDelete {
 			t.Errorf("method = %s, want DELETE", r.Method)
 		}
-		if r.URL.Path != "/v1/users/12345/ssh-keys/7" {
+		if r.URL.Path != "/v1/ssh-keys/7" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken(tokenWithID("12345")))
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
 	if err := c.DeleteSSHKey(context.Background(), 7); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestEnsureSSHKeyDeletesStaleAndCreates(t *testing.T) {
+// TestEnsureSSHKeyCreatesWithoutDeletingStale verifies that a same-name key with
+// different content is NOT deleted from the create path (which would break
+// create_before_destroy): EnsureSSHKey creates the new key and leaves the old
+// one for Terraform's own Delete to remove.
+func TestEnsureSSHKeyCreatesWithoutDeletingStale(t *testing.T) {
 	var mu sync.Mutex
 	deleteCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,9 +101,6 @@ func TestEnsureSSHKeyDeletesStaleAndCreates(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":5,"name":"k8s","key":"ssh-ed25519 OLD"}]`))
 		case http.MethodDelete:
-			if r.URL.Path != "/v1/users/12345/ssh-keys/5" {
-				t.Errorf("unexpected delete path %q", r.URL.Path)
-			}
 			mu.Lock()
 			deleteCalled = true
 			mu.Unlock()
@@ -118,7 +113,7 @@ func TestEnsureSSHKeyDeletesStaleAndCreates(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken(tokenWithID("12345")))
+	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
 	key, err := c.EnsureSSHKey(context.Background(), "k8s", "ssh-ed25519 NEW")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -126,8 +121,8 @@ func TestEnsureSSHKeyDeletesStaleAndCreates(t *testing.T) {
 	mu.Lock()
 	called := deleteCalled
 	mu.Unlock()
-	if !called {
-		t.Fatal("expected stale key DELETE to be called")
+	if called {
+		t.Fatal("EnsureSSHKey must NOT delete a same-name key from the create path")
 	}
 	if key.ID != 8 {
 		t.Fatalf("got id %d, want 8", key.ID)
