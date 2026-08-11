@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -24,9 +25,33 @@ type sshKeyResource struct {
 }
 
 type sshKeyResourceModel struct {
-	Name      trimmedStringValue `tfsdk:"name"`
-	PublicKey trimmedStringValue `tfsdk:"public_key"`
-	ID        types.String       `tfsdk:"id"`
+	Name      types.String `tfsdk:"name"`
+	PublicKey types.String `tfsdk:"public_key"`
+	ID        types.String `tfsdk:"id"`
+}
+
+// requiresReplaceIfNotTrimEqual is a RequiresReplaceIf function that forces a
+// replacement only when the value changed by more than surrounding whitespace.
+//
+// It compares the trimmed prior-state and planned values directly, rather than
+// relying on a semantic-equality custom type: in terraform-plugin-framework
+// v1.19, stringplanmodifier.RequiresReplace compares values with the exact
+// Equal(), and a type's StringSemanticEquals is applied to CRUD response state
+// rather than during PlanResourceChange — so a whitespace-only edit (e.g.
+// file(...) -> trimspace(file(...)), or a trailing newline) would otherwise still
+// force a replacement, mint a new server-assigned id, and cascade into a
+// DESTRUCTIVE netcup_server_reinstall when that id feeds ssh_key_ids.
+func requiresReplaceIfNotTrimEqual(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+	// Create (no prior state) is never a replacement.
+	if req.StateValue.IsNull() {
+		return
+	}
+	// If either value is unknown/null unexpectedly, be conservative and replace.
+	if req.StateValue.IsUnknown() || req.PlanValue.IsUnknown() || req.PlanValue.IsNull() {
+		resp.RequiresReplace = true
+		return
+	}
+	resp.RequiresReplace = strings.TrimSpace(req.StateValue.ValueString()) != strings.TrimSpace(req.PlanValue.ValueString())
 }
 
 // NewSSHKeyResource returns a new netcup_ssh_key resource factory.
@@ -43,18 +68,24 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				Required:    true,
-				CustomType:  trimmedStringType{},
 				Description: "Label for the SSH key in SCP. Surrounding whitespace is ignored; a non-whitespace change forces replacement.",
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.RequiresReplaceIf(
+						requiresReplaceIfNotTrimEqual,
+						"Replaced when the label changes (ignoring surrounding whitespace).",
+						"Replaced when the label changes (ignoring surrounding whitespace).",
+					),
 				},
 			},
 			"public_key": schema.StringAttribute{
 				Required:    true,
-				CustomType:  trimmedStringType{},
 				Description: "SSH public key content. Surrounding whitespace is ignored (so file(...) vs trimspace(file(...)) is not a change); a non-whitespace change forces replacement.",
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.RequiresReplaceIf(
+						requiresReplaceIfNotTrimEqual,
+						"Replaced when the public key changes (ignoring surrounding whitespace).",
+						"Replaced when the public key changes (ignoring surrounding whitespace).",
+					),
 				},
 			},
 			"id": schema.StringAttribute{
@@ -143,10 +174,10 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 			// newline of a file()-sourced key) does not diverge from config and
 			// force a perpetual replacement.
 			if state.Name.IsNull() {
-				state.Name = trimmedStringValue{StringValue: types.StringValue(k.Name)}
+				state.Name = types.StringValue(strings.TrimSpace(k.Name))
 			}
 			if state.PublicKey.IsNull() {
-				state.PublicKey = trimmedStringValue{StringValue: types.StringValue(k.Key)}
+				state.PublicKey = types.StringValue(strings.TrimSpace(k.Key))
 			}
 			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 			return

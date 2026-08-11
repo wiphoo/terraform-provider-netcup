@@ -4,46 +4,41 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-func TestTrimmedStringSemanticEquals(t *testing.T) {
+func TestRequiresReplaceIfNotTrimEqual(t *testing.T) {
 	ctx := context.Background()
 
-	mk := func(s string, null, unknown bool) trimmedStringValue {
-		switch {
-		case null:
-			return trimmedStringValue{StringValue: types.StringNull()}
-		case unknown:
-			return trimmedStringValue{StringValue: types.StringUnknown()}
-		default:
-			return trimmedStringValue{StringValue: types.StringValue(s)}
-		}
+	run := func(state types.String, plan types.String) bool {
+		req := planmodifier.StringRequest{StateValue: state, PlanValue: plan}
+		resp := &stringplanmodifier.RequiresReplaceIfFuncResponse{}
+		requiresReplaceIfNotTrimEqual(ctx, req, resp)
+		return resp.RequiresReplace
 	}
 
-	cases := []struct {
-		name                     string
-		a, b                     string
-		aNull, bNull, aUnk, bUnk bool
-		want                     bool
-	}{
-		{name: "trailing newline is equal", a: "ssh-ed25519 AAAA\n", b: "ssh-ed25519 AAAA", want: true},
-		{name: "surrounding whitespace is equal", a: "  key  ", b: "key", want: true},
-		{name: "different content is not equal", a: "key-one", b: "key-two", want: false},
-		{name: "both null are equal", aNull: true, bNull: true, want: true},
-		{name: "one null is not equal", aNull: true, b: "key", want: false},
-		{name: "both unknown are equal", aUnk: true, bUnk: true, want: true},
+	// Whitespace-only change (trailing newline / surrounding spaces): no replace.
+	if run(types.StringValue("ssh-ed25519 AAAA\n"), types.StringValue("ssh-ed25519 AAAA")) {
+		t.Fatal("trailing-newline-only change must not require replacement")
+	}
+	if run(types.StringValue("  key  "), types.StringValue("key")) {
+		t.Fatal("surrounding-whitespace-only change must not require replacement")
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, diags := mk(tc.a, tc.aNull, tc.aUnk).StringSemanticEquals(ctx, mk(tc.b, tc.bNull, tc.bUnk))
-			if diags.HasError() {
-				t.Fatalf("unexpected diags: %v", diags)
-			}
-			if got != tc.want {
-				t.Fatalf("StringSemanticEquals(%q,%q) = %v, want %v", tc.a, tc.b, got, tc.want)
-			}
-		})
+	// Genuine content change: replace.
+	if !run(types.StringValue("ssh-ed25519 AAAA"), types.StringValue("ssh-ed25519 BBBB")) {
+		t.Fatal("a genuine key change must require replacement")
+	}
+
+	// Create (null prior state): never a replacement.
+	if run(types.StringNull(), types.StringValue("ssh-ed25519 AAAA")) {
+		t.Fatal("create (null prior state) must not require replacement")
+	}
+
+	// Unknown prior state: conservatively replace.
+	if !run(types.StringUnknown(), types.StringValue("ssh-ed25519 AAAA")) {
+		t.Fatal("unknown prior state should conservatively require replacement")
 	}
 }
