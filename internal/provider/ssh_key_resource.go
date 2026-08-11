@@ -90,7 +90,12 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	key, err := r.client.EnsureSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
+	// Always create a fresh key rather than reusing an existing one. Reuse would
+	// return a prior key's id; under create_before_destroy a semantic-only
+	// replacement (e.g. file(...) -> trimspace(file(...))) would then have the
+	// deposed instance's Delete remove the very key the replacement points to.
+	// Adopting a pre-existing SCP key is done via `terraform import`, not Create.
+	key, err := r.client.CreateSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
 	if err != nil {
 		d, _ := apiErrorToDiag(err, true)
 		resp.Diagnostics.Append(d)

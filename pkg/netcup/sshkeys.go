@@ -102,27 +102,3 @@ func (c *Client) DeleteSSHKey(ctx context.Context, keyID int32) error {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
-
-// EnsureSSHKey returns the key matching (name, publicKey), creating it if no
-// exact match exists. It is idempotent — an exact (name+content) match is reused
-// — but it deliberately does NOT delete a same-name key that has different
-// content. Deleting from the create path would break create_before_destroy
-// replacement, where Terraform runs Create for the replacement while the old key
-// still exists and its own Delete owns the old key's destruction. A same-name,
-// different-content key is left untouched; CreateSSHKey registers the new key
-// (or the SCP API surfaces a name conflict, which is preferable to silently
-// destroying the prior key).
-func (c *Client) EnsureSSHKey(ctx context.Context, name, publicKey string) (*SSHKey, error) {
-	name = strings.TrimSpace(name)
-	publicKey = strings.TrimSpace(publicKey)
-	keys, err := c.ListSSHKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for i := range keys {
-		if keys[i].Name == name && strings.TrimSpace(keys[i].Key) == publicKey {
-			return &keys[i], nil
-		}
-	}
-	return c.CreateSSHKey(ctx, name, publicKey)
-}

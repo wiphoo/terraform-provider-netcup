@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 )
 
@@ -52,25 +51,6 @@ func TestCreateSSHKey(t *testing.T) {
 	}
 }
 
-func TestEnsureSSHKeyReusesContentMatch(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			t.Errorf("must not POST when a content match exists")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":7,"name":"k8s","key":"ssh-ed25519 AAAA"}]`))
-	}))
-	defer srv.Close()
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
-	key, err := c.EnsureSSHKey(context.Background(), "k8s", "ssh-ed25519 AAAA")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key.ID != 7 {
-		t.Fatalf("got id %d, want reused 7", key.ID)
-	}
-}
-
 func TestDeleteSSHKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -85,46 +65,5 @@ func TestDeleteSSHKey(t *testing.T) {
 	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
 	if err := c.DeleteSSHKey(context.Background(), 7); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// TestEnsureSSHKeyCreatesWithoutDeletingStale verifies that a same-name key with
-// different content is NOT deleted from the create path (which would break
-// create_before_destroy): EnsureSSHKey creates the new key and leaves the old
-// one for Terraform's own Delete to remove.
-func TestEnsureSSHKeyCreatesWithoutDeletingStale(t *testing.T) {
-	var mu sync.Mutex
-	deleteCalled := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"id":5,"name":"k8s","key":"ssh-ed25519 OLD"}]`))
-		case http.MethodDelete:
-			mu.Lock()
-			deleteCalled = true
-			mu.Unlock()
-			w.WriteHeader(http.StatusNoContent)
-		case http.MethodPost:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":8,"name":"k8s","key":"ssh-ed25519 NEW"}`))
-		default:
-			t.Errorf("unexpected method %s", r.Method)
-		}
-	}))
-	defer srv.Close()
-	c := New(WithAPIEndpoint(srv.URL), WithAccessToken("test-token"))
-	key, err := c.EnsureSSHKey(context.Background(), "k8s", "ssh-ed25519 NEW")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	mu.Lock()
-	called := deleteCalled
-	mu.Unlock()
-	if called {
-		t.Fatal("EnsureSSHKey must NOT delete a same-name key from the create path")
-	}
-	if key.ID != 8 {
-		t.Fatalf("got id %d, want 8", key.ID)
 	}
 }
