@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -25,34 +24,9 @@ type sshKeyResource struct {
 }
 
 type sshKeyResourceModel struct {
-	Name      types.String `tfsdk:"name"`
-	PublicKey types.String `tfsdk:"public_key"`
-	ID        types.String `tfsdk:"id"`
-}
-
-// trimStringModifier normalizes a string attribute by trimming surrounding
-// whitespace during planning. It is applied BEFORE RequiresReplace so a
-// whitespace-only change (e.g. a public key with vs. without a trailing newline,
-// or file(...) vs trimspace(file(...))) is not seen as a change and does not
-// force a replacement. That matters because a spurious replacement mints a new
-// server-assigned SCP id, and when that id feeds
-// netcup_server_reinstall.ssh_key_ids the change would cascade into a
-// DESTRUCTIVE server reinstall (disk wipe) for a semantic no-op.
-type trimStringModifier struct{}
-
-func (trimStringModifier) Description(_ context.Context) string {
-	return "Trims surrounding whitespace so whitespace-only changes are not a diff."
-}
-
-func (m trimStringModifier) MarkdownDescription(ctx context.Context) string {
-	return m.Description(ctx)
-}
-
-func (trimStringModifier) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
-	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
-		return
-	}
-	resp.PlanValue = types.StringValue(strings.TrimSpace(req.ConfigValue.ValueString()))
+	Name      trimmedStringValue `tfsdk:"name"`
+	PublicKey trimmedStringValue `tfsdk:"public_key"`
+	ID        types.String       `tfsdk:"id"`
 }
 
 // NewSSHKeyResource returns a new netcup_ssh_key resource factory.
@@ -69,17 +43,17 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				Required:    true,
+				CustomType:  trimmedStringType{},
 				Description: "Label for the SSH key in SCP. Surrounding whitespace is ignored; a non-whitespace change forces replacement.",
 				PlanModifiers: []planmodifier.String{
-					trimStringModifier{},
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"public_key": schema.StringAttribute{
 				Required:    true,
+				CustomType:  trimmedStringType{},
 				Description: "SSH public key content. Surrounding whitespace is ignored (so file(...) vs trimspace(file(...)) is not a change); a non-whitespace change forces replacement.",
 				PlanModifiers: []planmodifier.String{
-					trimStringModifier{},
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
@@ -169,10 +143,10 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 			// newline of a file()-sourced key) does not diverge from config and
 			// force a perpetual replacement.
 			if state.Name.IsNull() {
-				state.Name = types.StringValue(strings.TrimSpace(k.Name))
+				state.Name = trimmedStringValue{StringValue: types.StringValue(k.Name)}
 			}
 			if state.PublicKey.IsNull() {
-				state.PublicKey = types.StringValue(strings.TrimSpace(k.Key))
+				state.PublicKey = trimmedStringValue{StringValue: types.StringValue(k.Key)}
 			}
 			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 			return

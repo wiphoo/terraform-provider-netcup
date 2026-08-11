@@ -4,37 +4,46 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-func TestTrimStringModifier(t *testing.T) {
+func TestTrimmedStringSemanticEquals(t *testing.T) {
 	ctx := context.Background()
-	m := trimStringModifier{}
 
-	// A trailing newline (as produced by file(...)) is trimmed, so a
-	// whitespace-only change is not seen as a diff by the following
-	// RequiresReplace modifier and does not trigger a (destructive) replacement.
-	req := planmodifier.StringRequest{ConfigValue: types.StringValue("ssh-ed25519 AAAA\n")}
-	resp := &planmodifier.StringResponse{PlanValue: req.ConfigValue}
-	m.PlanModifyString(ctx, req, resp)
-	if got := resp.PlanValue.ValueString(); got != "ssh-ed25519 AAAA" {
-		t.Fatalf("got %q, want trimmed %q", got, "ssh-ed25519 AAAA")
+	mk := func(s string, null, unknown bool) trimmedStringValue {
+		switch {
+		case null:
+			return trimmedStringValue{StringValue: types.StringNull()}
+		case unknown:
+			return trimmedStringValue{StringValue: types.StringUnknown()}
+		default:
+			return trimmedStringValue{StringValue: types.StringValue(s)}
+		}
 	}
 
-	// A null config value is left untouched.
-	reqNull := planmodifier.StringRequest{ConfigValue: types.StringNull()}
-	respNull := &planmodifier.StringResponse{PlanValue: types.StringValue("unchanged")}
-	m.PlanModifyString(ctx, reqNull, respNull)
-	if got := respNull.PlanValue.ValueString(); got != "unchanged" {
-		t.Fatalf("null config should leave plan untouched, got %q", got)
+	cases := []struct {
+		name                     string
+		a, b                     string
+		aNull, bNull, aUnk, bUnk bool
+		want                     bool
+	}{
+		{name: "trailing newline is equal", a: "ssh-ed25519 AAAA\n", b: "ssh-ed25519 AAAA", want: true},
+		{name: "surrounding whitespace is equal", a: "  key  ", b: "key", want: true},
+		{name: "different content is not equal", a: "key-one", b: "key-two", want: false},
+		{name: "both null are equal", aNull: true, bNull: true, want: true},
+		{name: "one null is not equal", aNull: true, b: "key", want: false},
+		{name: "both unknown are equal", aUnk: true, bUnk: true, want: true},
 	}
 
-	// An unknown config value is left untouched.
-	reqUnknown := planmodifier.StringRequest{ConfigValue: types.StringUnknown()}
-	respUnknown := &planmodifier.StringResponse{PlanValue: types.StringValue("keep")}
-	m.PlanModifyString(ctx, reqUnknown, respUnknown)
-	if got := respUnknown.PlanValue.ValueString(); got != "keep" {
-		t.Fatalf("unknown config should leave plan untouched, got %q", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, diags := mk(tc.a, tc.aNull, tc.aUnk).StringSemanticEquals(ctx, mk(tc.b, tc.bNull, tc.bUnk))
+			if diags.HasError() {
+				t.Fatalf("unexpected diags: %v", diags)
+			}
+			if got != tc.want {
+				t.Fatalf("StringSemanticEquals(%q,%q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
 	}
 }
