@@ -116,8 +116,9 @@ Scope:
   (fresh creation exposing a computed numeric `id`; adopt a pre-existing key
   with `terraform import`)
 - `netcup_ssh_keys` data source — list the account's registered SSH keys
-- SDK support (`pkg/netcup`): SSH-key CRUD against the root `/v1/ssh-keys`
-  endpoint
+- SDK support (`pkg/netcup`): SSH-key CRUD against the account-scoped
+  `/v1/users/{userId}/ssh-keys` endpoint (account id derived from the
+  access-token JWT `id` claim)
 
 This is a companion to v0.6.0 provisioning: the SSH-key `id` feeds
 `netcup_server_reinstall.ssh_key_ids`, so a reinstall can authorize keys managed

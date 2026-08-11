@@ -7,6 +7,21 @@ import (
 	"time"
 )
 
+func TestParseAccessTokenUserID(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"id":12345,"exp":9999999999}`))
+	token := "h." + payload + ".s"
+	got, err := ParseAccessTokenUserID(token)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "12345" {
+		t.Fatalf("got %q, want %q", got, "12345")
+	}
+	if _, err := ParseAccessTokenUserID("not-a-jwt"); err == nil {
+		t.Fatal("expected error for non-JWT token")
+	}
+}
+
 // fakeJWT builds a minimal JWT string (header.payload.signature) with the
 // given payload JSON, matching the shape ParseAccessTokenExpiry decodes. The
 // signature segment is not validated by ParseAccessTokenExpiry, so it is left

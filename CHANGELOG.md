@@ -30,8 +30,10 @@ This file is the human-curated companion to those release notes:
   exposes a computed numeric `id` usable in `netcup_server_reinstall.ssh_key_ids`
   (adopt a pre-existing key with `terraform import`).
 - `netcup_ssh_keys` data source — lists the account's registered SSH keys.
-- SDK (`pkg/netcup`): `ListSSHKeys`, `CreateSSHKey`, and `DeleteSSHKey` against
-  the root `/v1/ssh-keys` endpoint.
+- SDK (`pkg/netcup`): `ListSSHKeys`, `CreateSSHKey`, `DeleteSSHKey` against the
+  account-scoped `/v1/users/{userId}/ssh-keys` endpoint, plus `ResolveUserID` /
+  `ParseAccessTokenUserID` to derive the SCP account id from the access-token JWT
+  `id` claim.
 
 ## [0.6.0] - 2026-08-09
 
