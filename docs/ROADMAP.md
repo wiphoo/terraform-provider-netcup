@@ -113,10 +113,11 @@ Scope:
 Scope:
 
 - `netcup_ssh_key` resource — register an SSH public key in the SCP account
-  (create-or-reuse by name + content; computed numeric `id`)
+  (fresh creation exposing a computed numeric `id`; adopt a pre-existing key
+  with `terraform import`)
 - `netcup_ssh_keys` data source — list the account's registered SSH keys
-- SDK support (`pkg/netcup`): SSH-key CRUD plus SCP account-id resolution from
-  the access-token JWT `id` claim
+- SDK support (`pkg/netcup`): SSH-key CRUD against the root `/v1/ssh-keys`
+  endpoint
 
 This is a companion to v0.6.0 provisioning: the SSH-key `id` feeds
 `netcup_server_reinstall.ssh_key_ids`, so a reinstall can authorize keys managed
