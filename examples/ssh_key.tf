@@ -13,7 +13,7 @@ variable "ssh_public_key" {
 
 resource "netcup_ssh_key" "worker" {
   count      = var.ssh_public_key == "" ? 0 : 1
-  name       = "toffoli-k3s-key"
+  name       = "example-key"
   public_key = var.ssh_public_key
 }
 
