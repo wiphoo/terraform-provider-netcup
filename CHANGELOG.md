@@ -24,6 +24,16 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+### Changed
+
+- `netcup_ssh_key`: `Create` now lists the account's SSH keys first and refuses
+  to register a key the account already holds under the same name and public-key
+  content, pointing the user at `terraform import` instead of minting a
+  duplicate. If the listing cannot be read, `Create` fails without sending a
+  request; a 4xx/pre-dispatch create failure is reported as a definitive error,
+  while an ambiguous outcome (5xx/transport after dispatch) now surfaces an
+  explicit confirmation error rather than silently leaving the key in limbo.
+
 ## [0.6.1] - 2026-08-11
 
 ### Added

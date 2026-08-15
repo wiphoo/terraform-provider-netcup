@@ -83,6 +83,23 @@ func trimEqualPlanState(planVal, stateVal types.String) bool {
 	return strings.TrimSpace(planVal.ValueString()) == strings.TrimSpace(stateVal.ValueString())
 }
 
+// findMatchingAccountKey returns the account key that is ALREADY the key being
+// created — same trimmed name AND same trimmed public-key content — or nil.
+// name+content equality (after normalizing surrounding whitespace) is the
+// unambiguous "this key already exists" signal: the SCP API allows multiple
+// keys to share a name, so a content difference means a genuinely different key
+// the operator wants registered.
+func findMatchingAccountKey(keys []netcup.SSHKey, name, publicKey string) *netcup.SSHKey {
+	name = strings.TrimSpace(name)
+	publicKey = strings.TrimSpace(publicKey)
+	for i := range keys {
+		if strings.TrimSpace(keys[i].Name) == name && strings.TrimSpace(keys[i].Key) == publicKey {
+			return &keys[i]
+		}
+	}
+	return nil
+}
+
 // NewSSHKeyResource returns a new netcup_ssh_key resource factory.
 func NewSSHKeyResource() resource.Resource { return &sshKeyResource{} }
 
@@ -189,8 +206,39 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	// Always create a fresh key. This resource owns the key it creates; adopting a
-	// pre-existing SCP key is done via `terraform import`, not Create.
+	// This resource owns the key it creates; adopting a pre-existing SCP key is
+	// done via `terraform import`, not Create. Before registering, reconcile the
+	// account listing so a key that already exists (same trimmed name and
+	// content — e.g. one registered by a retired script-based flow) is refused
+	// with an import instruction instead of being duplicated. The list is a
+	// best-effort guard: it cannot see a key created concurrently, but a
+	// definitive match here proves the key exists and Create must not register
+	// a second one.
+	keys, err := r.client.ListSSHKeys(ctx)
+	if err != nil {
+		// The listing could not be read, so absence of an existing key cannot be
+		// confirmed. Do not POST under that uncertainty: the request was never
+		// dispatched, nothing was created, and persisting no state lets the next
+		// apply retry safely.
+		resp.Diagnostics.AddError(
+			"cannot verify existing Netcup SSH keys before creating",
+			fmt.Sprintf("The account's SSH keys could not be listed before creating key %q (%s). No request was sent and no key was created; fix the listing error and re-apply.", strings.TrimSpace(plan.Name.ValueString()), err.Error()),
+		)
+		return
+	}
+	if existing := findMatchingAccountKey(keys, plan.Name.ValueString(), plan.PublicKey.ValueString()); existing != nil {
+		// Definitively refused: the key already exists, nothing is created, no
+		// state is persisted. The next apply retries (and succeeds once the
+		// resource is imported or the existing key is removed).
+		resp.Diagnostics.AddError(
+			"a matching Netcup SSH key already exists",
+			fmt.Sprintf("The SCP account already contains an SSH key named %q with the same public key (SCP id %d). "+
+				"Creating it again would register a duplicate. Adopt the existing key instead by importing it after this "+
+				"apply fails: `terraform import netcup_ssh_key.<resource-name> %d`. This resource only owns keys it "+
+				"creates; to let it manage this one, import it and re-apply.", strings.TrimSpace(existing.Name), existing.ID, existing.ID),
+		)
+		return
+	}
 	key, err := r.client.CreateSSHKey(ctx, plan.Name.ValueString(), plan.PublicKey.ValueString())
 	if err != nil {
 		if isDefinitiveSSHKeyRejection(err) {

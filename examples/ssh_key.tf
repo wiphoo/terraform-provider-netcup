@@ -5,6 +5,10 @@
 #   terraform plan -var 'ssh_public_key=ssh-ed25519 AAAA... you@host'
 #
 # The computed id can be passed to netcup_server_reinstall.ssh_key_ids.
+#
+# Create refuses to register a key the account already holds under the same name
+# and content; adopt a pre-existing key instead with:
+#   terraform import netcup_ssh_key.worker <scp-ssh-key-id>
 variable "ssh_public_key" {
   type        = string
   default     = ""
