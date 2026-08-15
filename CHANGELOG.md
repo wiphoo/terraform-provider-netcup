@@ -24,6 +24,18 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-15
+
+### Changed
+
+- `netcup_ssh_key`: `Create` now lists the account's SSH keys first and refuses
+  to register a key the account already holds under the same name and public-key
+  content, pointing the user at `terraform import` instead of minting a
+  duplicate. If the listing cannot be read, `Create` fails without sending a
+  request; a 4xx/pre-dispatch create failure is reported as a definitive error,
+  while an ambiguous outcome (5xx/transport after dispatch) now surfaces an
+  explicit confirmation error rather than silently leaving the key in limbo.
+
 ## [0.6.1] - 2026-08-11
 
 ### Added
@@ -175,7 +187,8 @@ Initial release: `netcupctl` CLI, shared Go SDK, CI, and release automation.
 See the
 [v0.1.0 release notes](https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.4.0...v0.5.0
