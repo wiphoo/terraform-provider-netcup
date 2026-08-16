@@ -24,7 +24,7 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
-## [0.6.2] - 2026-08-15
+## [0.6.2] - 2026-08-16
 
 ### Changed
 
