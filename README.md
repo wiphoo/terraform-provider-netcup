@@ -10,15 +10,16 @@ CCP/DNS support planned in later releases.
 
 ## Status
 
-**v0.6.1 — SSH key management (Terraform provider) is available.**
+**v0.6.2 — SSH key management (Terraform provider) is available, with a Create-time duplicate-key guard.**
 
 The `netcupctl` CLI, Go SDK, and release automation shipped in v0.1.0; the
 Terraform provider (data sources, rDNS resource) in v0.2.0. Later releases added
 power, rescue, and image/snapshot operations to the CLI (v0.3.0) and provider
 (v0.4.0), native OS reinstall to the CLI (v0.5.0), the
 `netcup_server_reinstall` resource to the provider (v0.6.0), and the
-`netcup_ssh_key` resource / `netcup_ssh_keys` data source (v0.6.1). See the
-[Roadmap](docs/ROADMAP.md) for the full plan.
+`netcup_ssh_key` resource / `netcup_ssh_keys` data source (v0.6.1), hardened in
+v0.6.2 so `Create` refuses to register a duplicate of a key the account already
+holds. See the [Roadmap](docs/ROADMAP.md) for the full plan.
 
 ## Quick start — netcupctl
 
@@ -181,7 +182,7 @@ export NETCUP_REFRESH_TOKEN="..."   # pre-issued; optional when using auth login
 Treat the refresh token like a password — it can mint new access tokens without
 another browser approval. Never log or commit tokens.
 
-## Terraform provider (v0.6.1 — available)
+## Terraform provider (v0.6.2 — available)
 
 The provider is built on the same Go SDK as `netcupctl`. See [examples/](examples/)
 for ready-to-use configurations.
@@ -318,8 +319,8 @@ Actions workflow (`.github/workflows/release.yml`); configuration is in
 `.goreleaser.yaml`. Cut a release by pushing a SemVer tag:
 
 ```bash
-git tag v0.6.0
-git push origin v0.6.0
+git tag v0.6.2
+git push origin v0.6.2
 ```
 
 The workflow builds both binaries for linux, macOS, and Windows (amd64 and
