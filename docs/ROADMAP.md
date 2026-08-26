@@ -124,6 +124,21 @@ This is a companion to v0.6.0 provisioning: the SSH-key `id` feeds
 `netcup_server_reinstall.ssh_key_ids`, so a reinstall can authorize keys managed
 entirely in Terraform (retiring the external ensure-ssh-key bootstrap script).
 
+## v0.6.2 - SSH Key Management hardening (patch) (shipped)
+
+Scope:
+
+- `netcup_ssh_key` `Create` now reconciles the account's SSH keys first and
+  refuses to register a key the account already holds (same trimmed name and
+  public-key content), pointing the operator at `terraform import` instead of
+  minting a duplicate.
+- If the account listing cannot be read, `Create` fails without sending a
+  request (absence cannot be confirmed); an ambiguous create outcome
+  (5xx/transport after dispatch) surfaces an explicit confirmation error rather
+  than silently leaving the key in limbo.
+
+A patch hardening of the v0.6.1 SSH-key resource — create-only, no new surface.
+
 ## v0.7.0 - Snapshot Management
 
 Scope:
