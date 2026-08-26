@@ -17,8 +17,10 @@ import (
 // no rule for: a task that ends in ERROR (can't be forced on demand), an
 // *active* rescue system or rescue enable/disable (each reboots the server, and
 // enabling twice is a 400), a power change (reboots the server), an empty
-// snapshot list (depends on the server having no snapshots), and the snapshot
-// list itself (SnapshotMinimal.uuid is an unredacted live resource identifier).
+// snapshot list (depends on the server having no snapshots), the snapshot list
+// itself (SnapshotMinimal.uuid is an unredacted live resource identifier), and
+// the v0.7.0 snapshot mutation surface (create/delete/restore each mutate the
+// maintainer's real snapshots and are therefore destructive to record live).
 // These stay replay-only so `make acc-record` neither reboots the maintainer's
 // server, commits a live UUID, nor overwrites a hand-authored fixture with a
 // non-matching live one. The remaining read-only cassettes (imageflavours and

@@ -247,6 +247,17 @@ committed request body carries the redacted `customScript` marker, since the
 `method`+`URL`-only matcher would otherwise replay green even if the real
 script leaked into the cassette.
 
+The v0.7.0 **snapshot mutation** surface (`TestCreateSnapshot*`,
+`TestDeleteSnapshot*`, `TestRestoreSnapshot*`) is replay-only too. Recording
+any of the three would mutate the maintainer's real snapshots — create/delete
+are destructive to the snapshot itself, and restore reverts the server's disks
+and reboots it — so all of them are hand-authored fixtures calling
+`skipInRecordMode(t)`. They reuse the existing synthetic values (snapshot
+`name` in the `server-<hex>` form, `vcr-redacted-description`, and the task
+`executingUser` markers), and the create/restore `_AndWait` variants replay the
+async `202` body's task UUID through `WaitForTask` exactly like
+`TestReinstallServer202AndWait`.
+
 ---
 
 ## Branch and commit conventions
