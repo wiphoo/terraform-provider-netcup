@@ -31,7 +31,7 @@ func cmdServer(args []string) error {
 	case "images":
 		return serverImages(args[1:], os.Stdout)
 	case "snapshots":
-		return serverSnapshots(args[1:], os.Stdout)
+		return serverSnapshots(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "power":
 		return serverPower(args[1:], os.Stdout, os.Stderr, os.Stdin)
 	case "rescue":
@@ -54,14 +54,17 @@ Usage:
   netcupctl server list [--json]
   netcupctl server get <id> [--json]
   netcupctl server images <id> [--json]
-  netcupctl server snapshots <id> [--json]
+  netcupctl server snapshots <subcommand> <id> [flags]   # list | create | delete | restore
   netcupctl server power <subcommand> <id> [flags]
   netcupctl server rescue <subcommand> <id> [flags]
   netcupctl server reinstall <id> --image <flavourId> [flags]
   netcupctl server help          show this help
 
 WARNING: 'reinstall' WIPES THE SERVER (all data is permanently lost).
+'server snapshots restore' reverts the server's disks and REBOOTS it — data
+changed since the snapshot is lost.
 
+Run 'netcupctl server snapshots help' for snapshot subcommands.
 Run 'netcupctl server power help' for power subcommands.
 Run 'netcupctl server rescue help' for rescue subcommands.
 Run 'netcupctl server reinstall help' for reinstall flags.
@@ -254,11 +257,72 @@ func serverImages(args []string, out io.Writer) error {
 	return tw.Flush()
 }
 
-func serverSnapshots(args []string, out io.Writer) error {
-	if helpRequested(args, out, usageServer) {
+// serverSnapshots dispatches the `server snapshots` subcommands. out receives
+// the machine-readable result (JSON/table); errW receives interactive and
+// diagnostic text (warnings, the confirmation prompt, abort notices) so that
+// --json output on out stays parseable; in supplies the confirmation answer.
+//
+// The pre-v0.7.0 form `server snapshots <id>` (list) is preserved: a first
+// argument that is not a known subcommand is treated as the legacy server-ID
+// listing, so existing scripts and tests keep working.
+func serverSnapshots(args []string, out, errW io.Writer, in io.Reader) error {
+	if len(args) == 0 {
+		usageServerSnapshots(errW)
+		return fmt.Errorf("server snapshots requires a subcommand or a server ID")
+	}
+
+	switch args[0] {
+	case "list":
+		return serverSnapshotsList(args[1:], out)
+	case "create":
+		return serverSnapshotsCreate(args[1:], out, errW, in)
+	case "delete":
+		return serverSnapshotsDelete(args[1:], out, errW, in)
+	case "restore":
+		return serverSnapshotsRestore(args[1:], out, errW, in)
+	case "help", "-h", "--help":
+		usageServerSnapshots(out)
+		return nil
+	default:
+		// Legacy alias: `server snapshots <id> [--json]` lists.
+		return serverSnapshotsList(args, out)
+	}
+}
+
+func usageServerSnapshots(w io.Writer) {
+	fmt.Fprint(w, `netcupctl server snapshots - manage server snapshots
+
+Usage:
+  netcupctl server snapshots list    <id> [--json]
+  netcupctl server snapshots create  <id> --name <name> [--description <desc>] [--online|--disk <disk>] [--wait] [--json]
+  netcupctl server snapshots delete  <id> <name> [--force|--yes] [--wait] [--json]
+  netcupctl server snapshots restore <id> <name> [--force|--yes] [--wait] [--json]
+  netcupctl server snapshots <id> [--json]     # legacy alias for 'list'
+
+WARNING: 'delete' permanently removes the snapshot. 'restore' reverts the
+server's disks to the snapshot and REBOOTS the server — data changed since the
+snapshot is lost. Both prompt for confirmation unless --force (or --yes) is
+given.
+
+Flags:
+  --name <string>          snapshot name (REQUIRED for create; max 255 chars)
+  --description <string>   snapshot description (max 255 chars)
+  --online                 take an online snapshot of the running server (no --disk needed)
+  --disk <string>          disk name to snapshot (required for an offline snapshot)
+  --wait                   poll the async task to a terminal state and print the result
+  --force                  skip the confirmation prompt
+  --yes                    alias for --force
+  --json                   output as JSON
+`)
+}
+
+// serverSnapshotsList lists a server's snapshots (the legacy leaf and the
+// explicit `server snapshots list` form).
+func serverSnapshotsList(args []string, out io.Writer) error {
+	if helpRequested(args, out, usageServerSnapshots) {
 		return nil
 	}
-	fs := flag.NewFlagSet("server-snapshots", flag.ContinueOnError)
+	fs := flag.NewFlagSet("server-snapshots-list", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "output as JSON")
 	positional, err := parsePositionalArgs(fs, args)
 	if err != nil {
@@ -269,7 +333,7 @@ func serverSnapshots(args []string, out io.Writer) error {
 	}
 
 	if len(positional) == 0 {
-		usageServer(os.Stderr)
+		usageServerSnapshots(os.Stderr)
 		return fmt.Errorf("server snapshots requires a server ID")
 	}
 	if len(positional) > 1 {
@@ -310,6 +374,242 @@ func serverSnapshots(args []string, out io.Writer) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%t\n", s.Name, created, s.State, s.Online, s.Exported)
 	}
 	return tw.Flush()
+}
+
+// serverSnapshotsCreate starts a snapshot via the SDK CreateSnapshot. It is not
+// destructive, so it never prompts; it still supports --wait/--json.
+func serverSnapshotsCreate(args []string, out, errW io.Writer, in io.Reader) error {
+	if helpRequested(args, out, usageServerSnapshots) {
+		return nil
+	}
+	fs := flag.NewFlagSet("server-snapshots-create", flag.ContinueOnError)
+	fs.SetOutput(errW)
+	fs.Usage = func() { usageServerSnapshots(errW) }
+	jsonFlag := fs.Bool("json", false, "output as JSON")
+	waitFlag := fs.Bool("wait", false, "poll the task to a terminal state")
+	nameFlag := fs.String("name", "", "snapshot name (REQUIRED, max 255 chars)")
+	descriptionFlag := fs.String("description", "", "snapshot description (max 255 chars)")
+	onlineFlag := fs.Bool("online", false, "take an online snapshot (no --disk needed)")
+	diskFlag := fs.String("disk", "", "disk name to snapshot (required unless --online)")
+
+	id, done, err := parseServerIDArg(fs, args, "server snapshots create", usageServerSnapshots)
+	if err != nil || done {
+		return err
+	}
+
+	if strings.TrimSpace(*nameFlag) == "" {
+		usageServerSnapshots(errW)
+		return fmt.Errorf("server snapshots create requires --name <name>")
+	}
+	if !*onlineFlag && strings.TrimSpace(*diskFlag) == "" {
+		return fmt.Errorf("server snapshots create requires --disk <disk> for an offline snapshot, or --online")
+	}
+	if *onlineFlag && strings.TrimSpace(*diskFlag) != "" {
+		return fmt.Errorf("--online and --disk are mutually exclusive")
+	}
+
+	opts := netcup.ServerSnapshotCreate{Name: *nameFlag}
+	if *descriptionFlag != "" {
+		desc := *descriptionFlag
+		opts.Description = &desc
+	}
+	if *diskFlag != "" {
+		disk := *diskFlag
+		opts.DiskName = &disk
+	}
+	if *onlineFlag {
+		opts.OnlineSnapshot = true
+	}
+
+	client, err := clientWithToken()
+	if err != nil {
+		return err
+	}
+	task, err := client.CreateSnapshot(context.Background(), id, opts)
+	if err != nil {
+		return err
+	}
+
+	waited := false
+	if *waitFlag && task != nil {
+		final, err := client.WaitForTask(context.Background(), task.UUID)
+		if err != nil {
+			return err
+		}
+		task = final
+		waited = true
+	}
+
+	return printSnapshotResult(out, *jsonFlag, "create", id, opts.Name, task, waited)
+}
+
+// serverSnapshotsDelete removes a snapshot via the SDK DeleteSnapshot.
+// DESTRUCTIVE (the snapshot is irrecoverably removed) — confirms unless
+// --force/--yes.
+func serverSnapshotsDelete(args []string, out, errW io.Writer, in io.Reader) error {
+	if helpRequested(args, out, usageServerSnapshots) {
+		return nil
+	}
+	fs := flag.NewFlagSet("server-snapshots-delete", flag.ContinueOnError)
+	fs.SetOutput(errW)
+	fs.Usage = func() { usageServerSnapshots(errW) }
+	jsonFlag := fs.Bool("json", false, "output as JSON")
+	waitFlag := fs.Bool("wait", false, "poll the task to a terminal state")
+	forceFlag := fs.Bool("force", false, "skip the confirmation prompt")
+	yesFlag := fs.Bool("yes", false, "alias for --force")
+
+	id, name, done, err := parseSnapshotIDNameArg(fs, args, "server snapshots delete", usageServerSnapshots)
+	if err != nil || done {
+		return err
+	}
+
+	if !*forceFlag && !*yesFlag {
+		confirmed, err := confirmAction(errW, in,
+			fmt.Sprintf("Deleting snapshot %q from server %d permanently removes it and cannot be undone.", name, id),
+			fmt.Sprintf("Continue with 'snapshots delete' on server %d?", id))
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Fprintln(errW, "Aborted; no changes made.")
+			return fmt.Errorf("aborted by user")
+		}
+	}
+
+	client, err := clientWithToken()
+	if err != nil {
+		return err
+	}
+	task, err := client.DeleteSnapshot(context.Background(), id, name)
+	if err != nil {
+		return err
+	}
+
+	waited := false
+	if *waitFlag && task != nil {
+		final, err := client.WaitForTask(context.Background(), task.UUID)
+		if err != nil {
+			return err
+		}
+		task = final
+		waited = true
+	}
+
+	return printSnapshotResult(out, *jsonFlag, "delete", id, name, task, waited)
+}
+
+// serverSnapshotsRestore reverts a server from a snapshot via the SDK
+// RestoreSnapshot. DESTRUCTIVE — the server's disks are reverted to the
+// snapshot and the server is rebooted — so it warns prominently and confirms
+// unless --force/--yes, mirroring `server reinstall`.
+func serverSnapshotsRestore(args []string, out, errW io.Writer, in io.Reader) error {
+	if helpRequested(args, out, usageServerSnapshots) {
+		return nil
+	}
+	fs := flag.NewFlagSet("server-snapshots-restore", flag.ContinueOnError)
+	fs.SetOutput(errW)
+	fs.Usage = func() { usageServerSnapshots(errW) }
+	jsonFlag := fs.Bool("json", false, "output as JSON")
+	waitFlag := fs.Bool("wait", false, "poll the task to a terminal state")
+	forceFlag := fs.Bool("force", false, "skip the confirmation prompt")
+	yesFlag := fs.Bool("yes", false, "alias for --force")
+
+	id, name, done, err := parseSnapshotIDNameArg(fs, args, "server snapshots restore", usageServerSnapshots)
+	if err != nil || done {
+		return err
+	}
+
+	if !*forceFlag && !*yesFlag {
+		confirmed, err := confirmAction(errW, in,
+			fmt.Sprintf("Restoring snapshot %q REVERTS server %d's disks to the snapshot and REBOOTS the server — data changed since the snapshot is lost.", name, id),
+			fmt.Sprintf("Continue with 'snapshots restore' on server %d?", id))
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Fprintln(errW, "Aborted; no changes made.")
+			return fmt.Errorf("aborted by user")
+		}
+	}
+
+	client, err := clientWithToken()
+	if err != nil {
+		return err
+	}
+	task, err := client.RestoreSnapshot(context.Background(), id, name)
+	if err != nil {
+		return err
+	}
+
+	waited := false
+	if *waitFlag && task != nil {
+		final, err := client.WaitForTask(context.Background(), task.UUID)
+		if err != nil {
+			return err
+		}
+		task = final
+		waited = true
+	}
+
+	return printSnapshotResult(out, *jsonFlag, "restore", id, name, task, waited)
+}
+
+// printSnapshotResult renders the outcome of a snapshot create/delete/restore.
+// task is the accepted (or, with --wait, the final) TaskInfo.
+func printSnapshotResult(out io.Writer, asJSON bool, action string, id int32, name string, task *netcup.TaskInfo, waited bool) error {
+	if asJSON {
+		return json.NewEncoder(out).Encode(map[string]interface{}{
+			"serverId": id,
+			"snapshot": name,
+			"action":   action,
+			"task":     task,
+		})
+	}
+
+	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintf(tw, "Server:\t%d\n", id)
+	fmt.Fprintf(tw, "Snapshot:\t%s\n", name)
+	fmt.Fprintf(tw, "Action:\t%s\n", action)
+	if task != nil {
+		fmt.Fprintf(tw, "Task:\t%s\n", task.UUID)
+		if waited {
+			fmt.Fprintf(tw, "Task State:\t%s\n", task.State)
+		} else {
+			fmt.Fprintf(tw, "Task State:\t%s (accepted; use --wait to poll)\n", task.State)
+		}
+	}
+	return tw.Flush()
+}
+
+// parseSnapshotIDNameArg parses fs and requires exactly two positionals: a
+// server ID and a snapshot name. context is used in error messages (e.g. "server
+// snapshots delete"), and usage prints the relevant subcommand help on a
+// missing-argument error. done is true when the caller should stop with a clean
+// exit — a -h/--help request — in which case id/name/err are zero and the
+// caller returns nil.
+func parseSnapshotIDNameArg(fs *flag.FlagSet, args []string, context string, usage func(io.Writer)) (id int32, name string, done bool, err error) {
+	positional, err := parsePositionalArgs(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0, "", true, nil
+		}
+		return 0, "", false, err
+	}
+	if len(positional) == 0 {
+		usage(os.Stderr)
+		return 0, "", false, fmt.Errorf("%s requires a server ID and a snapshot name", context)
+	}
+	if len(positional) == 1 {
+		return 0, "", false, fmt.Errorf("%s requires a snapshot name", context)
+	}
+	if len(positional) > 2 {
+		return 0, "", false, fmt.Errorf("%s takes a server ID and a snapshot name, got %d arguments", context, len(positional))
+	}
+	parsed, err := strconv.ParseInt(positional[0], 10, 32)
+	if err != nil {
+		return 0, "", false, fmt.Errorf("invalid server ID %q: must be an integer", positional[0])
+	}
+	return int32(parsed), positional[1], false, nil
 }
 
 // formatIPv4 joins the IPv4 addresses for display, or "-" when there are none.

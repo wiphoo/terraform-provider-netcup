@@ -207,10 +207,20 @@ risk**. The SDK exposes this as `ListImageFlavours` and the CLI as
 
 ## Snapshots
 
-List a server's snapshots. Pure read, **no downtime risk**. Snapshot
-create/delete/restore/export are **v0.7.0** (Snapshot Management) and stay out of
-scope here. The SDK exposes this as `ListSnapshots` and the CLI as
-`netcupctl server snapshots <id>`.
+Server snapshots: list, create, delete, and revert. **Listing** is pure read, **no
+downtime risk**; **create/delete/revert** are the v0.7.0 Snapshot Management
+milestone and are all **async** (`202 TaskInfo`) mutations keyed by snapshot
+**`name`** (not `uuid` — the list returns a `uuid`, but the singular mutating
+endpoints take the `name` in the path). Export is **out of scope** (deferred).
+The SDK exposes listing as `ListSnapshots` and mutation as `CreateSnapshot`,
+`DeleteSnapshot`, `RestoreSnapshot`; the CLI exposes `server snapshots
+list|create|delete|restore`.
+
+> ⚠️ **RESTORE IS DESTRUCTIVE.** `POST …/snapshots/{name}/revert` reverts the
+> server's disks to the snapshot and **reboots** the server — data changed since
+> the snapshot is lost. It must warn and require confirmation (bypassable with
+> `--force`/`--yes`), mirroring the reinstall/power write-ups. Delete permanently
+> removes the snapshot.
 
 ### List — `GET /v1/servers/{serverId}/snapshots` → `[]SnapshotMinimal`
 
@@ -227,6 +237,57 @@ scope here. The SDK exposes this as `ListSnapshots` and the CLI as
 | `exportedSizeInKiB` | int64? | nullable; set once exported |
 
 - An **empty list is valid** (no error); non-2xx → `*APIError`.
+
+### Create — `POST /v1/servers/{serverId}/snapshots`
+
+- **Content type:** `application/json`.
+- **Request body** `ServerSnapshotCreate`. `name` is **required**; the rest are
+  optional:
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | **yes** | `maxLength 255`; the mutation identifier (path-keyed) |
+| `description` | string | no | nullable; `maxLength 255` |
+| `diskName` | string | no | nullable; **must be set when `onlineSnapshot` is false** (per the `ServerSnapshotCreateCheck` dryrun rule) |
+| `onlineSnapshot` | bool | no | true = snapshot the running server without naming a disk; the API rejects it with `400` on UEFI systems (`server.snapshot.create.error.online.uefi`) |
+
+- **Response:** `202 TaskInfo` ("Creation of snapshot successfully started") —
+  **async**; poll with `WaitForTask`. `400` with codes like
+  `server.snapshot.create.error.online.uefi`; `404` when the server is unknown.
+  Other non-2xx → `*APIError`.
+
+### Get one — `GET /v1/servers/{serverId}/snapshots/{name}` → `Snapshot`
+
+- Full snapshot object (`SnapshotMinimal` plus `downloadInfos`). `404` when the
+  server or snapshot does not exist. Not currently exposed by the SDK/CLI
+  (listing covers the v0.7.0 CLI needs).
+
+### Delete — `DELETE /v1/servers/{serverId}/snapshots/{name}`
+
+- **DESTRUCTIVE** — the snapshot is irrecoverably removed (the server data is
+  untouched). **Response:** `202 TaskInfo` — **async**. `404` when the server or
+  snapshot does not exist.
+
+### Revert — `POST /v1/servers/{serverId}/snapshots/{name}/revert`
+
+- **DESTRUCTIVE** — reverts the server's disks to the snapshot and **reboots**
+  the server. **Response:** `202 TaskInfo` — **async**. `404` when the server or
+  snapshot does not exist.
+
+### Export (out of scope) — `POST /v1/servers/{serverId}/snapshots/{name}/export`
+
+- `202 TaskInfo`; `400` "No more snapshots left or server is not in state
+  shutoff". Deferred — not part of v0.7.0.
+
+### Dry-run check (not exposed) — `POST /v1/servers/{serverId}/snapshots:dryrun`
+
+- `200`/`400` → `[]ResponseError`; validates whether a snapshot is possible for
+  the chosen disk/online combination. Not exposed by the SDK/CLI in v0.7.0.
+
+> Confirmed against live OpenAPI `2026.0826.090023`. Recheck with
+> `curl -H 'accept: application/json' "$NETCUP_API_ENDPOINT/v1/openapi"` and
+> inspect the `/v1/servers/{serverId}/snapshots*` paths and the
+> `ServerSnapshotCreate` / `Snapshot` / `SnapshotMinimal` / `TaskInfo` schemas.
 
 ## OS install / reinstall
 
