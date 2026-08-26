@@ -428,3 +428,66 @@ func TestServerSnapshotsHelpShowsUsage(t *testing.T) {
 		t.Errorf("help output missing create/restore/warning:\n%s", o)
 	}
 }
+
+// TestServerSnapshotsDeleteHelpExitsClean guards that `-h`/`--help` on a
+// destructive subcommand is a clean exit — it must not fall through to the
+// confirmation prompt with a zero server ID, nor dispatch any request.
+func TestServerSnapshotsDeleteHelpExitsClean(t *testing.T) {
+	rec := &snapshotActionRecorder{}
+	srv := newSnapshotActionServer(rec)
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	for _, args := range [][]string{{"--help"}, {"-h"}} {
+		var out, errBuf bytes.Buffer
+		if err := serverSnapshotsDelete(args, &out, &errBuf, nil); err != nil {
+			t.Fatalf("serverSnapshotsDelete(%v) error = %v, want clean exit", args, err)
+		}
+		if rec.requests != 0 {
+			t.Errorf("serverSnapshotsDelete(%v) made %d requests, want 0", args, rec.requests)
+		}
+		if !strings.Contains(errBuf.String(), "netcupctl server snapshots") {
+			t.Errorf("serverSnapshotsDelete(%v) --help output missing usage:\n%s", args, errBuf.String())
+		}
+	}
+}
+
+func TestServerSnapshotsRestoreHelpExitsClean(t *testing.T) {
+	rec := &snapshotActionRecorder{}
+	srv := newSnapshotActionServer(rec)
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var out, errBuf bytes.Buffer
+	if err := serverSnapshotsRestore([]string{"--help"}, &out, &errBuf, nil); err != nil {
+		t.Fatalf("serverSnapshotsRestore --help error = %v, want clean exit", err)
+	}
+	if rec.requests != 0 {
+		t.Errorf("requests = %d, want 0 (help must not dispatch)", rec.requests)
+	}
+	if !strings.Contains(errBuf.String(), "netcupctl server snapshots") {
+		t.Errorf("--help output missing usage:\n%s", errBuf.String())
+	}
+}
+
+func TestServerSnapshotsCreateOnlineAndDiskMutuallyExclusive(t *testing.T) {
+	rec := &snapshotActionRecorder{}
+	srv := newSnapshotActionServer(rec)
+	defer srv.Close()
+	t.Setenv("NETCUP_API_ENDPOINT", srv.URL)
+	t.Setenv("NETCUP_ACCESS_TOKEN", "test-token")
+
+	var out, errBuf bytes.Buffer
+	err := serverSnapshotsCreate([]string{"5", "--name", "x", "--online", "--disk", "sda"}, &out, &errBuf, nil)
+	if err == nil {
+		t.Fatal("--online with --disk error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error = %v, want 'mutually exclusive'", err)
+	}
+	if rec.requests != 0 {
+		t.Errorf("requests = %d, want 0 (must reject before any request)", rec.requests)
+	}
+}

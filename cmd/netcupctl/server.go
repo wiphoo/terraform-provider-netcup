@@ -404,6 +404,9 @@ func serverSnapshotsCreate(args []string, out, errW io.Writer, in io.Reader) err
 	if !*onlineFlag && strings.TrimSpace(*diskFlag) == "" {
 		return fmt.Errorf("server snapshots create requires --disk <disk> for an offline snapshot, or --online")
 	}
+	if *onlineFlag && strings.TrimSpace(*diskFlag) != "" {
+		return fmt.Errorf("--online and --disk are mutually exclusive")
+	}
 
 	opts := netcup.ServerSnapshotCreate{Name: *nameFlag}
 	if *descriptionFlag != "" {
@@ -455,8 +458,8 @@ func serverSnapshotsDelete(args []string, out, errW io.Writer, in io.Reader) err
 	forceFlag := fs.Bool("force", false, "skip the confirmation prompt")
 	yesFlag := fs.Bool("yes", false, "alias for --force")
 
-	id, name, err := parseSnapshotIDNameArg(fs, args, "server snapshots delete", usageServerSnapshots)
-	if err != nil {
+	id, name, done, err := parseSnapshotIDNameArg(fs, args, "server snapshots delete", usageServerSnapshots)
+	if err != nil || done {
 		return err
 	}
 
@@ -511,8 +514,8 @@ func serverSnapshotsRestore(args []string, out, errW io.Writer, in io.Reader) er
 	forceFlag := fs.Bool("force", false, "skip the confirmation prompt")
 	yesFlag := fs.Bool("yes", false, "alias for --force")
 
-	id, name, err := parseSnapshotIDNameArg(fs, args, "server snapshots restore", usageServerSnapshots)
-	if err != nil {
+	id, name, done, err := parseSnapshotIDNameArg(fs, args, "server snapshots restore", usageServerSnapshots)
+	if err != nil || done {
 		return err
 	}
 
@@ -584,29 +587,29 @@ func printSnapshotResult(out io.Writer, asJSON bool, action string, id int32, na
 // missing-argument error. done is true when the caller should stop with a clean
 // exit — a -h/--help request — in which case id/name/err are zero and the
 // caller returns nil.
-func parseSnapshotIDNameArg(fs *flag.FlagSet, args []string, context string, usage func(io.Writer)) (id int32, name string, err error) {
+func parseSnapshotIDNameArg(fs *flag.FlagSet, args []string, context string, usage func(io.Writer)) (id int32, name string, done bool, err error) {
 	positional, err := parsePositionalArgs(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0, "", nil
+			return 0, "", true, nil
 		}
-		return 0, "", err
+		return 0, "", false, err
 	}
 	if len(positional) == 0 {
 		usage(os.Stderr)
-		return 0, "", fmt.Errorf("%s requires a server ID and a snapshot name", context)
+		return 0, "", false, fmt.Errorf("%s requires a server ID and a snapshot name", context)
 	}
 	if len(positional) == 1 {
-		return 0, "", fmt.Errorf("%s requires a snapshot name", context)
+		return 0, "", false, fmt.Errorf("%s requires a snapshot name", context)
 	}
 	if len(positional) > 2 {
-		return 0, "", fmt.Errorf("%s takes a server ID and a snapshot name, got %d arguments", context, len(positional))
+		return 0, "", false, fmt.Errorf("%s takes a server ID and a snapshot name, got %d arguments", context, len(positional))
 	}
 	parsed, err := strconv.ParseInt(positional[0], 10, 32)
 	if err != nil {
-		return 0, "", fmt.Errorf("invalid server ID %q: must be an integer", positional[0])
+		return 0, "", false, fmt.Errorf("invalid server ID %q: must be an integer", positional[0])
 	}
-	return int32(parsed), positional[1], nil
+	return int32(parsed), positional[1], false, nil
 }
 
 // formatIPv4 joins the IPv4 addresses for display, or "-" when there are none.
