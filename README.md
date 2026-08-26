@@ -10,7 +10,7 @@ CCP/DNS support planned in later releases.
 
 ## Status
 
-**v0.6.2 — SSH key management (Terraform provider) is available, with a Create-time duplicate-key guard.**
+**v0.7.0 — Snapshot management (CLI) is available.**
 
 The `netcupctl` CLI, Go SDK, and release automation shipped in v0.1.0; the
 Terraform provider (data sources, rDNS resource) in v0.2.0. Later releases added
@@ -19,7 +19,9 @@ power, rescue, and image/snapshot operations to the CLI (v0.3.0) and provider
 `netcup_server_reinstall` resource to the provider (v0.6.0), and the
 `netcup_ssh_key` resource / `netcup_ssh_keys` data source (v0.6.1), hardened in
 v0.6.2 so `Create` refuses to register a duplicate of a key the account already
-holds. See the [Roadmap](docs/ROADMAP.md) for the full plan.
+holds. v0.7.0 completes snapshot management in the CLI:
+`netcupctl server snapshots create|delete|restore` (listing shipped in v0.3.0).
+See the [Roadmap](docs/ROADMAP.md) for the full plan.
 
 ## Quick start — netcupctl
 
@@ -54,8 +56,9 @@ netcupctl server list
 ## netcupctl operations
 
 Beyond listing servers, `netcupctl` controls a server's power state and rescue
-system and lists its installable images and snapshots. All commands take a
-numeric server `<id>` (from `netcupctl server list`) and support `--json`.
+system, lists its installable images, and manages its snapshots — list, create,
+delete, and restore. All commands take a numeric server `<id>` (from
+`netcupctl server list`) and support `--json`.
 
 > ℹ️ **Availability:** power/rescue/image and `server snapshots list` (listing)
 > commands require **v0.3.0+**; `server snapshots create|delete|restore` require
@@ -330,8 +333,8 @@ Actions workflow (`.github/workflows/release.yml`); configuration is in
 `.goreleaser.yaml`. Cut a release by pushing a SemVer tag:
 
 ```bash
-git tag v0.6.2
-git push origin v0.6.2
+git tag v0.7.0
+git push origin v0.7.0
 ```
 
 The workflow builds both binaries for linux, macOS, and Windows (amd64 and
