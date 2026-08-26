@@ -1,0 +1,19 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/snapshots/server-0a0b0c0d
+    method: DELETE
+  response:
+    body: '{"code":"NOT_FOUND","message":"snapshot not found"}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 404 Not Found
+    code: 404
+    duration: ""

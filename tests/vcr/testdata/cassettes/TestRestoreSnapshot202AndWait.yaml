@@ -1,0 +1,51 @@
+---
+version: 1
+interactions:
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/snapshots/server-0a0b0c0d/revert
+    method: POST
+  response:
+    body: '{"uuid":"99999999-9999-4999-8999-999999999999","name":"ServerSnapshotRevert","state":"PENDING","startedAt":null,"finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 202 Accepted
+    code: 202
+    duration: ""
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/99999999-9999-4999-8999-999999999999
+    method: GET
+  response:
+    body: '{"uuid":"99999999-9999-4999-8999-999999999999","name":"ServerSnapshotRevert","state":"RUNNING","startedAt":"2026-08-20T11:00:00Z","finishedAt":null,"executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-08-20T11:05:00Z","progressInPercent":40},"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/99999999-9999-4999-8999-999999999999
+    method: GET
+  response:
+    body: '{"uuid":"99999999-9999-4999-8999-999999999999","name":"ServerSnapshotRevert","state":"FINISHED","startedAt":"2026-08-20T11:00:00Z","finishedAt":"2026-08-20T11:03:00Z","executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-08-20T11:03:00Z","progressInPercent":100},"steps":[{"uuid":"s1-0000-4000-8000-000000000001","name":"revert","state":"FINISHED","startedAt":"2026-08-20T11:00:00Z","finishedAt":"2026-08-20T11:03:00Z"}],"result":null,"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""

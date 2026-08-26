@@ -1,0 +1,21 @@
+---
+version: 1
+interactions:
+- request:
+    body: '{"name":"server-0a0b0c0d","onlineSnapshot":true}'
+    form: {}
+    headers:
+      Accept:
+      - application/json
+      Content-Type:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1000123/snapshots
+    method: POST
+  response:
+    body: '{"code":"server.snapshot.create.error.online.uefi","message":"online snapshot not possible"}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 400 Bad Request
+    code: 400
+    duration: ""
