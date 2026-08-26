@@ -91,15 +91,23 @@ The rescue password is only available while rescue mode is active. `enable
 --wait` reads it back once activation finishes; the API may expose it a moment
 later, so if it is not ready yet, re-run `rescue status` to retrieve it.
 
-### Images and snapshots (read-only)
+### Images and snapshots
 
 ```bash
-netcupctl server images <id> [--json]           # installable OS images
-netcupctl server snapshots <id> [--json]        # snapshots
+netcupctl server images <id> [--json]                    # installable OS images
+netcupctl server snapshots list <id> [--json]            # snapshots
+netcupctl server snapshots create <id> --name <name>     # --online|--disk <disk> [--wait]
+netcupctl server snapshots delete <id> <name>            # --force --wait
+netcupctl server snapshots restore <id> <name>           # --force --wait
 ```
 
-Snapshot create/delete/restore is planned for a later release — see the
-[Roadmap](docs/ROADMAP.md).
+> ⚠️ **Snapshot restore is destructive.** `server snapshots restore` reverts the
+> server's disks to the snapshot and **reboots** it — data changed since the
+> snapshot is lost. `delete` permanently removes the snapshot. Both prompt for
+> confirmation unless `--force`/`--yes` is given. Creating an offline snapshot
+> requires naming the target disk (`--disk <disk>`); use `--online` to snapshot a
+> running server without naming a disk (note the SCP API rejects online
+> snapshots on UEFI systems).
 
 ### Reinstall
 
@@ -145,13 +153,15 @@ the same care as the equivalent action from the SCP web panel.
 | `server rescue enable` | **Reboots** into the rescue environment | **Yes** — normal OS not running |
 | `server rescue disable` | **Reboots** back into the normal OS | **Yes** — brief outage |
 | `server reinstall` | **Wipes the server** and reinstalls the OS | **Yes** — down during install; all data lost |
+| `server snapshots restore` | **Reverts** disks to the snapshot and **reboots** the server | **Yes** — brief outage; data changed since the snapshot is lost |
+| `server snapshots delete` | **Permanently removes** the snapshot | No (server untouched) |
 | `power status` / `rescue status` / `images` / `snapshots` | Read-only | No |
 
 CLI safeguards:
 
 - **Confirmation prompts** on `power off/suspend/reboot`, `rescue
-  enable/disable`, and `server reinstall` — written to **stderr** so `--json`
-  output on stdout stays clean.
+  enable/disable`, `server reinstall`, and `server snapshots delete/restore` —
+  written to **stderr** so `--json` output on stdout stays clean.
 - **`--force`/`--yes`** skips the prompt for non-interactive use — pass it only
   when you have accepted the downtime.
 - **`--wait`** polls the async task (`202 TaskInfo`) to a terminal state so

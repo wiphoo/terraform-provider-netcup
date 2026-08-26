@@ -233,7 +233,7 @@ func TestServerLeafSubcommandsHelp(t *testing.T) {
 		"list":      func(a []string, w *bytes.Buffer) error { return serverList(a, w) },
 		"get":       func(a []string, w *bytes.Buffer) error { return serverGet(a, w) },
 		"images":    func(a []string, w *bytes.Buffer) error { return serverImages(a, w) },
-		"snapshots": func(a []string, w *bytes.Buffer) error { return serverSnapshots(a, w) },
+		"snapshots": func(a []string, w *bytes.Buffer) error { return serverSnapshots(a, w, w, nil) },
 	}
 	for name, fn := range leaves {
 		t.Run(name, func(t *testing.T) {

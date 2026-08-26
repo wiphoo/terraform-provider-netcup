@@ -24,6 +24,24 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+### Added
+
+- **Snapshot management (v0.7.0 milestone).** New `netcupctl server snapshots`
+  subcommands and the SDK methods behind them:
+  - `server snapshots create` (`CreateSnapshot`) — start an async snapshot via
+    `POST /v1/servers/{id}/snapshots` (`--name` required; `--description`,
+    `--online`/`--disk`, `--wait`, `--json`).
+  - `server snapshots delete` (`DeleteSnapshot`) — remove a snapshot via
+    `DELETE /v1/servers/{id}/snapshots/{name}` (confirms; `--force`/`--yes`).
+  - `server snapshots restore` (`RestoreSnapshot`) — revert a server from a
+    snapshot via `POST /v1/servers/{id}/snapshots/{name}/revert` (destructive —
+    reverts disks and reboots the server; confirms; `--force`/`--yes`, `--wait`).
+  - `server snapshots list` — explicit alias for the legacy `server snapshots
+    <id>` listing.
+  - Pinned the snapshot create/delete/revert endpoint shapes in
+    `docs/SCP-API-NOTES.md` (all async `202 TaskInfo`; mutations keyed by
+    snapshot `name`).
+
 ## [0.6.2] - 2026-08-16
 
 ### Changed
