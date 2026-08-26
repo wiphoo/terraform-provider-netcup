@@ -57,9 +57,10 @@ Beyond listing servers, `netcupctl` controls a server's power state and rescue
 system and lists its installable images and snapshots. All commands take a
 numeric server `<id>` (from `netcupctl server list`) and support `--json`.
 
-> ℹ️ **Availability:** power/rescue/image/snapshot commands require **v0.3.0+**;
-> `server reinstall` requires **v0.5.0+**. Older releases fail with an
-> unknown-subcommand error — download the latest release or `make build`.
+> ℹ️ **Availability:** power/rescue/image and `server snapshots list` (listing)
+> commands require **v0.3.0+**; `server snapshots create|delete|restore` require
+> **v0.7.0+**; `server reinstall` requires **v0.5.0+**. Older releases fail with
+> an unknown-subcommand error — download the latest release or `make build`.
 
 > ⚠️ **Several commands cause downtime — some are destructive.** Read
 > [Operational risk & downtime](#operational-risk--downtime) before running the

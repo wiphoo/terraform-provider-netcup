@@ -25,7 +25,7 @@ The output shows the image flavour ID (`ID`), machine name (`NAME`), alias
 (`ALIAS`), and the underlying base image (`IMAGE`). Use the `ID` column value as
 the `--image` argument for the reinstall command.
 
-See [`server images`](../README.md#images-and-snapshots-read-only) for details.
+See [`server images`](../README.md#images-and-snapshots) for details.
 
 ### 2. Reinstall
 
