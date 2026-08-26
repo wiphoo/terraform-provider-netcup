@@ -139,7 +139,7 @@ Scope:
 
 A patch hardening of the v0.6.1 SSH-key resource — create-only, no new surface.
 
-## v0.7.0 - Snapshot Management
+## v0.7.0 - Snapshot Management (CLI) (shipped)
 
 Scope:
 
@@ -148,6 +148,11 @@ Scope:
 - Snapshot restore workflows
 
 (CLI first, then provider, following the release strategy above.)
+
+Shipped **CLI + SDK only**: `netcupctl server snapshots create|delete|restore`
+(listing shipped in v0.3.0) and the `CreateSnapshot` / `DeleteSnapshot` /
+`RestoreSnapshot` SDK methods. The provider snapshot **resource** is a future
+slot — `netcup_server_snapshots` remains a read-only data source.
 
 ## v0.8.0 - DNS Support
 
