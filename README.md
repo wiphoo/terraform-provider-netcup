@@ -205,7 +205,8 @@ for ready-to-use configurations.
 [`netcup_server_power`](examples/server_power.tf) (v0.4.0),
 [`netcup_server_rescue`](examples/server_rescue.tf) (v0.4.0),
 [`netcup_server_reinstall`](examples/server_reinstall.tf) (v0.6.0; destructive),
-[`netcup_ssh_key`](examples/ssh_key.tf) (v0.6.1).
+[`netcup_ssh_key`](examples/ssh_key.tf) (v0.6.1),
+[`netcup_server_snapshot`](examples/server_snapshot.tf) (upcoming in v0.7.1).
 
 **Data sources:** [`netcup_servers`](examples/servers.tf),
 [`netcup_server`](examples/server.tf) (v0.2.0),
@@ -296,6 +297,8 @@ downtime profile; the Terraform lifecycle adds specific failure modes:
 | `netcup_server_rescue` | Create (enable) / Destroy (disable) | **Yes** | Both **reboot** the server |
 | `netcup_server_reinstall` | Create or replace | **Yes** | **Wipes the server** and reinstalls the OS; all data lost |
 | `netcup_server_reinstall` | **Destroy** | **No** | **No-op** — removes only Terraform state; does not reinstall/wipe |
+| `netcup_server_snapshot` | Create or replace | Depends | Offline snapshots need the server stopped; `online_snapshot = true` snapshots a running server without downtime. Any input change replaces (deletes and re-takes) the snapshot |
+| `netcup_server_snapshot` | **Destroy** | **No** | **Deletes the snapshot** from SCP (irrecoverable) |
 | `netcup_server_images` / `netcup_server_snapshots` | Read | No | Read-only data sources |
 
 Key semantics:

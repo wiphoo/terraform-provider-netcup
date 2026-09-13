@@ -24,6 +24,16 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+### Added
+
+- **`netcup_server_snapshot` resource** (upcoming in v0.7.1): manage a server
+  snapshot in Terraform — create (`POST /v1/servers/{id}/snapshots`), refresh,
+  and delete (`DELETE /v1/servers/{id}/snapshots/{name}`), with optional task
+  waiting (`wait`, default `true`) and import via `server_id:snapshot_name`.
+  Every input is immutable (any change replaces the snapshot);
+  `online_snapshot` and `disk_name` are mutually exclusive, and an offline
+  snapshot requires `disk_name`. See `examples/server_snapshot.tf`.
+
 ## [0.7.0] - 2026-08-26
 
 ### Added
