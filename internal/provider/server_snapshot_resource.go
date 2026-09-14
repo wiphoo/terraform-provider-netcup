@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -336,9 +337,42 @@ func applySnapshot(ctx context.Context, m *serverSnapshotResourceModel, s netcup
 // DeleteSnapshot addresses, so the newest creation is the one this resource
 // owns.
 func latestSnapshotByName(snapshots []netcup.SnapshotMinimal, name string) *netcup.SnapshotMinimal {
+	return latestSnapshotByNameExcluding(snapshots, name, nil)
+}
+
+// latestSnapshotByNameExcluding is latestSnapshotByName with an exclusion set:
+// snapshots whose UUID is in exclude are ignored. Create uses it with the UUIDs
+// that existed BEFORE the create request, so adoption can never mistake a
+// pre-existing same-name snapshot for the one this request creates while the
+// new one is not listed yet.
+func latestSnapshotByNameExcluding(snapshots []netcup.SnapshotMinimal, name string, exclude map[string]bool) *netcup.SnapshotMinimal {
 	var best *netcup.SnapshotMinimal
 	for i := range snapshots {
 		if snapshots[i].Name != name {
+			continue
+		}
+		if exclude != nil && exclude[snapshots[i].UUID] {
+			continue
+		}
+		if best == nil || snapshots[i].CreationTime.After(best.CreationTime) {
+			best = &snapshots[i]
+		}
+	}
+	return best
+}
+
+// latestSameNameCreatedAfter returns the most recently created snapshot with
+// the given name that was created no earlier than since (when since is
+// non-nil), or nil. Bounding the match by the task's start time keeps a
+// pre-existing same-name snapshot from being mistaken for one this task
+// produced.
+func latestSameNameCreatedAfter(snapshots []netcup.SnapshotMinimal, name string, since *time.Time) *netcup.SnapshotMinimal {
+	var best *netcup.SnapshotMinimal
+	for i := range snapshots {
+		if snapshots[i].Name != name {
+			continue
+		}
+		if since != nil && snapshots[i].CreationTime.Before(*since) {
 			continue
 		}
 		if best == nil || snapshots[i].CreationTime.After(best.CreationTime) {
@@ -365,6 +399,24 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid server_id", err.Error())
 		return
+	}
+
+	// Reconcile the server's existing snapshots BEFORE dispatching, so the
+	// post-create adoption below cannot mistake a pre-existing same-name
+	// snapshot for the one this request creates (name is the API's identity —
+	// deletion is addressed by name). A listing failure means the existing set
+	// cannot be confirmed, so the create is not dispatched under that
+	// uncertainty (mirroring netcup_ssh_key's pre-create guard); persisting no
+	// state lets the next apply retry safely.
+	preExisting, err := r.client.ListSnapshots(ctx, serverID)
+	if err != nil {
+		d, _ := apiErrorToDiag(err, true)
+		resp.Diagnostics.Append(d)
+		return
+	}
+	preExistingUUIDs := make(map[string]bool, len(preExisting))
+	for i := range preExisting {
+		preExistingUUIDs[preExisting[i].UUID] = true
 	}
 
 	opts := netcup.ServerSnapshotCreate{Name: plan.Name.ValueString()}
@@ -464,7 +516,9 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 
 	// The task FINISHED: the snapshot should now be listed. Find it by name
 	// (the API's own identity — deletion is addressed by name) and adopt its
-	// UUID.
+	// UUID. Pre-existing same-name snapshots (recorded above, before the
+	// create) are excluded so a listing lag on the NEW snapshot cannot cause
+	// this resource to adopt a snapshot it did not create.
 	snapshots, err := r.client.ListSnapshots(ctx, serverID)
 	if err != nil {
 		// The snapshot finished but the listing failed: the UUID cannot be
@@ -476,24 +530,25 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 			fmt.Sprintf(
 				"The snapshot task finished, but the server's snapshots could not be listed to confirm the "+
 					"snapshot's UUID (%s). The resource was recorded in state; the next refresh will adopt "+
-					"the snapshot by name.",
+					"the snapshot once it can be identified.",
 				err.Error(),
 			),
 		)
 		return
 	}
-	found := latestSnapshotByName(snapshots, plan.Name.ValueString())
+	found := latestSnapshotByNameExcluding(snapshots, plan.Name.ValueString(), preExistingUUIDs)
 	if found == nil {
-		// Task finished but the snapshot is not listed yet: persist + warn; the
-		// next refresh reconciles by name.
+		// Task finished but no NEW snapshot with this name is listed yet (any
+		// pre-existing same-name snapshot was excluded): persist + warn; the
+		// next refresh reconciles via the task's start-time window.
 		resetSnapshotComputed(&plan, plan.TaskID)
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		resp.Diagnostics.AddWarning(
 			"Netcup snapshot not found after creation",
 			fmt.Sprintf(
-				"The snapshot task finished, but no snapshot named %q was listed on server %d. "+
-					"The resource was recorded in state; the next refresh will adopt it by name once it "+
-					"appears.",
+				"The snapshot task finished, but no new snapshot named %q was listed on server %d "+
+					"(a pre-existing snapshot with that name is never adopted). The resource was recorded "+
+					"in state; the next refresh will adopt the snapshot once it can be identified.",
 				plan.Name.ValueString(), serverID,
 			),
 		)
@@ -540,25 +595,65 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 		return
 	}
 
-	// Match by UUID (the snapshot's real identity). Fall back to name when the
-	// UUID is not known yet — a fresh import, or a create whose outcome was
-	// unconfirmed and was never resolved by a refresh.
+	// Normalize a null/unknown wait (post-import / unconfirmed create) to the
+	// schema default before any persistence decision.
+	if state.Wait.IsNull() || state.Wait.IsUnknown() {
+		state.Wait = types.BoolValue(true)
+	}
+
 	var found *netcup.SnapshotMinimal
 	switch {
 	case !state.UUID.IsNull() && !state.UUID.IsUnknown() && state.UUID.ValueString() != "":
+		// Known UUID: match by the snapshot's real identity.
 		for i := range snapshots {
 			if snapshots[i].UUID == state.UUID.ValueString() {
 				found = &snapshots[i]
 				break
 			}
 		}
-	case !state.Name.IsNull() && !state.Name.IsUnknown() && state.Name.ValueString() != "":
-		found = latestSnapshotByName(snapshots, state.Name.ValueString())
-	}
-	if found == nil {
-		// Drift: the snapshot no longer exists on the server.
+		if found == nil {
+			// A known UUID that is no longer listed: the snapshot was removed
+			// out of band. Drift.
+			resp.State.RemoveResource(ctx)
+			return
+		}
+	case state.Name.IsNull() || state.Name.IsUnknown() || state.Name.ValueString() == "":
+		// Neither UUID nor name is known: the state identifies no snapshot.
 		resp.State.RemoveResource(ctx)
 		return
+	default:
+		// The UUID is not known: an unconfirmed create (wait=false, an
+		// indeterminate wait, or an ambiguous dispatch) or a fresh import.
+		// The snapshot may still be in flight, so dropping the state here
+		// would let the next apply create a duplicate. Resolve via the
+		// recorded task when there is one, otherwise fall back to the name.
+		adopted, remove, diags := r.resolveUnconfirmedCreate(ctx, &state, snapshots)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if remove {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		if adopted == nil {
+			// Not adoptable yet: keep the state (so the next apply does not
+			// mint a duplicate) and tell the operator what to do.
+			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+			resp.Diagnostics.AddWarning(
+				"Netcup snapshot not found on refresh",
+				fmt.Sprintf(
+					"No snapshot named %q was listed on server %d that this resource could claim. "+
+						"The snapshot may still be in flight (an unconfirmed create keeps this resource "+
+						"in state so the next apply does not mint a duplicate); it will be adopted once it "+
+						"can be identified. If it does not exist, remove this resource from state with "+
+						"`terraform state rm`.",
+					state.Name.ValueString(), serverID,
+				),
+			)
+			return
+		}
+		found = adopted
 	}
 
 	// Backfill inputs only when null (import / unconfirmed create), so refreshes
@@ -578,15 +673,67 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 		// leave disk_name null — the practitioner must set it explicitly.)
 		state.DiskName = types.StringValue(found.Disks[0])
 	}
-	if state.Wait.IsNull() || state.Wait.IsUnknown() {
-		state.Wait = types.BoolValue(true)
-	}
 
 	if diags := applySnapshot(ctx, &state, *found); diags.HasError() {
 		resp.Diagnostics.Append(diags...)
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// resolveUnconfirmedCreate resolves a state whose UUID is unknown (an
+// unconfirmed create, or an import that found nothing) against the server's
+// current snapshot listing. It returns:
+//
+//   - found: a snapshot to adopt (its UUID), when one can be attributed to
+//     this resource;
+//   - remove: true only when absence is DEFINITIVE (the recorded task ended in
+//     a failure terminal and nothing matching is listed);
+//   - diagnostics: a hard error (state kept) when the task's state cannot be
+//     read.
+//
+// While the recorded task is still running, nothing in the listing is adopted:
+// a same-name snapshot there is then necessarily pre-existing, and adopting it
+// would make Terraform own a snapshot it did not create. A finished task
+// adopts only a same-name snapshot created no earlier than the task started,
+// so a pre-existing same-name snapshot is never mistaken for the one this
+// resource created.
+func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, state *serverSnapshotResourceModel, snapshots []netcup.SnapshotMinimal) (*netcup.SnapshotMinimal, bool, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	name := state.Name.ValueString()
+
+	if state.TaskID.IsNull() || state.TaskID.IsUnknown() || state.TaskID.ValueString() == "" {
+		// No task to check (an ambiguous dispatch, or an import): the name is
+		// the only identity available, so adopt the newest same-name snapshot
+		// when one is listed, and keep the state otherwise (absence cannot be
+		// established without a task to inspect).
+		return latestSnapshotByName(snapshots, name), false, diags
+	}
+
+	task, err := r.client.GetTask(ctx, state.TaskID.ValueString())
+	if err != nil {
+		var apiErr *netcup.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			// The task cannot be read: its outcome is unknown, so fall back to
+			// the name rather than dropping the state on a missing task.
+			return latestSnapshotByName(snapshots, name), false, diags
+		}
+		d, _ := apiErrorToDiag(err, true)
+		diags.Append(d)
+		return nil, false, diags
+	}
+	switch {
+	case !task.State.IsTerminal():
+		// The snapshot is in flight: keep the state and re-check on the next
+		// refresh. Nothing is adopted while the task runs.
+		return nil, false, diags
+	case task.State == netcup.TaskStateFinished:
+		return latestSameNameCreatedAfter(snapshots, name, task.StartedAt), false, diags
+	default:
+		// ERROR/CANCELED/ROLLBACK: the snapshot was never completed and
+		// nothing matching is listed — absence is definitive.
+		return nil, true, diags
+	}
 }
 
 // Update is never called by the framework: every input attribute carries

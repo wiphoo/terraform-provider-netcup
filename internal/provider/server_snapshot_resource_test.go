@@ -275,7 +275,7 @@ func TestApplySnapshot(t *testing.T) {
 
 func TestServerSnapshotResource_Create_Async(t *testing.T) {
 	taskPolled := false
-	listed := false
+	listCalls := 0
 	var rawBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -292,9 +292,15 @@ func TestServerSnapshotResource_Create_Async(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
-			listed = true
+			// First call is the pre-create reconciliation (no snapshots yet);
+			// the second is the post-finish adoption listing.
+			listCalls++
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-1", "pre-upgrade", "d", "2026-01-02T03:04:05Z", "SHUTOFF", "system", false, true, int64Ptr(12345)) + "]"))
+			if listCalls == 1 {
+				_, _ = w.Write([]byte(`[]`))
+			} else {
+				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-1", "pre-upgrade", "d", "2026-01-02T03:04:05Z", "SHUTOFF", "system", false, true, int64Ptr(12345)) + "]"))
+			}
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -320,8 +326,8 @@ func TestServerSnapshotResource_Create_Async(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
-	if !taskPolled || !listed {
-		t.Errorf("expected the task to be polled (%v) and the snapshots listed (%v) with wait=true", taskPolled, listed)
+	if !taskPolled || listCalls != 2 {
+		t.Errorf("expected the task to be polled (%v) and exactly two snapshot listings: pre-create + post-finish (got %d)", taskPolled, listCalls)
 	}
 	// The request body carries the configured inputs; an offline snapshot omits
 	// onlineSnapshot entirely (the SDK field is omitempty and defaults to false).
@@ -364,7 +370,7 @@ func TestServerSnapshotResource_Create_Async(t *testing.T) {
 
 func TestServerSnapshotResource_Create_NoWait(t *testing.T) {
 	polled := false
-	listed := false
+	listCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -372,7 +378,7 @@ func TestServerSnapshotResource_Create_NoWait(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"uuid":"task-9","state":"PENDING"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
-			listed = true
+			listCalls++
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`[]`))
 		case strings.HasPrefix(r.URL.Path, "/v1/tasks/"):
@@ -403,8 +409,8 @@ func TestServerSnapshotResource_Create_NoWait(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
 	}
-	if polled || listed {
-		t.Errorf("wait=false must not poll the task (%v) nor list snapshots (%v)", polled, listed)
+	if polled || listCalls != 1 {
+		t.Errorf("wait=false must not poll the task (%v) nor list more than the pre-create reconciliation (got %d listings)", polled, listCalls)
 	}
 	var state serverSnapshotResourceModel
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
@@ -423,6 +429,9 @@ func TestServerSnapshotResource_Create_TaskFailure(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"uuid":"task-err","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
 		case r.URL.Path == "/v1/tasks/task-err":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"uuid":"task-err","state":"ERROR","message":"snapshot failed"}`))
@@ -457,12 +466,16 @@ func TestServerSnapshotResource_Create_TaskFailure(t *testing.T) {
 
 func TestServerSnapshotResource_Create_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots" {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			_, _ = w.Write([]byte(`{"code":"VALIDATION","message":"disk not found"}`))
-			return
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
@@ -491,12 +504,16 @@ func TestServerSnapshotResource_Create_APIError(t *testing.T) {
 
 func TestServerSnapshotResource_Create_5xxAmbiguous(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots" {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
 			w.WriteHeader(http.StatusBadGateway)
 			_, _ = w.Write([]byte(`{"message":"upstream timeout"}`))
-			return
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
@@ -533,12 +550,16 @@ func TestServerSnapshotResource_Create_5xxAmbiguous(t *testing.T) {
 
 func TestServerSnapshotResource_Create_DispatchDecodeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots" {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"uuid":`)) // truncated body → decode error
-			return
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
@@ -575,6 +596,7 @@ func TestServerSnapshotResource_Create_DispatchDecodeError(t *testing.T) {
 }
 
 func TestServerSnapshotResource_Create_ListNotFoundAfterFinish(t *testing.T) {
+	listCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -585,6 +607,8 @@ func TestServerSnapshotResource_Create_ListNotFoundAfterFinish(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			// Pre-create listing and the post-finish listing are both empty.
+			listCalls++
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`[]`))
 		default:
@@ -629,6 +653,7 @@ func TestServerSnapshotResource_Create_ListNotFoundAfterFinish(t *testing.T) {
 }
 
 func TestServerSnapshotResource_Create_ListErrorAfterFinish(t *testing.T) {
+	listCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -639,6 +664,13 @@ func TestServerSnapshotResource_Create_ListErrorAfterFinish(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			// The pre-create listing succeeds; the post-finish listing fails.
+			listCalls++
+			if listCalls == 1 {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"message":"boom"}`))
 		default:
@@ -675,6 +707,7 @@ func TestServerSnapshotResource_Create_ListErrorAfterFinish(t *testing.T) {
 
 func TestServerSnapshotResource_Create_OnlineSnapshotBody(t *testing.T) {
 	var rawBody map[string]any
+	listCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -687,8 +720,15 @@ func TestServerSnapshotResource_Create_OnlineSnapshotBody(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"uuid":"task-2","state":"FINISHED"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			// Pre-create listing is empty; the post-finish listing carries the
+			// new online snapshot.
+			listCalls++
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-2", "online-snap", "", "2026-01-02T03:04:05Z", "RUNNING", "", true, false, nil) + "]"))
+			if listCalls == 1 {
+				_, _ = w.Write([]byte(`[]`))
+			} else {
+				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-2", "online-snap", "", "2026-01-02T03:04:05Z", "RUNNING", "", true, false, nil) + "]"))
+			}
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -723,6 +763,219 @@ func TestServerSnapshotResource_Create_OnlineSnapshotBody(t *testing.T) {
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
 	if state.UUID.ValueString() != "snap-uuid-2" || !state.Online.ValueBool() {
 		t.Errorf("uuid/online = %v/%v, want snap-uuid-2/true", state.UUID.ValueString(), state.Online.ValueBool())
+	}
+}
+
+// TestServerSnapshotResource_Create_ExcludesPreExistingSnapshot verifies that
+// when the server already holds a same-name snapshot, post-create adoption
+// takes the NEW snapshot (created after the pre-create reconciliation), not
+// the pre-existing one — even though the pre-existing one is the newest by
+// name that the old code would have grabbed during a listing lag.
+func TestServerSnapshotResource_Create_ExcludesPreExistingSnapshot(t *testing.T) {
+	listCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING"}`))
+		case r.URL.Path == "/v1/tasks/task-1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			listCalls++
+			w.WriteHeader(http.StatusOK)
+			if listCalls == 1 {
+				// Pre-existing same-name snapshot, recorded before the create.
+				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+			} else {
+				// Post-finish: the new snapshot is listed next to the old one.
+				_, _ = w.Write([]byte("[" +
+					snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "," +
+					snapshotListEntry(t, "snap-uuid-new", "pre-upgrade", "", "2026-01-02T03:04:05Z", "SHUTOFF", "system", false, false, nil) +
+					"]"))
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"disk_name": tftypes.NewValue(tftypes.String, "system"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var state serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if state.UUID.ValueString() != "snap-uuid-new" {
+		t.Errorf("uuid = %q, want snap-uuid-new (the pre-existing same-name snapshot must not be adopted)", state.UUID.ValueString())
+	}
+}
+
+// TestServerSnapshotResource_Create_PreExistingOnlyAfterFinish verifies that
+// when the post-finish listing shows ONLY the pre-existing same-name snapshot
+// (the new one is not listed yet), the resource is persisted unconfirmed
+// rather than adopting the pre-existing snapshot.
+func TestServerSnapshotResource_Create_PreExistingOnlyAfterFinish(t *testing.T) {
+	listCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING"}`))
+		case r.URL.Path == "/v1/tasks/task-1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			listCalls++
+			w.WriteHeader(http.StatusOK)
+			// Both listings show only the pre-existing snapshot.
+			_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"disk_name": tftypes.NewValue(tftypes.String, "system"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() must not error when only the pre-existing snapshot is listed; got: %v", resp.Diagnostics.Errors())
+	}
+	if len(resp.Diagnostics.Warnings()) == 0 {
+		t.Error("expected a warning when the new snapshot is not listed yet")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Error("expected state to be persisted (unconfirmed)")
+	}
+	var state serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
+	if !state.UUID.IsNull() || state.UUID.ValueString() == "snap-uuid-old" {
+		t.Errorf("uuid = %v, want null (the pre-existing snapshot must not be adopted)", state.UUID)
+	}
+	if state.TaskID.ValueString() != "task-1" {
+		t.Errorf("task_id = %q, want task-1", state.TaskID.ValueString())
+	}
+}
+
+// TestServerSnapshotResource_Create_PreListError verifies that a failing
+// pre-create listing blocks the create (the existing snapshot set cannot be
+// confirmed) and persists no state, so the next apply retries.
+func TestServerSnapshotResource_Create_PreListError(t *testing.T) {
+	postCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
+			postCalled = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"disk_name": tftypes.NewValue(tftypes.String, "system"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when the pre-create listing fails")
+	}
+	if postCalled {
+		t.Error("the create must not be dispatched when the pre-create listing fails")
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("expected null state when the pre-create listing fails, got %v", resp.State.Raw)
+	}
+}
+
+// TestServerSnapshotResource_Create_PreList404 verifies that a 404 pre-create
+// listing (the server itself is gone) blocks the create with an error.
+func TestServerSnapshotResource_Create_PreList404(t *testing.T) {
+	postCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
+			postCalled = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"NOT_FOUND","message":"no such server"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"disk_name": tftypes.NewValue(tftypes.String, "system"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when the server 404s on the pre-create listing")
+	}
+	if postCalled {
+		t.Error("the create must not be dispatched when the server is gone")
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("expected null state, got %v", resp.State.Raw)
 	}
 }
 
@@ -935,6 +1188,294 @@ func TestServerSnapshotResource_Read_ListError(t *testing.T) {
 	}
 	if resp.State.Raw.IsNull() {
 		t.Error("expected the resource to stay in state when the listing fails")
+	}
+}
+
+// TestServerSnapshotResource_Read_InFlightTaskKeepsState verifies that a
+// refresh of an unconfirmed create (null uuid, task still PENDING) keeps the
+// state instead of deleting it: the snapshot does not appear in the listing
+// while the task is running, so absence is not evidence of failure.
+func TestServerSnapshotResource_Read_InFlightTaskKeepsState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/tasks/task-1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING","startedAt":"2026-01-02T03:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, nil),
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, "task-1"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state must not be removed while the create task is still running")
+	}
+	var got serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if !got.UUID.IsNull() {
+		t.Errorf("uuid = %v, want null (nothing may be adopted while the task is running)", got.UUID)
+	}
+}
+
+// TestServerSnapshotResource_Read_TaskFailedRemovesState verifies that a
+// terminal task failure (ERROR) is definitive absence: the unconfirmed
+// create is removed from state.
+func TestServerSnapshotResource_Read_TaskFailedRemovesState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/tasks/task-err":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-err","state":"ERROR","startedAt":"2026-01-02T03:00:00Z","failedAt":"2026-01-02T03:05:00Z","errorMessage":"disk full"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, nil),
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, "task-err"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("state must be removed when the create task failed terminally")
+	}
+}
+
+// TestServerSnapshotResource_Read_FinishedTaskWindowAdopt verifies that a
+// FINISHED task adopts the same-name snapshot created at/after the task's
+// start time, NOT the pre-existing same-name snapshot from before it.
+func TestServerSnapshotResource_Read_FinishedTaskWindowAdopt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/tasks/task-1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED","startedAt":"2026-01-02T03:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "," +
+				snapshotListEntry(t, "snap-uuid-new", "pre-upgrade", "", "2026-01-02T04:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, nil),
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, "task-1"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state must be kept and the new snapshot adopted")
+	}
+	var got serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if got.UUID.ValueString() != "snap-uuid-new" {
+		t.Errorf("uuid = %q, want snap-uuid-new (created after the task started)", got.UUID.ValueString())
+	}
+	if got.TaskID.ValueString() != "task-1" {
+		t.Errorf("task_id = %q, want task-1 (retained after confirmation)", got.TaskID.ValueString())
+	}
+}
+
+// TestServerSnapshotResource_Read_FinishedTaskNoWindowMatchKeeps verifies
+// that a FINISHED task whose start-time window matches no same-name snapshot
+// keeps the state (with a warning) instead of adopting a pre-existing one.
+func TestServerSnapshotResource_Read_FinishedTaskNoWindowMatchKeeps(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/tasks/task-1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED","startedAt":"2026-01-02T03:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, nil),
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, "task-1"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state must be kept when the finished task produced no adoptable snapshot")
+	}
+	if len(resp.Diagnostics.Warnings()) == 0 {
+		t.Error("expected a warning when the snapshot is not listed")
+	}
+	var got serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if !got.UUID.IsNull() || got.UUID.ValueString() == "snap-uuid-old" {
+		t.Errorf("uuid = %v, want null (the pre-existing snapshot must not be adopted)", got.UUID)
+	}
+}
+
+// TestServerSnapshotResource_Read_NoTaskNotListedKeepsState verifies the
+// wait=false case: no task_id and the snapshot not yet listed keeps the state
+// with a warning (the snapshot may still appear).
+func TestServerSnapshotResource_Read_NoTaskNotListedKeepsState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, nil),
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, nil),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state must be kept when an unconfirmed create has no task and is not listed yet")
+	}
+	if len(resp.Diagnostics.Warnings()) == 0 {
+		t.Error("expected a warning when the snapshot is not listed")
+	}
+}
+
+// TestServerSnapshotResource_Read_TaskPollErrorHardErrors verifies that a
+// non-404 task-polling error hard-errors (state kept) instead of guessing
+// the task outcome.
+func TestServerSnapshotResource_Read_TaskPollErrorHardErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/tasks/task-1":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"id":        tftypes.NewValue(tftypes.String, nil),
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, "task-1"),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when task polling fails with a non-404")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Error("state must be kept when task polling fails")
 	}
 }
 
