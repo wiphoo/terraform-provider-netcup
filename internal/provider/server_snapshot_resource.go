@@ -95,6 +95,7 @@ type serverSnapshotResourceModel struct {
 	ExportedSizeInKiB types.Int64  `tfsdk:"exported_size_in_kib"`
 	Disks             types.List   `tfsdk:"disks"`
 	TaskID            types.String `tfsdk:"task_id"`
+	CreateRequestedAt types.String `tfsdk:"create_requested_at"`
 }
 
 // NewServerSnapshotResource returns a new netcup_server_snapshot resource factory.
@@ -205,6 +206,12 @@ func (r *serverSnapshotResource) Schema(_ context.Context, _ resource.SchemaRequ
 			"task_id": schema.StringAttribute{
 				Computed:    true,
 				Description: "The UUID of the snapshot task, or null when no task UUID was returned.",
+			},
+			"create_requested_at": schema.StringAttribute{
+				Computed: true,
+				Description: "The RFC 3339 time the create request was dispatched. Used to identify the " +
+					"snapshot created by an unconfirmed create when no task UUID is available; null for " +
+					"imported resources.",
 			},
 		},
 	}
@@ -432,6 +439,11 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 		opts.OnlineSnapshot = plan.OnlineSnapshot.ValueBool()
 	}
 
+	// Record the dispatch time before the request goes out: it bounds the
+	// adoption window when the create outcome is unconfirmed and no task UUID
+	// is available (an ambiguous dispatch, or wait=false without a task).
+	plan.CreateRequestedAt = types.StringValue(time.Now().UTC().Format(time.RFC3339))
+
 	task, err := r.client.CreateSnapshot(ctx, serverID, opts)
 	if err != nil {
 		if isDefinitiveSnapshotRejection(err) {
@@ -595,9 +607,12 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 		return
 	}
 
-	// Normalize a null/unknown wait (post-import / unconfirmed create) to the
-	// schema default before any persistence decision.
-	if state.Wait.IsNull() || state.Wait.IsUnknown() {
+	// A null wait in state marks a fresh import: ImportState carries only
+	// server_id and name, while every persisted create has the schema default
+	// applied to wait. Capture it before normalizing, because it changes
+	// whether a missing name match is definitive (import) or not (create).
+	isImport := state.Wait.IsNull() || state.Wait.IsUnknown()
+	if isImport {
 		state.Wait = types.BoolValue(true)
 	}
 
@@ -627,7 +642,7 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 		// The snapshot may still be in flight, so dropping the state here
 		// would let the next apply create a duplicate. Resolve via the
 		// recorded task when there is one, otherwise fall back to the name.
-		adopted, remove, diags := r.resolveUnconfirmedCreate(ctx, &state, snapshots)
+		adopted, remove, diags := r.resolveUnconfirmedCreate(ctx, &state, snapshots, isImport)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
 			return
@@ -682,13 +697,13 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 }
 
 // resolveUnconfirmedCreate resolves a state whose UUID is unknown (an
-// unconfirmed create, or an import that found nothing) against the server's
-// current snapshot listing. It returns:
+// unconfirmed create, or a fresh import) against the server's current
+// snapshot listing. It returns:
 //
 //   - found: a snapshot to adopt (its UUID), when one can be attributed to
 //     this resource;
-//   - remove: true only when absence is DEFINITIVE (the recorded task ended in
-//     a failure terminal and nothing matching is listed);
+//   - remove: true only when absence is DEFINITIVE (the recorded task ended
+//     in a failure terminal, or an import found no name match);
 //   - diagnostics: a hard error (state kept) when the task's state cannot be
 //     read.
 //
@@ -697,17 +712,38 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 // would make Terraform own a snapshot it did not create. A finished task
 // adopts only a same-name snapshot created no earlier than the task started,
 // so a pre-existing same-name snapshot is never mistaken for the one this
-// resource created.
-func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, state *serverSnapshotResourceModel, snapshots []netcup.SnapshotMinimal) (*netcup.SnapshotMinimal, bool, diag.Diagnostics) {
+// resource created. With no task recorded, a persisted create is bounded the
+// same way by create_requested_at; an import (isImport) adopts the newest
+// same-name snapshot and treats a missing match as definitive absence.
+func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, state *serverSnapshotResourceModel, snapshots []netcup.SnapshotMinimal, isImport bool) (*netcup.SnapshotMinimal, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	name := state.Name.ValueString()
 
 	if state.TaskID.IsNull() || state.TaskID.IsUnknown() || state.TaskID.ValueString() == "" {
-		// No task to check (an ambiguous dispatch, or an import): the name is
-		// the only identity available, so adopt the newest same-name snapshot
-		// when one is listed, and keep the state otherwise (absence cannot be
-		// established without a task to inspect).
-		return latestSnapshotByName(snapshots, name), false, diags
+		// No task to check. Two shapes:
+		//   - an import (isImport): the listing is definitive, so a missing
+		//     name match means the imported snapshot does not exist;
+		//   - a persisted create: an unconfirmed dispatch recorded
+		//     create_requested_at, so only a snapshot created no earlier than
+		//     the request is adopted — the newest same-name snapshot may
+		//     otherwise be a pre-existing one the resource did not create.
+		var since *time.Time
+		if v := state.CreateRequestedAt; !v.IsNull() && !v.IsUnknown() && v.ValueString() != "" {
+			if t, err := time.Parse(time.RFC3339, v.ValueString()); err == nil {
+				since = &t
+			}
+		}
+		var found *netcup.SnapshotMinimal
+		if since != nil {
+			found = latestSameNameCreatedAfter(snapshots, name, since)
+		} else {
+			found = latestSnapshotByName(snapshots, name)
+		}
+		if found == nil && isImport {
+			// The requested snapshot is not listed: the import target is gone.
+			return nil, true, diags
+		}
+		return found, false, diags
 	}
 
 	task, err := r.client.GetTask(ctx, state.TaskID.ValueString())
@@ -763,6 +799,7 @@ func (r *serverSnapshotResource) Update(ctx context.Context, req resource.Update
 	plan.ExportedSizeInKiB = prior.ExportedSizeInKiB
 	plan.Disks = prior.Disks
 	plan.TaskID = prior.TaskID
+	plan.CreateRequestedAt = prior.CreateRequestedAt
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -796,6 +833,54 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 				"If the snapshot is known to be gone, remove the resource from state with `terraform state rm`.",
 		)
 		return
+	}
+
+	// An unconfirmed create (UUID unknown, task recorded) must not be deleted
+	// by name while its task is still running: the in-flight snapshot is not
+	// listed yet, so a 404 would be treated as success and the snapshot that
+	// later appears would be left unmanaged — and a pre-existing same-name
+	// snapshot could be the one deleted instead. Resolve the task first.
+	if (state.UUID.IsNull() || state.UUID.IsUnknown() || state.UUID.ValueString() == "") &&
+		!state.TaskID.IsNull() && !state.TaskID.IsUnknown() && state.TaskID.ValueString() != "" {
+		task, err := r.client.GetTask(ctx, state.TaskID.ValueString())
+		if err == nil {
+			switch {
+			case task.State == netcup.TaskStateError || task.State == netcup.TaskStateCanceled || task.State == netcup.TaskStateRollback:
+				// The create failed terminally, so this resource owns no
+				// snapshot; deleting by name could only hit an unrelated
+				// same-name snapshot.
+				return
+			case !task.State.IsTerminal():
+				waitCtx, cancel := context.WithTimeout(ctx, snapshotTaskTimeout)
+				defer cancel()
+				if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
+					var taskErr *netcup.TaskError
+					if errors.As(err, &taskErr) {
+						// The task failed while we waited: nothing of ours to
+						// delete, so stop before the name-based delete.
+						return
+					}
+					// Still not terminal after the bound: deleting by name now
+					// is unsafe, and the delete is idempotent, so error and let
+					// the next destroy retry once the task settles.
+					d, _ := apiErrorToDiag(err, true)
+					resp.Diagnostics.Append(d)
+					return
+				}
+				// FINISHED: the snapshot is (or should be) listed; the
+				// name-based delete below reaches it.
+			}
+		} else {
+			var apiErr *netcup.APIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				// The task cannot be read: its outcome is unknown, so fall
+				// through to the name-based delete (the pre-existing behavior).
+			} else {
+				d, _ := apiErrorToDiag(err, true)
+				resp.Diagnostics.Append(d)
+				return
+			}
+		}
 	}
 
 	task, err := r.client.DeleteSnapshot(ctx, serverID, name)
