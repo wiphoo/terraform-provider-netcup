@@ -338,20 +338,14 @@ func applySnapshot(ctx context.Context, m *serverSnapshotResourceModel, s netcup
 	return diags
 }
 
-// latestSnapshotByName returns the most recently created snapshot with the
-// given name, or nil. A server can hold several snapshots with the same name
+// latestSnapshotByNameExcluding returns the most recently created snapshot
+// with the given name whose UUID is not in exclude (a nil exclude excludes
+// nothing), or nil. A server can hold several snapshots with the same name
 // over time (e.g. across destroy/create cycles), and name is the identity
-// DeleteSnapshot addresses, so the newest creation is the one this resource
-// owns.
-func latestSnapshotByName(snapshots []netcup.SnapshotMinimal, name string) *netcup.SnapshotMinimal {
-	return latestSnapshotByNameExcluding(snapshots, name, nil)
-}
-
-// latestSnapshotByNameExcluding is latestSnapshotByName with an exclusion set:
-// snapshots whose UUID is in exclude are ignored. Create uses it with the UUIDs
-// that existed BEFORE the create request, so adoption can never mistake a
-// pre-existing same-name snapshot for the one this request creates while the
-// new one is not listed yet.
+// DeleteSnapshot addresses, so the newest creation is the one a resource
+// owns. Create uses it with the UUIDs that existed BEFORE the create request,
+// so adoption can never mistake a pre-existing same-name snapshot for the one
+// the request creates while the new one is not listed yet.
 func latestSnapshotByNameExcluding(snapshots []netcup.SnapshotMinimal, name string, exclude map[string]bool) *netcup.SnapshotMinimal {
 	var best *netcup.SnapshotMinimal
 	for i := range snapshots {
@@ -387,6 +381,22 @@ func latestSameNameCreatedAfter(snapshots []netcup.SnapshotMinimal, name string,
 		}
 	}
 	return best
+}
+
+// createRequestedSince returns the recorded dispatch time (create_requested_at)
+// used to bound adoption for an unconfirmed create, or nil when it is absent or
+// unparseable — imported state carries no dispatch time, in which case
+// latestSameNameCreatedAfter falls back to name-only matching.
+func createRequestedSince(state *serverSnapshotResourceModel) *time.Time {
+	v := state.CreateRequestedAt
+	if v.IsNull() || v.IsUnknown() || v.ValueString() == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, v.ValueString())
+	if err != nil {
+		return nil
+	}
+	return &t
 }
 
 func (r *serverSnapshotResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -439,10 +449,12 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 		opts.OnlineSnapshot = plan.OnlineSnapshot.ValueBool()
 	}
 
-	// Record the dispatch time before the request goes out: it bounds the
+	// Record the dispatch time before the request goes out, with sub-second
+	// precision (RFC3339Nano) so a pre-existing same-name snapshot created
+	// earlier in the same second is excluded from the window: it bounds the
 	// adoption window when the create outcome is unconfirmed and no task UUID
 	// is available (an ambiguous dispatch, or wait=false without a task).
-	plan.CreateRequestedAt = types.StringValue(time.Now().UTC().Format(time.RFC3339))
+	plan.CreateRequestedAt = types.StringValue(time.Now().UTC().Format(time.RFC3339Nano))
 
 	task, err := r.client.CreateSnapshot(ctx, serverID, opts)
 	if err != nil {
@@ -712,9 +724,12 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 // would make Terraform own a snapshot it did not create. A finished task
 // adopts only a same-name snapshot created no earlier than the task started,
 // so a pre-existing same-name snapshot is never mistaken for the one this
-// resource created. With no task recorded, a persisted create is bounded the
-// same way by create_requested_at; an import (isImport) adopts the newest
-// same-name snapshot and treats a missing match as definitive absence.
+// resource created. When the task itself cannot be read (404), the outcome is
+// unknown and adoption is bounded by create_requested_at instead (name-only
+// when no dispatch time is recorded). With no task recorded, a persisted
+// create is bounded the same way by create_requested_at; an import (isImport)
+// adopts the newest same-name snapshot and treats a missing match as
+// definitive absence.
 func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, state *serverSnapshotResourceModel, snapshots []netcup.SnapshotMinimal, isImport bool) (*netcup.SnapshotMinimal, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	name := state.Name.ValueString()
@@ -727,18 +742,9 @@ func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, s
 		//     create_requested_at, so only a snapshot created no earlier than
 		//     the request is adopted — the newest same-name snapshot may
 		//     otherwise be a pre-existing one the resource did not create.
-		var since *time.Time
-		if v := state.CreateRequestedAt; !v.IsNull() && !v.IsUnknown() && v.ValueString() != "" {
-			if t, err := time.Parse(time.RFC3339, v.ValueString()); err == nil {
-				since = &t
-			}
-		}
-		var found *netcup.SnapshotMinimal
-		if since != nil {
-			found = latestSameNameCreatedAfter(snapshots, name, since)
-		} else {
-			found = latestSnapshotByName(snapshots, name)
-		}
+		// With no recorded dispatch time (imported / legacy state) the nil
+		// bound falls back to name-only matching.
+		found := latestSameNameCreatedAfter(snapshots, name, createRequestedSince(state))
 		if found == nil && isImport {
 			// The requested snapshot is not listed: the import target is gone.
 			return nil, true, diags
@@ -750,9 +756,11 @@ func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, s
 	if err != nil {
 		var apiErr *netcup.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			// The task cannot be read: its outcome is unknown, so fall back to
-			// the name rather than dropping the state on a missing task.
-			return latestSnapshotByName(snapshots, name), false, diags
+			// The task cannot be read: its outcome is unknown, so nothing is
+			// adopted outside the create window — a same-name snapshot created
+			// before create_requested_at is necessarily pre-existing. Without a
+			// recorded dispatch time the match falls back to name-only.
+			return latestSameNameCreatedAfter(snapshots, name, createRequestedSince(state)), false, diags
 		}
 		d, _ := apiErrorToDiag(err, true)
 		diags.Append(d)
@@ -873,13 +881,28 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 		} else {
 			var apiErr *netcup.APIError
 			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				// The task cannot be read: its outcome is unknown, so fall
-				// through to the name-based delete (the pre-existing behavior).
-			} else {
-				d, _ := apiErrorToDiag(err, true)
-				resp.Diagnostics.Append(d)
+				// The task cannot be read: the create's outcome is unknown, so a
+				// name-based delete could remove an unrelated same-name snapshot
+				// or 404 into "already gone" while the in-flight snapshot is not
+				// listed yet. Keep the resource in state: a refresh adopts the
+				// snapshot within the create window once it is listed, after
+				// which the delete proceeds with a confirmed UUID.
+				resp.Diagnostics.AddError(
+					"Snapshot create task not found",
+					fmt.Sprintf(
+						"The create task %s could not be read (404), so the create's outcome is unknown. "+
+							"Deleting by name %q could remove an unrelated same-name snapshot or forget a "+
+							"snapshot that is still in flight. Check the snapshot in the SCP control panel, "+
+							"then re-run destroy once the snapshot is listed, or remove this resource from "+
+							"state with `terraform state rm` if it does not exist.",
+						state.TaskID.ValueString(), name,
+					),
+				)
 				return
 			}
+			d, _ := apiErrorToDiag(err, true)
+			resp.Diagnostics.Append(d)
+			return
 		}
 	}
 
