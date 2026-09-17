@@ -347,16 +347,26 @@ func applySnapshot(ctx context.Context, m *serverSnapshotResourceModel, s netcup
 	return diags
 }
 
-// latestSnapshotByNameExcluding returns the most recently created snapshot
-// with the given name whose UUID is not in exclude (a nil exclude excludes
-// nothing), or nil. A server can hold several snapshots with the same name
-// over time (e.g. across destroy/create cycles), and name is the identity
-// DeleteSnapshot addresses, so the newest creation is the one a resource
-// owns. Create uses it with the UUIDs that existed BEFORE the create request,
-// so adoption can never mistake a pre-existing same-name snapshot for the one
-// the request creates while the new one is not listed yet.
-func latestSnapshotByNameExcluding(snapshots []netcup.SnapshotMinimal, name string, exclude map[string]bool) *netcup.SnapshotMinimal {
-	var best *netcup.SnapshotMinimal
+// sameNameCreateCandidates returns every same-name snapshot this create could
+// own, applying every server-side ownership proof available:
+//
+//   - exclude (the snapshots listed before the create was dispatched) removes
+//     pre-existing same-name snapshots by identity;
+//   - startedAt (the create task's server-side start time) removes snapshots
+//     created before the task started, covering the gap between the pre-create
+//     listing and the dispatch — a snapshot a concurrent actor creates in
+//     that gap is absent from exclude yet still not the one this create
+//     produces.
+//
+// Both bounds come from the server, so no host clock is involved. The result
+// is nil when neither proof applies (imports, state persisted before
+// pre_create_uuids existed), in which case the caller falls back to
+// unbounded matching.
+func sameNameCreateCandidates(snapshots []netcup.SnapshotMinimal, name string, exclude map[string]bool, startedAt *time.Time) []netcup.SnapshotMinimal {
+	if exclude == nil && startedAt == nil {
+		return nil
+	}
+	out := []netcup.SnapshotMinimal{}
 	for i := range snapshots {
 		if snapshots[i].Name != name {
 			continue
@@ -364,11 +374,12 @@ func latestSnapshotByNameExcluding(snapshots []netcup.SnapshotMinimal, name stri
 		if exclude != nil && exclude[snapshots[i].UUID] {
 			continue
 		}
-		if best == nil || snapshots[i].CreationTime.After(best.CreationTime) {
-			best = &snapshots[i]
+		if startedAt != nil && snapshots[i].CreationTime.Before(*startedAt) {
+			continue
 		}
+		out = append(out, snapshots[i])
 	}
-	return best
+	return out
 }
 
 // latestSameNameCreatedAfter returns the most recently created snapshot with
@@ -431,18 +442,24 @@ func preCreateUUIDSet(state *serverSnapshotResourceModel) map[string]bool {
 // adoptUnconfirmed picks the snapshot an unconfirmed create should adopt from
 // the server's listing, preferring identity over clocks:
 //
-//  1. a persisted pre-create UUID set — a same-name snapshot that is not in
-//     the set is necessarily new, regardless of what any clock says;
-//  2. the task's server-clock start time, when the task reported one (a
-//     FINISHED task with no startedAt must NOT silently widen to name-only);
+//  1. the persisted pre-create UUID set, combined with the create task's
+//     server-side start time when reported — a same-name snapshot is adoptable
+//     only if it was NOT listed before the dispatch AND was created no earlier
+//     than the task started;
+//  2. the task's server-clock start time alone, when no set is persisted;
 //  3. the host-clock dispatch time (create_requested_at) as a best-effort
 //     bound, and name-only when even that is absent (imports).
+//
+// When a server-side proof applies, a snapshot is adopted only if it is the
+// SOLE candidate: two or more new same-name snapshots cannot be attributed
+// (this create's vs a concurrent one's), so nothing is adopted and the state
+// is kept for the next refresh.
 func adoptUnconfirmed(snapshots []netcup.SnapshotMinimal, name string, state *serverSnapshotResourceModel, taskStartedAt *time.Time) *netcup.SnapshotMinimal {
-	if excl := preCreateUUIDSet(state); excl != nil {
-		return latestSnapshotByNameExcluding(snapshots, name, excl)
-	}
-	if taskStartedAt != nil {
-		return latestSameNameCreatedAfter(snapshots, name, taskStartedAt)
+	if cands := sameNameCreateCandidates(snapshots, name, preCreateUUIDSet(state), taskStartedAt); cands != nil {
+		if len(cands) == 1 {
+			return &cands[0]
+		}
+		return nil
 	}
 	return latestSameNameCreatedAfter(snapshots, name, createRequestedSince(state))
 }
@@ -570,7 +587,8 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 	// task non-terminal.
 	waitCtx, cancel := context.WithTimeout(ctx, snapshotTaskTimeout)
 	defer cancel()
-	if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
+	finished, err := r.client.WaitForTask(waitCtx, task.UUID)
+	if err != nil {
 		var taskErr *netcup.TaskError
 		if errors.As(err, &taskErr) {
 			// Confirmed terminal failure (ERROR/CANCELED/ROLLBACK): the snapshot
@@ -603,9 +621,14 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 
 	// The task FINISHED: the snapshot should now be listed. Find it by name
 	// (the API's own identity — deletion is addressed by name) and adopt its
-	// UUID. Pre-existing same-name snapshots (recorded above, before the
-	// create) are excluded so a listing lag on the NEW snapshot cannot cause
-	// this resource to adopt a snapshot it did not create.
+	// UUID. A candidate must pass both server-side ownership proofs: it must
+	// not have been listed before the create (preExistingUUIDs, recorded
+	// above) and, when the task reported a start time, it must have been
+	// created no earlier than the task started — a snapshot a concurrent
+	// actor creates between the pre-create listing and the task start is not
+	// the one this create produces. Adopt only the SOLE candidate: with
+	// several new same-name snapshots the created one cannot be attributed,
+	// so the resource stays unconfirmed like the not-listed case.
 	snapshots, err := r.client.ListSnapshots(ctx, serverID)
 	if err != nil {
 		// The snapshot finished but the listing failed: the UUID cannot be
@@ -623,22 +646,40 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 		)
 		return
 	}
-	found := latestSnapshotByNameExcluding(snapshots, plan.Name.ValueString(), preExistingUUIDs)
+	cands := sameNameCreateCandidates(snapshots, plan.Name.ValueString(), preExistingUUIDs, finished.StartedAt)
+	var found *netcup.SnapshotMinimal
+	if len(cands) == 1 {
+		found = &cands[0]
+	}
 	if found == nil {
-		// Task finished but no NEW snapshot with this name is listed yet (any
-		// pre-existing same-name snapshot was excluded): persist + warn; the
-		// next refresh reconciles via the task's start-time window.
+		// No adoptable candidate: either the new snapshot is not listed yet
+		// (listing lag) or several new same-name snapshots are listed and the
+		// created one cannot be distinguished from a concurrent create.
 		resetSnapshotComputed(&plan, plan.TaskID)
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-		resp.Diagnostics.AddWarning(
-			"Netcup snapshot not found after creation",
-			fmt.Sprintf(
-				"The snapshot task finished, but no new snapshot named %q was listed on server %d "+
-					"(a pre-existing snapshot with that name is never adopted). The resource was recorded "+
-					"in state; the next refresh will adopt the snapshot once it can be identified.",
-				plan.Name.ValueString(), serverID,
-			),
-		)
+		if len(cands) > 1 {
+			resp.Diagnostics.AddWarning(
+				"Netcup snapshot ambiguous after creation",
+				fmt.Sprintf(
+					"The snapshot task finished, but %d new snapshots named %q are listed on server %d. The one "+
+						"created by this task cannot be distinguished from snapshots created concurrently, so "+
+						"none was adopted. Remove the extra same-name snapshot(s) once they are identified; the "+
+						"next refresh will adopt the created snapshot once it is the sole candidate.",
+					len(cands), plan.Name.ValueString(), serverID,
+				),
+			)
+		} else {
+			resp.Diagnostics.AddWarning(
+				"Netcup snapshot not found after creation",
+				fmt.Sprintf(
+					"The snapshot task finished, but no new snapshot named %q was listed on server %d "+
+						"(a pre-existing or concurrently created snapshot with that name is never adopted). "+
+						"The resource was recorded in state; the next refresh will adopt the snapshot once "+
+						"it can be identified.",
+					plan.Name.ValueString(), serverID,
+				),
+			)
+		}
 		return
 	}
 
@@ -785,12 +826,14 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 // While the recorded task is still running, nothing in the listing is adopted:
 // a same-name snapshot there is then necessarily pre-existing, and adopting it
 // would make Terraform own a snapshot it did not create. Otherwise adoption
-// goes through adoptUnconfirmed, which prefers identity (the persisted
-// pre_create_uuids set) over any clock comparison, then the task's server-clock
-// start time (a FINISHED task with no startedAt never silently widens to
-// name-only), and only then the host-clock create_requested_at bound
-// (name-only when no dispatch time is recorded, i.e. imports). An import
-// (isImport) additionally treats a missing match as definitive absence.
+// goes through adoptUnconfirmed, which requires a same-name snapshot to pass
+// every server-side ownership proof available — the persisted pre_create_uuids
+// set (not listed before the dispatch) and the task's server-side start time
+// (created no earlier than the task started) — and adopts only the sole
+// survivor; with no server-side proof it falls back to the host-clock
+// create_requested_at bound (name-only when no dispatch time is recorded,
+// i.e. imports). An import (isImport) additionally treats a missing match as
+// definitive absence.
 func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, state *serverSnapshotResourceModel, snapshots []netcup.SnapshotMinimal, isImport bool) (*netcup.SnapshotMinimal, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	name := state.Name.ValueString()
@@ -832,8 +875,8 @@ func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, s
 		return nil, false, diags
 	case task.State == netcup.TaskStateFinished:
 		// A FINISHED task with no startedAt must not silently widen to
-		// name-only: adoptUnconfirmed then falls back to the pre-create set,
-		// and only then to the create_requested_at bound.
+		// name-only: adoption then rests on the pre-create set alone, and
+		// only a sole candidate is adopted.
 		return adoptUnconfirmed(snapshots, name, state, task.StartedAt), false, diags
 	default:
 		// ERROR/CANCELED/ROLLBACK: the snapshot was never completed and
@@ -911,10 +954,14 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 	// listed yet, so a 404 would be treated as success and the snapshot that
 	// later appears would be left unmanaged — and a pre-existing same-name
 	// snapshot could be the one deleted instead. Resolve the task first.
+	var createTaskStartedAt *time.Time
 	if (state.UUID.IsNull() || state.UUID.IsUnknown() || state.UUID.ValueString() == "") &&
 		!state.TaskID.IsNull() && !state.TaskID.IsUnknown() && state.TaskID.ValueString() != "" {
 		task, err := r.client.GetTask(ctx, state.TaskID.ValueString())
 		if err == nil {
+			if task.State == netcup.TaskStateFinished {
+				createTaskStartedAt = task.StartedAt
+			}
 			switch {
 			case task.State == netcup.TaskStateError || task.State == netcup.TaskStateCanceled || task.State == netcup.TaskStateRollback:
 				// The create failed terminally, so this resource owns no
@@ -924,7 +971,8 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 			case !task.State.IsTerminal():
 				waitCtx, cancel := context.WithTimeout(ctx, snapshotTaskTimeout)
 				defer cancel()
-				if _, err := r.client.WaitForTask(waitCtx, task.UUID); err != nil {
+				finished, err := r.client.WaitForTask(waitCtx, task.UUID)
+				if err != nil {
 					var taskErr *netcup.TaskError
 					if errors.As(err, &taskErr) {
 						// The task failed while we waited: nothing of ours to
@@ -938,6 +986,7 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 					resp.Diagnostics.Append(d)
 					return
 				}
+				createTaskStartedAt = finished.StartedAt
 				// FINISHED: the snapshot should now be listed. The preflight
 				// below re-lists and verifies the name is unambiguous — and,
 				// for this unconfirmed create, that it points at a snapshot
@@ -1021,28 +1070,41 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 		return
 	case len(matches) == 1:
 		if unconfirmed {
+			excl := preCreateUUIDSet(&state)
 			preExisting := false
-			if excl := preCreateUUIDSet(&state); excl != nil {
+			if excl != nil {
 				// Identity: the only same-name snapshot was already listed
 				// before this create was dispatched, so it is not the one
 				// this resource created — regardless of what the clocks say.
 				preExisting = excl[matches[0].UUID]
-			} else {
-				// No persisted pre-create set: fall back to the (host-clock)
-				// dispatch bound — best effort, see adoptUnconfirmed.
+			}
+			if !preExisting && createTaskStartedAt != nil && matches[0].CreationTime.Before(*createTaskStartedAt) {
+				// The only same-name snapshot is not in the pre-create set,
+				// but it predates the create task's (server-side) start: it
+				// was created by someone else in the gap between the
+				// pre-create listing and the dispatch, so it is not the
+				// snapshot this resource created.
+				preExisting = true
+			}
+			if excl == nil && !preExisting {
+				// No persisted pre-create set and no task start time: fall
+				// back to the (host-clock) dispatch bound — best effort, see
+				// adoptUnconfirmed.
 				preExisting = latestSameNameCreatedAfter(snapshots, name, createRequestedSince(&state)) == nil
 			}
 			if preExisting {
-				// The only same-name snapshot is a pre-existing one and the
-				// snapshot this resource created is not listed yet.
+				// The only same-name snapshot is not the one this resource
+				// created (it was listed before the dispatch or created
+				// before the create task started), and the created snapshot
+				// is not listed yet.
 				resp.Diagnostics.AddError(
 					"Snapshot not listed",
 					fmt.Sprintf(
-						"The only snapshot named %q on server %d is a pre-existing one that predates this "+
-							"resource's create, so it is not the snapshot this resource created. Deleting by "+
-							"name would remove an unrelated snapshot. Re-run destroy once the created snapshot "+
-							"is listed, or remove this resource from state with `terraform state rm` if it does "+
-							"not exist.",
+						"The only snapshot named %q on server %d is not the snapshot this resource created: "+
+							"it was listed before the create was dispatched or created before the create task "+
+							"started. Deleting by name would remove an unrelated snapshot. Re-run destroy once "+
+							"the created snapshot is listed, or remove this resource from state with "+
+							"`terraform state rm` if it does not exist.",
 						name, serverID,
 					),
 				)
