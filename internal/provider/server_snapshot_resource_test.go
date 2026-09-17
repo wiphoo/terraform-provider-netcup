@@ -1752,6 +1752,10 @@ func TestServerSnapshotResource_Delete_Success(t *testing.T) {
 			deleted = true
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-1", "pre-upgrade", "", "2026-01-02T03:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
 		case r.URL.Path == "/v1/tasks/task-del":
 			polled = true
 			w.WriteHeader(http.StatusOK)
@@ -1789,13 +1793,20 @@ func TestServerSnapshotResource_Delete_Success(t *testing.T) {
 }
 
 func TestServerSnapshotResource_Delete_Gone(t *testing.T) {
+	deleted := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade" {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
+			deleted = true
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"code":"NOT_FOUND","message":"no such snapshot"}`))
-			return
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			// The confirmed snapshot is no longer listed: already gone.
+			_, _ = w.Write([]byte("[]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
@@ -1807,26 +1818,37 @@ func TestServerSnapshotResource_Delete_Gone(t *testing.T) {
 		"server_id": tftypes.NewValue(tftypes.String, "123"),
 		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
 		"wait":      tftypes.NewValue(tftypes.Bool, true),
+		"uuid":      tftypes.NewValue(tftypes.String, "snap-uuid-1"),
 	})
 
 	var resp resource.DeleteResponse
 	resp.State = state
 	r.(resource.Resource).Delete(ctx, resource.DeleteRequest{State: state}, &resp)
 
-	// Already gone: the desired end state is reached, so no error.
+	// Already gone: the desired end state is reached, so no error — and the
+	// name-based delete must not be issued for a snapshot that is not listed.
 	if resp.Diagnostics.HasError() {
-		t.Fatalf("Delete() must not error on 404 (already gone); got: %v", resp.Diagnostics.Errors())
+		t.Fatalf("Delete() must not error when the confirmed snapshot is no longer listed; got: %v", resp.Diagnostics.Errors())
+	}
+	if deleted {
+		t.Error("the name-based delete must not run when the snapshot is already gone")
 	}
 }
 
 func TestServerSnapshotResource_Delete_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade" {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"message":"boom"}`))
-			return
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-1", "pre-upgrade", "", "2026-01-02T03:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
@@ -1838,6 +1860,7 @@ func TestServerSnapshotResource_Delete_APIError(t *testing.T) {
 		"server_id": tftypes.NewValue(tftypes.String, "123"),
 		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
 		"wait":      tftypes.NewValue(tftypes.Bool, true),
+		"uuid":      tftypes.NewValue(tftypes.String, "snap-uuid-1"),
 	})
 
 	var resp resource.DeleteResponse
@@ -1857,6 +1880,10 @@ func TestServerSnapshotResource_Delete_NoWait(t *testing.T) {
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-1", "pre-upgrade", "", "2026-01-02T03:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
 		case r.URL.Path == "/v1/tasks/task-del":
 			polled = true
 			w.WriteHeader(http.StatusOK)
@@ -1875,6 +1902,7 @@ func TestServerSnapshotResource_Delete_NoWait(t *testing.T) {
 		"server_id": tftypes.NewValue(tftypes.String, "123"),
 		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
 		"wait":      tftypes.NewValue(tftypes.Bool, false),
+		"uuid":      tftypes.NewValue(tftypes.String, "snap-uuid-1"),
 	})
 
 	var resp resource.DeleteResponse
@@ -1913,6 +1941,11 @@ func TestServerSnapshotResource_Delete_InFlightCreateTaskResolvesThenDeletes(t *
 			}
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintf(w, `{"uuid":"task-1","state":"%s","startedAt":"2026-01-02T03:00:00Z"}`, state)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			// Post-finish listing: the created snapshot is now visible.
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-new", "pre-upgrade", "", "2026-01-02T03:01:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
 		case r.URL.Path == "/v1/tasks/task-del":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"FINISHED"}`))
@@ -2038,6 +2071,191 @@ func TestServerSnapshotResource_Delete_TaskGoneErrors(t *testing.T) {
 	}
 	if deleted {
 		t.Error("the name-based delete must not run when the create task's outcome is unknown")
+	}
+}
+
+// TestServerSnapshotResource_Delete_AmbiguousNameRefuses verifies that when
+// several snapshots share the resource's name, the name-only delete endpoint
+// is not invoked: it could remove a different same-name snapshot.
+func TestServerSnapshotResource_Delete_AmbiguousNameRefuses(t *testing.T) {
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
+			deleted = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-1", "pre-upgrade", "", "2026-01-02T03:00:00Z", "SHUTOFF", "system", false, false, nil) + "," +
+				snapshotListEntry(t, "snap-uuid-2", "pre-upgrade", "", "2026-01-03T03:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+		"uuid":      tftypes.NewValue(tftypes.String, "snap-uuid-1"),
+	})
+
+	var resp resource.DeleteResponse
+	resp.State = state
+	r.(resource.Resource).Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when several snapshots share the name")
+	}
+	if deleted {
+		t.Error("the name-based delete must not run when the name is ambiguous")
+	}
+}
+
+// TestServerSnapshotResource_Delete_UUIDMismatchRefuses verifies that a
+// confirmed resource whose recorded UUID does not match the only listed
+// same-name snapshot is not deleted by name: that would remove a different
+// snapshot.
+func TestServerSnapshotResource_Delete_UUIDMismatchRefuses(t *testing.T) {
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
+			deleted = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-other", "pre-upgrade", "", "2026-01-02T03:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":      tftypes.NewValue(tftypes.Bool, true),
+		"uuid":      tftypes.NewValue(tftypes.String, "snap-uuid-1"),
+	})
+
+	var resp resource.DeleteResponse
+	resp.State = state
+	r.(resource.Resource).Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when the listed snapshot is not the one the resource owns")
+	}
+	if deleted {
+		t.Error("the name-based delete must not run when the listed snapshot has a different UUID")
+	}
+}
+
+// TestServerSnapshotResource_Delete_UnconfirmedNotListedErrors verifies that an
+// unconfirmed create (null uuid, no task) whose snapshot is not listed is not
+// treated as "already gone": the snapshot may still be in flight or in the
+// post-finish visibility lag.
+func TestServerSnapshotResource_Delete_UnconfirmedNotListedErrors(t *testing.T) {
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
+			deleted = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":           tftypes.NewValue(tftypes.String, "123"),
+		"name":                tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":                tftypes.NewValue(tftypes.Bool, false),
+		"uuid":                tftypes.NewValue(tftypes.String, nil),
+		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-01-02T02:59:00Z"),
+	})
+
+	var resp resource.DeleteResponse
+	resp.State = state
+	r.(resource.Resource).Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when an unconfirmed create's snapshot is not listed")
+	}
+	if deleted {
+		t.Error("the name-based delete must not run when the unconfirmed snapshot is not listed")
+	}
+}
+
+// TestServerSnapshotResource_Delete_UnconfirmedPreExistingOnlyErrors verifies
+// that an unconfirmed create whose listing shows only a same-name snapshot from
+// BEFORE the dispatch is not deleted: that snapshot is an unrelated pre-existing
+// one, and the created snapshot is not listed yet.
+func TestServerSnapshotResource_Delete_UnconfirmedPreExistingOnlyErrors(t *testing.T) {
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
+			deleted = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			// The only same-name snapshot was created before the dispatch.
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2026-01-02T02:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":           tftypes.NewValue(tftypes.String, "123"),
+		"name":                tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":                tftypes.NewValue(tftypes.Bool, false),
+		"uuid":                tftypes.NewValue(tftypes.String, nil),
+		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-01-02T02:59:00Z"),
+	})
+
+	var resp resource.DeleteResponse
+	resp.State = state
+	r.(resource.Resource).Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when only a pre-existing same-name snapshot is listed")
+	}
+	if deleted {
+		t.Error("the name-based delete must not run when the listed snapshot predates the dispatch")
 	}
 }
 

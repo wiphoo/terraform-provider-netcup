@@ -875,8 +875,10 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 					resp.Diagnostics.Append(d)
 					return
 				}
-				// FINISHED: the snapshot is (or should be) listed; the
-				// name-based delete below reaches it.
+				// FINISHED: the snapshot should now be listed. The preflight
+				// below re-lists and verifies the name is unambiguous — and,
+				// for this unconfirmed create, that it points at a snapshot
+				// from the create window — before the delete is issued.
 			}
 		} else {
 			var apiErr *netcup.APIError
@@ -904,6 +906,94 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 			resp.Diagnostics.Append(d)
 			return
 		}
+	}
+
+	// The delete endpoint addresses snapshots by name only, so verify what a
+	// name-based delete would hit before issuing it: an ambiguous or
+	// unresolvable name could remove an unrelated same-name snapshot, or 404
+	// into "already gone" while the snapshot this resource created is still
+	// not listed.
+	snapshots, err := r.client.ListSnapshots(ctx, serverID)
+	if err != nil {
+		d, _ := apiErrorToDiag(err, true)
+		resp.Diagnostics.Append(d)
+		return
+	}
+	var matches []netcup.SnapshotMinimal
+	for _, s := range snapshots {
+		if s.Name == name {
+			matches = append(matches, s)
+		}
+	}
+	unconfirmed := state.UUID.IsNull() || state.UUID.IsUnknown() || state.UUID.ValueString() == ""
+	switch {
+	case len(matches) == 0:
+		if !unconfirmed {
+			// A confirmed snapshot that is no longer listed is already gone:
+			// the desired end state is reached.
+			return
+		}
+		// An unconfirmed create whose snapshot is not listed is not "already
+		// gone": it may still be in flight or in the post-finish visibility
+		// lag, and forgetting it now would orphan the snapshot once it
+		// appears (a later name-based delete could then hit an unrelated
+		// same-name snapshot).
+		resp.Diagnostics.AddError(
+			"Snapshot not listed",
+			fmt.Sprintf(
+				"No snapshot named %q is listed on server %d, but this resource's create was never confirmed by UUID. "+
+					"The snapshot may still be in flight or not listed yet, so the name-based delete is refused. "+
+					"Re-run destroy once the snapshot is listed, or remove this resource from state with "+
+					"`terraform state rm` if it does not exist.",
+				name, serverID,
+			),
+		)
+		return
+	case len(matches) == 1:
+		if unconfirmed {
+			if latestSameNameCreatedAfter(snapshots, name, createRequestedSince(&state)) == nil {
+				// The only same-name snapshot was created before this
+				// resource's dispatch: it is an unrelated pre-existing
+				// snapshot, and the one this resource created is not listed
+				// yet.
+				resp.Diagnostics.AddError(
+					"Snapshot not listed",
+					fmt.Sprintf(
+						"The only snapshot named %q on server %d was created before this resource's create was "+
+							"dispatched, so it is not the snapshot this resource created. Deleting by name would "+
+							"remove an unrelated snapshot. Re-run destroy once the created snapshot is listed, or "+
+							"remove this resource from state with `terraform state rm` if it does not exist.",
+						name, serverID,
+					),
+				)
+				return
+			}
+		} else if matches[0].UUID != state.UUID.ValueString() {
+			// The only same-name snapshot is not the one this resource owns:
+			// deleting by name would remove it.
+			resp.Diagnostics.AddError(
+				"Snapshot UUID mismatch",
+				fmt.Sprintf(
+					"The only snapshot named %q on server %d has UUID %s, but this resource records UUID %s. "+
+						"Deleting by name would remove a different snapshot. Reconcile the resource or remove it "+
+						"from state with `terraform state rm`.",
+					name, serverID, matches[0].UUID, state.UUID.ValueString(),
+				),
+			)
+			return
+		}
+	default:
+		resp.Diagnostics.AddError(
+			"Ambiguous snapshot name",
+			fmt.Sprintf(
+				"%d snapshots on server %d share the name %q, but the delete endpoint addresses snapshots by name "+
+					"only, so refusing to guess which one to delete. Remove the extra snapshots (e.g. in the SCP "+
+					"control panel) and re-run destroy, or remove this resource from state with `terraform state rm` "+
+					"if none of them is yours.",
+				len(matches), serverID, name,
+			),
+		)
+		return
 	}
 
 	task, err := r.client.DeleteSnapshot(ctx, serverID, name)
