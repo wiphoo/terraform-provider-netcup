@@ -1122,23 +1122,23 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 		if unconfirmed {
 			excl := preCreateUUIDSet(&state)
 			preExisting := false
-			if excl != nil {
+			switch {
+			case createTaskStartedAt != nil:
+				// The create task reported a server-side start time, so the
+				// server's own clock decides: the match is ours only if it
+				// passes every server-side proof (not listed before the
+				// dispatch, created no earlier than the task started). A
+				// host clock ahead of the API must not veto a snapshot the
+				// server proofs qualify — matching adoptUnconfirmed.
+				preExisting = len(sameNameCreateCandidates(snapshots, name, excl, createTaskStartedAt)) != 1
+			case excl != nil && excl[matches[0].UUID]:
 				// Identity: the only same-name snapshot was already listed
 				// before this create was dispatched, so it is not the one
 				// this resource created — regardless of what the clocks say.
-				preExisting = excl[matches[0].UUID]
-			}
-			if !preExisting && createTaskStartedAt != nil && matches[0].CreationTime.Before(*createTaskStartedAt) {
-				// The only same-name snapshot is not in the pre-create set,
-				// but it predates the create task's (server-side) start: it
-				// was created by someone else in the gap between the
-				// pre-create listing and the dispatch, so it is not the
-				// snapshot this resource created.
 				preExisting = true
-			}
-			if !preExisting {
-				// No server-side proof identified the match: fall back to the
-				// (host-clock) dispatch bound — best effort, see adoptUnconfirmed.
+			default:
+				// No server-clock task proof: fall back to the (host-clock)
+				// dispatch bound — best effort, see adoptUnconfirmed.
 				preExisting = latestSameNameCreatedAfter(snapshots, name, createRequestedSince(&state)) == nil
 			}
 			if preExisting {

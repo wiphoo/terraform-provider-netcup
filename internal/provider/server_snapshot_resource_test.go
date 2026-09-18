@@ -3000,6 +3000,60 @@ func TestServerSnapshotResource_Delete_EmptySetGapSnapshotRefuses(t *testing.T) 
 	}
 }
 
+// TestServerSnapshotResource_Delete_HostClockSkewServerProofsProceeds verifies
+// that when the create task reported startedAt, an unconfirmed destroy trusts
+// the server-side proofs: a host clock ahead of the API (create_requested_at
+// later than the snapshot's server-side CreationTime) must not veto the sole
+// listed snapshot that passes both the identity set and the startedAt bound.
+func TestServerSnapshotResource_Delete_HostClockSkewServerProofsProceeds(t *testing.T) {
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
+			deleted = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/task-1":
+			_, _ = w.Write([]byte(`{"uuid":"task-1","name":"ServerSnapshot","state":"FINISHED","startedAt":"2026-01-02T03:00:00Z","finishedAt":"2026-01-02T03:02:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-new", "pre-upgrade", "", "2026-01-02T03:01:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":      tftypes.NewValue(tftypes.Bool, false),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, "task-1"),
+		// Host clock ahead of the API: the recorded dispatch time is later
+		// than the snapshot's server-side creation time.
+		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-01-02T03:30:00Z"),
+		"pre_create_uuids":    snapshotStringListVal(),
+	})
+
+	var resp resource.DeleteResponse
+	resp.State = state
+	r.(resource.Resource).Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !deleted {
+		t.Error("the name-based delete must run when the sole snapshot passes both server-side proofs")
+	}
+}
+
 func TestServerSnapshotResource_Update_CarriesComputed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("Update must not call the API; got %s %s", r.Method, r.URL.Path)
