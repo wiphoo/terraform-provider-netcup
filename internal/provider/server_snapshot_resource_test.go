@@ -243,6 +243,7 @@ func TestValidateSnapshotMode(t *testing.T) {
 		{"offline default without disk", types.BoolNull(), types.StringNull(), true},
 		{"offline explicit false without disk", types.BoolValue(false), types.StringNull(), true},
 		{"offline whitespace-only disk", types.BoolNull(), types.StringValue("   "), true},
+		{"online whitespace-only disk", types.BoolValue(true), types.StringValue("   "), false},
 		{"unknown online skips validation", types.BoolUnknown(), types.StringNull(), false},
 		{"unknown disk skips validation", types.BoolValue(false), types.StringUnknown(), false},
 	}
@@ -837,6 +838,66 @@ func TestServerSnapshotResource_Create_OnlineSnapshotBody(t *testing.T) {
 	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
 	if state.UUID.ValueString() != "snap-uuid-2" || !state.Online.ValueBool() {
 		t.Errorf("uuid/online = %v/%v, want snap-uuid-2/true", state.UUID.ValueString(), state.Online.ValueBool())
+	}
+}
+
+// TestServerSnapshotResource_Create_OnlineBlankDiskOmitted verifies that a
+// whitespace-only disk_name on an online snapshot is treated as unset (as
+// validateSnapshotMode does) and therefore omitted from the request: an
+// online snapshot must not serialize a blank diskName, which the API would
+// reject.
+func TestServerSnapshotResource_Create_OnlineBlankDiskOmitted(t *testing.T) {
+	var rawBody map[string]any
+	listCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &rawBody)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-2","state":"PENDING"}`))
+		case r.URL.Path == "/v1/tasks/task-2":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"uuid":"task-2","state":"FINISHED"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			listCalls++
+			w.WriteHeader(http.StatusOK)
+			if listCalls == 1 {
+				_, _ = w.Write([]byte(`[]`))
+			} else {
+				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-2", "online-blank-disk", "", "2026-01-02T03:04:05Z", "RUNNING", "", true, false, nil) + "]"))
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id":       tftypes.NewValue(tftypes.String, "123"),
+		"name":            tftypes.NewValue(tftypes.String, "online-blank-disk"),
+		"online_snapshot": tftypes.NewValue(tftypes.Bool, true),
+		"disk_name":       tftypes.NewValue(tftypes.String, "   "),
+		"wait":            tftypes.NewValue(tftypes.Bool, true),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if rawBody["onlineSnapshot"] != true {
+		t.Errorf("request body = %v, want onlineSnapshot true", rawBody)
+	}
+	if _, ok := rawBody["diskName"]; ok {
+		t.Errorf("request body = %v, want blank diskName omitted for an online snapshot", rawBody)
 	}
 }
 

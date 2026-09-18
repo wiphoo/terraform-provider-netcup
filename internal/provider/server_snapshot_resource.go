@@ -602,7 +602,7 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 		v := plan.Description.ValueString()
 		opts.Description = &v
 	}
-	if !plan.DiskName.IsNull() && !plan.DiskName.IsUnknown() {
+	if !plan.DiskName.IsNull() && !plan.DiskName.IsUnknown() && strings.TrimSpace(plan.DiskName.ValueString()) != "" {
 		v := plan.DiskName.ValueString()
 		opts.DiskName = &v
 	}
