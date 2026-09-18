@@ -822,6 +822,9 @@ func TestServerSnapshotResource_Create_OnlineSnapshotBody(t *testing.T) {
 // snapshot with the requested name: a second same-name snapshot would make
 // the created one undeletable (deletion is addressed by name).
 func TestServerSnapshotResource_Create_PreExistingSameNameRefuses(t *testing.T) {
+	snapshotConflictSettleTimeout = 100 * time.Millisecond
+	defer func() { snapshotConflictSettleTimeout = 5 * time.Minute }()
+
 	postCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -861,6 +864,69 @@ func TestServerSnapshotResource_Create_PreExistingSameNameRefuses(t *testing.T) 
 	}
 	if !resp.State.Raw.IsNull() {
 		t.Error("no state may be persisted when the create is refused before dispatch")
+	}
+}
+
+// TestServerSnapshotResource_Create_ReplaceAfterNoWaitDeleteProceeds verifies
+// that a replacement create planned while the old snapshot's asynchronous
+// deletion is still running (a wait = false destroy returns right after the
+// DELETE is accepted) polls for the name to clear and dispatches the create
+// once the old snapshot disappears, instead of refusing the dying snapshot as
+// a collision.
+func TestServerSnapshotResource_Create_ReplaceAfterNoWaitDeleteProceeds(t *testing.T) {
+	snapshotConflictSettleTimeout = 300 * time.Millisecond
+	defer func() { snapshotConflictSettleTimeout = 5 * time.Minute }()
+
+	postCalled := false
+	lists := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
+			postCalled = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			lists++
+			if lists == 1 {
+				// The old snapshot is still listed: its deletion is still
+				// running.
+				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+				return
+			}
+			_, _ = w.Write([]byte("[]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"disk_name": tftypes.NewValue(tftypes.String, "system"),
+		"wait":      tftypes.NewValue(tftypes.Bool, false),
+	})
+
+	var resp resource.CreateResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !postCalled {
+		t.Error("the create must be dispatched once the same-name snapshot disappears")
+	}
+	if lists < 2 {
+		t.Errorf("expected at least two listings (initial + settle), got %d", lists)
+	}
+	if resp.State.Raw.IsNull() {
+		t.Error("state must be persisted after the create is dispatched")
 	}
 }
 

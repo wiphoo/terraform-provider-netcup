@@ -32,6 +32,15 @@ import (
 // (deleting is idempotent, so the next apply retries safely).
 const snapshotTaskTimeout = 30 * time.Minute
 
+// snapshotConflictSettleTimeout bounds how long Create's preflight polls for
+// a same-name snapshot to disappear before treating it as a collision: a
+// replacement create is planned right after a wait = false destroy whose
+// async deletion is still running, so the old name stays listed until the
+// deletion settles (the same race exists, briefly, after a wait = true delete
+// whose completion lags the listing). A var, not a const, so tests can
+// shorten it.
+var snapshotConflictSettleTimeout = 5 * time.Minute
+
 // maxSnapshotStringFieldLength is the SCP's maximum length for snapshot
 // string fields (name, description).
 const maxSnapshotStringFieldLength = 255
@@ -507,24 +516,58 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 		preExistingUUIDs[preExisting[i].UUID] = true
 	}
 
-	// A same-name snapshot already on the server is a hard stop: the API
-	// identifies snapshots by name (deletion is addressed by name), so a
-	// second same-name snapshot would make the created one undeletable —
-	// Delete refuses while two matches exist. Fail before the POST.
-	for i := range preExisting {
-		if preExisting[i].Name == plan.Name.ValueString() {
+	// A same-name snapshot already on the server collides with this create:
+	// the API identifies snapshots by name (deletion is addressed by name), so
+	// a second same-name snapshot would make the created one undeletable —
+	// Delete refuses while two matches exist. The exception is a replacement
+	// create: with wait = false, Delete returns as soon as the async DELETE is
+	// accepted, so Terraform can plan this create while the old snapshot's
+	// deletion is still running and its name still listed. Poll for the name
+	// to clear (bounded): if it does, this create replaces the deleted
+	// snapshot and proceeds; if the name persists, it is a real collision —
+	// fail before the POST.
+	name := plan.Name.ValueString()
+	sameNameIn := func(list []netcup.SnapshotMinimal) *netcup.SnapshotMinimal {
+		for i := range list {
+			if list[i].Name == name {
+				return &list[i]
+			}
+		}
+		return nil
+	}
+	deadline := time.Now().Add(snapshotConflictSettleTimeout)
+	for hit := sameNameIn(preExisting); hit != nil; {
+		if !time.Now().Before(deadline) {
 			resp.Diagnostics.AddError(
 				"Snapshot name already in use",
 				fmt.Sprintf(
-					"Server %d already has a snapshot named %q (UUID %s). Creating a second snapshot with "+
-						"the same name would make the new one undeletable, because deletion is addressed by "+
-						"name and multiple same-name snapshots are ambiguous. Import the existing snapshot "+
+					"Server %d has a snapshot named %q (UUID %s) and it was still listed %s after this apply started. "+
+						"If this apply replaces a previous snapshot with wait = false, its deletion may still be "+
+						"running — re-run apply once it completes. Otherwise import the existing snapshot "+
 						"(`terraform import netcup_server_snapshot.<alias> %d:%s`) or choose a different name.",
-					serverID, plan.Name.ValueString(), preExisting[i].UUID, serverID, plan.Name.ValueString(),
+					serverID, name, hit.UUID, snapshotConflictSettleTimeout, serverID, name,
 				),
 			)
 			return
 		}
+		sleep := 5 * time.Second
+		if rem := time.Until(deadline); sleep > rem {
+			sleep = rem
+		}
+		select {
+		case <-ctx.Done():
+			resp.Diagnostics.AddError("Snapshot create cancelled", ctx.Err().Error())
+			return
+		case <-time.After(sleep):
+		}
+		latest, err := r.client.ListSnapshots(ctx, serverID)
+		if err != nil {
+			d, _ := apiErrorToDiag(err, true)
+			resp.Diagnostics.Append(d)
+			return
+		}
+		preExisting = latest
+		hit = sameNameIn(preExisting)
 	}
 
 	opts := netcup.ServerSnapshotCreate{Name: plan.Name.ValueString()}
