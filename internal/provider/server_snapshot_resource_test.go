@@ -3334,6 +3334,20 @@ func TestServerSnapshotResource_ImportState(t *testing.T) {
 		t.Errorf("import name = %q, want my:snap (split on the first colon)", colonName.ValueString())
 	}
 
+	// Noncanonical server spellings are stored in canonical base-10 so a
+	// config's server_id = "123" does not drift into a RequiresReplace plan.
+	for _, id := range []string{"00123:pre-upgrade", "+123:pre-upgrade"} {
+		resp := run(id)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("ImportState(%q) unexpected diagnostics: %v", id, resp.Diagnostics.Errors())
+		}
+		var canonicalServerID types.String
+		resp.State.GetAttribute(ctx, path.Root("server_id"), &canonicalServerID)
+		if canonicalServerID.ValueString() != "123" {
+			t.Errorf("import %q set server_id=%q, want canonical 123", id, canonicalServerID.ValueString())
+		}
+	}
+
 	for _, id := range []string{"123", "abc:pre-upgrade", "123:", ":pre-upgrade", ""} {
 		resp := run(id)
 		if !resp.Diagnostics.HasError() {

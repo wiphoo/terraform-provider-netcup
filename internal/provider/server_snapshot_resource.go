@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1307,7 +1308,8 @@ func (r *serverSnapshotResource) ImportState(ctx context.Context, req resource.I
 	}
 	serverID := req.ID[:sep]
 	name := req.ID[sep+1:]
-	if _, err := parseServerID(serverID); err != nil {
+	parsedServerID, err := parseServerID(serverID)
+	if err != nil {
 		resp.Diagnostics.AddError(
 			"Invalid import ID",
 			fmt.Sprintf("The server part of the import ID must be a numeric server ID; got %q.", req.ID),
@@ -1316,7 +1318,9 @@ func (r *serverSnapshotResource) ImportState(ctx context.Context, req resource.I
 	}
 
 	// Only server_id and name are seeded; the subsequent Read resolves the UUID
-	// by name and backfills the rest.
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), serverID)...)
+	// by name and backfills the rest. server_id is stored in canonical base-10
+	// (the parsed value) so noncanonical import spellings such as "00123" or
+	// "+123" do not drift from a config's "123" into a RequiresReplace plan.
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), strconv.FormatInt(int64(parsedServerID), 10))...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), name)...)
 }
