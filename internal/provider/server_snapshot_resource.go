@@ -853,27 +853,55 @@ func (r *serverSnapshotResource) Read(ctx context.Context, req resource.ReadRequ
 // set (not listed before the dispatch) and the task's server-side start time
 // (created no earlier than the task started) — and adopts only the sole
 // survivor; with no server-side proof it falls back to the host-clock
-// create_requested_at bound (name-only when no dispatch time is recorded,
-// i.e. imports). An import (isImport) additionally treats a missing match as
-// definitive absence.
+// create_requested_at bound. An import (isImport) never goes through
+// adoptUnconfirmed: carrying no create evidence, its only identity is the
+// name, so exactly one match is adopted, none is definitive absence, and
+// several is a hard error (state kept).
 func (r *serverSnapshotResource) resolveUnconfirmedCreate(ctx context.Context, state *serverSnapshotResourceModel, snapshots []netcup.SnapshotMinimal, isImport bool) (*netcup.SnapshotMinimal, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	name := state.Name.ValueString()
 
 	if state.TaskID.IsNull() || state.TaskID.IsUnknown() || state.TaskID.ValueString() == "" {
-		// No task to check. Two shapes:
-		//   - an import (isImport): the listing is definitive, so a missing
-		//     name match means the imported snapshot does not exist;
-		//   - a persisted create: the snapshot may still be in flight, so
-		//     adoptUnconfirmed applies — pre-existing same-name snapshots are
-		//     excluded by identity (pre_create_uuids) when the set is
-		//     persisted, otherwise by the create window.
-		found := adoptUnconfirmed(snapshots, name, state, nil)
-		if found == nil && isImport {
-			// The requested snapshot is not listed: the import target is gone.
-			return nil, true, diags
+		if isImport {
+			// An import carries no create evidence (no pre-create set, no
+			// dispatch time), so the name is its only identity and the listing
+			// is definitive: exactly one same-name match is adopted, none is
+			// definitive absence, and several is ambiguous — picking the
+			// newest would bind an arbitrary UUID that the delete path then
+			// refuses to operate on while the name is ambiguous.
+			var match *netcup.SnapshotMinimal
+			count := 0
+			for i := range snapshots {
+				if snapshots[i].Name == name {
+					count++
+					match = &snapshots[i]
+				}
+			}
+			switch count {
+			case 0:
+				// The requested snapshot is not listed: the import target is gone.
+				return nil, true, diags
+			case 1:
+				return match, false, diags
+			default:
+				diags.AddError(
+					"Ambiguous snapshot import",
+					fmt.Sprintf(
+						"%d snapshots on server %s share the name %q, so the import cannot tell which one to "+
+							"adopt — picking one would bind an arbitrary UUID that destroy then refuses to "+
+							"delete while the name is ambiguous. Remove the extra same-name snapshots and "+
+							"re-import, or remove this resource from state with `terraform state rm`.",
+						count, state.ServerID.ValueString(), name,
+					),
+				)
+				return nil, false, diags
+			}
 		}
-		return found, false, diags
+		// A persisted create with no task: the snapshot may still be in
+		// flight, so adoptUnconfirmed applies — pre-existing same-name
+		// snapshots are excluded by identity (pre_create_uuids) when the set
+		// is persisted, otherwise by the create window.
+		return adoptUnconfirmed(snapshots, name, state, nil), false, diags
 	}
 
 	task, err := r.client.GetTask(ctx, state.TaskID.ValueString())

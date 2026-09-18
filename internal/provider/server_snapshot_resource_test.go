@@ -1433,6 +1433,58 @@ func TestServerSnapshotResource_Read_ImportNotListedRemovesState(t *testing.T) {
 	}
 }
 
+// TestServerSnapshotResource_Read_ImportAmbiguousRefuses verifies that an
+// import whose name matches several snapshots is refused with an error
+// instead of adopting the newest match arbitrarily.
+func TestServerSnapshotResource_Read_ImportAmbiguousRefuses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-a", "pre-upgrade", "", "2026-01-02T03:01:00Z", "SHUTOFF", "system", false, false, nil) + "," +
+				snapshotListEntry(t, "snap-uuid-b", "pre-upgrade", "", "2026-01-02T03:02:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id": tftypes.NewValue(tftypes.String, "123"),
+		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"uuid":      tftypes.NewValue(tftypes.String, nil),
+		"task_id":   tftypes.NewValue(tftypes.String, nil),
+		// wait and create_requested_at stay null: ImportState only carries
+		// server_id and name.
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Read() expected an ambiguous-import error, got none")
+	}
+	if msg := resp.Diagnostics.Errors()[0].Summary(); msg != "Ambiguous snapshot import" {
+		t.Errorf("error summary = %q, want %q", msg, "Ambiguous snapshot import")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Error("state must be kept (not removed) when an import is ambiguous")
+	}
+	var got serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if !got.UUID.IsNull() {
+		t.Errorf("uuid = %v, want null (no snapshot may be adopted while ambiguous)", got.UUID)
+	}
+}
+
 // TestServerSnapshotResource_Read_NoTaskWindowAdopt verifies that a persisted
 // create without a task adopts a same-name snapshot created no earlier than
 // the recorded dispatch time, not a pre-existing one from before it.
