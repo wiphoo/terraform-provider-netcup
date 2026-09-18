@@ -32,32 +32,33 @@ import (
 // (deleting is idempotent, so the next apply retries safely).
 const snapshotTaskTimeout = 30 * time.Minute
 
-// maxSnapshotNameLength is the SCP's maximum snapshot name length.
-const maxSnapshotNameLength = 255
+// maxSnapshotStringFieldLength is the SCP's maximum length for snapshot
+// string fields (name, description).
+const maxSnapshotStringFieldLength = 255
 
-// snapshotNameLengthValidator rejects snapshot names longer than
-// maxSnapshotNameLength at plan time instead of after a failed create.
-// It counts characters (not bytes) so multi-byte names are measured the way
-// the API does.
-type snapshotNameLengthValidator struct{}
+// snapshotStringFieldLengthValidator rejects a snapshot string field (name,
+// description) longer than maxSnapshotStringFieldLength at plan time instead
+// of after a failed create. It counts characters (not bytes) so multi-byte
+// values are measured the way the API does.
+type snapshotStringFieldLengthValidator struct{ field string }
 
-func (v snapshotNameLengthValidator) Description(_ context.Context) string {
-	return fmt.Sprintf("the name must be at most %d characters long", maxSnapshotNameLength)
+func (v snapshotStringFieldLengthValidator) Description(_ context.Context) string {
+	return fmt.Sprintf("the %s must be at most %d characters long", v.field, maxSnapshotStringFieldLength)
 }
 
-func (v snapshotNameLengthValidator) MarkdownDescription(ctx context.Context) string {
+func (v snapshotStringFieldLengthValidator) MarkdownDescription(ctx context.Context) string {
 	return v.Description(ctx)
 }
 
-func (v snapshotNameLengthValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+func (v snapshotStringFieldLengthValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
 	if req.ConfigValue.IsUnknown() || req.ConfigValue.IsNull() {
 		return
 	}
-	if n := utf8.RuneCountInString(req.ConfigValue.ValueString()); n > maxSnapshotNameLength {
+	if n := utf8.RuneCountInString(req.ConfigValue.ValueString()); n > maxSnapshotStringFieldLength {
 		resp.Diagnostics.AddAttributeError(
 			req.Path,
-			"Snapshot name too long",
-			fmt.Sprintf("The snapshot name must be at most %d characters long; the given name is %d characters long.", maxSnapshotNameLength, n),
+			fmt.Sprintf("Snapshot %s too long", v.field),
+			fmt.Sprintf("The snapshot %s must be at most %d characters long; the given value is %d characters long.", v.field, maxSnapshotStringFieldLength, n),
 		)
 	}
 }
@@ -128,7 +129,7 @@ func (r *serverSnapshotResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Description: "The snapshot name in SCP (max 255 characters). The name is the API's " +
 					"identity for the snapshot — deletion is addressed by name. Forces replacement if changed.",
 				Validators: []validator.String{
-					snapshotNameLengthValidator{},
+					snapshotStringFieldLengthValidator{field: "name"},
 				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
@@ -136,7 +137,10 @@ func (r *serverSnapshotResource) Schema(_ context.Context, _ resource.SchemaRequ
 			},
 			"description": schema.StringAttribute{
 				Optional:    true,
-				Description: "Optional description for the snapshot. Forces replacement if changed.",
+				Description: "Optional description for the snapshot (max 255 characters). Forces replacement if changed.",
+				Validators: []validator.String{
+					snapshotStringFieldLengthValidator{field: "description"},
+				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},

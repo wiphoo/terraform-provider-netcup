@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -163,9 +164,40 @@ func TestServerSnapshotResource_Schema(t *testing.T) {
 	if sa, ok := s.Attributes["wait"].(schema.BoolAttribute); !ok || sa.Default == nil {
 		t.Error("wait: expected a default value")
 	}
-	// name carries the length validator.
+	// name and description carry the length validator.
 	if na, ok := s.Attributes["name"].(schema.StringAttribute); !ok || len(na.Validators) != 1 {
 		t.Error("name: expected exactly one validator (length)")
+	}
+	if da, ok := s.Attributes["description"].(schema.StringAttribute); !ok || len(da.Validators) != 1 {
+		t.Error("description: expected exactly one validator (length)")
+	}
+}
+
+// TestSnapshotStringFieldLengthValidator verifies that the shared length
+// validator enforces the API's 255-character limit at plan time and counts
+// characters (not bytes) for multi-byte values.
+func TestSnapshotStringFieldLengthValidator(t *testing.T) {
+	v := snapshotStringFieldLengthValidator{field: "description"}
+	run := func(s string) bool {
+		var resp validator.StringResponse
+		v.ValidateString(context.Background(), validator.StringRequest{
+			ConfigValue: types.StringValue(s),
+			Path:        path.Root("description"),
+		}, &resp)
+		return resp.Diagnostics.HasError()
+	}
+
+	if !run(strings.Repeat("a", 256)) {
+		t.Error("expected an error for a 256-character description")
+	}
+	if run(strings.Repeat("a", 255)) {
+		t.Error("unexpected error for a 255-character description")
+	}
+	if !run(strings.Repeat("ß", 256)) {
+		t.Error("expected an error for a 256-rune multi-byte description")
+	}
+	if run(strings.Repeat("ß", 255)) {
+		t.Error("unexpected error for a 255-rune multi-byte description")
 	}
 }
 
