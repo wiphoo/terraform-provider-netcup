@@ -420,16 +420,18 @@ func createRequestedSince(state *serverSnapshotResourceModel) *time.Time {
 }
 
 // preCreateUUIDSet returns the set of snapshot UUIDs that existed before this
-// resource's create was dispatched (persisted in pre_create_uuids), or nil when
-// the state carries no such set (imports, and state persisted before the
-// attribute existed).
+// resource's create was dispatched (persisted in pre_create_uuids), or nil
+// when the state carries no such set (imports, and state persisted before the
+// attribute existed). A valid EMPTY set — nothing existed before the dispatch
+// — is returned as a non-nil empty map: it is still proof that every listed
+// snapshot is new, so the sole-candidate rule must keep applying.
 func preCreateUUIDSet(state *serverSnapshotResourceModel) map[string]bool {
 	v := state.PreCreateUUIDs
 	if v.IsNull() || v.IsUnknown() {
 		return nil
 	}
 	var uuids []string
-	if diags := v.ElementsAs(context.Background(), &uuids, false); diags.HasError() || len(uuids) == 0 {
+	if diags := v.ElementsAs(context.Background(), &uuids, false); diags.HasError() {
 		return nil
 	}
 	set := make(map[string]bool, len(uuids))
@@ -499,6 +501,26 @@ func (r *serverSnapshotResource) Create(ctx context.Context, req resource.Create
 	preExistingUUIDs := make(map[string]bool, len(preExisting))
 	for i := range preExisting {
 		preExistingUUIDs[preExisting[i].UUID] = true
+	}
+
+	// A same-name snapshot already on the server is a hard stop: the API
+	// identifies snapshots by name (deletion is addressed by name), so a
+	// second same-name snapshot would make the created one undeletable —
+	// Delete refuses while two matches exist. Fail before the POST.
+	for i := range preExisting {
+		if preExisting[i].Name == plan.Name.ValueString() {
+			resp.Diagnostics.AddError(
+				"Snapshot name already in use",
+				fmt.Sprintf(
+					"Server %d already has a snapshot named %q (UUID %s). Creating a second snapshot with "+
+						"the same name would make the new one undeletable, because deletion is addressed by "+
+						"name and multiple same-name snapshots are ambiguous. Import the existing snapshot "+
+						"(`terraform import netcup_server_snapshot.<alias> %d:%s`) or choose a different name.",
+					serverID, plan.Name.ValueString(), preExisting[i].UUID, serverID, plan.Name.ValueString(),
+				),
+			)
+			return
+		}
 	}
 
 	opts := netcup.ServerSnapshotCreate{Name: plan.Name.ValueString()}
@@ -1086,10 +1108,9 @@ func (r *serverSnapshotResource) Delete(ctx context.Context, req resource.Delete
 				// snapshot this resource created.
 				preExisting = true
 			}
-			if excl == nil && !preExisting {
-				// No persisted pre-create set and no task start time: fall
-				// back to the (host-clock) dispatch bound — best effort, see
-				// adoptUnconfirmed.
+			if !preExisting {
+				// No server-side proof identified the match: fall back to the
+				// (host-clock) dispatch bound — best effort, see adoptUnconfirmed.
 				preExisting = latestSameNameCreatedAfter(snapshots, name, createRequestedSince(&state)) == nil
 			}
 			if preExisting {

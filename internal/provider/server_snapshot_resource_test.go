@@ -512,8 +512,10 @@ func TestServerSnapshotResource_Create_5xxAmbiguous(t *testing.T) {
 			_, _ = w.Write([]byte(`{"message":"upstream timeout"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
 			w.WriteHeader(http.StatusOK)
+			// A pre-existing snapshot with a DIFFERENT name: the create may
+			// be dispatched (no same-name collision).
 			_, _ = w.Write([]byte("[" +
-				snapshotListEntry(t, "snap-uuid-pre", "pre-upgrade", "", "2026-01-02T02:00:00Z", "SHUTOFF", "system", false, false, nil) +
+				snapshotListEntry(t, "snap-uuid-pre", "old-backup", "", "2026-01-02T02:00:00Z", "SHUTOFF", "system", false, false, nil) +
 				"]"))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -783,80 +785,20 @@ func TestServerSnapshotResource_Create_OnlineSnapshotBody(t *testing.T) {
 // takes the NEW snapshot (created after the pre-create reconciliation), not
 // the pre-existing one — even though the pre-existing one is the newest by
 // name that the old code would have grabbed during a listing lag.
-func TestServerSnapshotResource_Create_ExcludesPreExistingSnapshot(t *testing.T) {
-	listCalls := 0
+// TestServerSnapshotResource_Create_PreExistingSameNameRefuses verifies that
+// a create is refused BEFORE dispatch when the server already holds a
+// snapshot with the requested name: a second same-name snapshot would make
+// the created one undeletable (deletion is addressed by name).
+func TestServerSnapshotResource_Create_PreExistingSameNameRefuses(t *testing.T) {
+	postCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
+			postCalled = true
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING"}`))
-		case r.URL.Path == "/v1/tasks/task-1":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
-			listCalls++
-			w.WriteHeader(http.StatusOK)
-			if listCalls == 1 {
-				// Pre-existing same-name snapshot, recorded before the create.
-				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
-			} else {
-				// Post-finish: the new snapshot is listed next to the old one.
-				_, _ = w.Write([]byte("[" +
-					snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "," +
-					snapshotListEntry(t, "snap-uuid-new", "pre-upgrade", "", "2026-01-02T03:04:05Z", "SHUTOFF", "system", false, false, nil) +
-					"]"))
-			}
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer srv.Close()
-
-	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
-	r, schemaResp := configureServerSnapshotResource(t, client)
-
-	ctx := context.Background()
-	plan := resourcePlan(schemaResp, map[string]tftypes.Value{
-		"server_id": tftypes.NewValue(tftypes.String, "123"),
-		"name":      tftypes.NewValue(tftypes.String, "pre-upgrade"),
-		"disk_name": tftypes.NewValue(tftypes.String, "system"),
-		"wait":      tftypes.NewValue(tftypes.Bool, true),
-	})
-
-	var resp resource.CreateResponse
-	resp.State = tfsdk.State{Schema: schemaResp.Schema}
-	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
-
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Create() unexpected diagnostics: %v", resp.Diagnostics.Errors())
-	}
-	var state serverSnapshotResourceModel
-	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
-	if state.UUID.ValueString() != "snap-uuid-new" {
-		t.Errorf("uuid = %q, want snap-uuid-new (the pre-existing same-name snapshot must not be adopted)", state.UUID.ValueString())
-	}
-}
-
-// TestServerSnapshotResource_Create_PreExistingOnlyAfterFinish verifies that
-// when the post-finish listing shows ONLY the pre-existing same-name snapshot
-// (the new one is not listed yet), the resource is persisted unconfirmed
-// rather than adopting the pre-existing snapshot.
-func TestServerSnapshotResource_Create_PreExistingOnlyAfterFinish(t *testing.T) {
-	listCalls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/servers/123/snapshots":
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"PENDING"}`))
-		case r.URL.Path == "/v1/tasks/task-1":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
-			listCalls++
-			w.WriteHeader(http.StatusOK)
-			// Both listings show only the pre-existing snapshot.
 			_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -879,22 +821,14 @@ func TestServerSnapshotResource_Create_PreExistingOnlyAfterFinish(t *testing.T) 
 	resp.State = tfsdk.State{Schema: schemaResp.Schema}
 	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
 
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Create() must not error when only the pre-existing snapshot is listed; got: %v", resp.Diagnostics.Errors())
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when a same-name snapshot already exists")
 	}
-	if len(resp.Diagnostics.Warnings()) == 0 {
-		t.Error("expected a warning when the new snapshot is not listed yet")
+	if postCalled {
+		t.Error("the create request must not be dispatched when a same-name snapshot already exists")
 	}
-	if resp.State.Raw.IsNull() {
-		t.Error("expected state to be persisted (unconfirmed)")
-	}
-	var state serverSnapshotResourceModel
-	resp.Diagnostics.Append(resp.State.Get(ctx, &state)...)
-	if !state.UUID.IsNull() || state.UUID.ValueString() == "snap-uuid-old" {
-		t.Errorf("uuid = %v, want null (the pre-existing snapshot must not be adopted)", state.UUID)
-	}
-	if state.TaskID.ValueString() != "task-1" {
-		t.Errorf("task_id = %q, want task-1", state.TaskID.ValueString())
+	if !resp.State.Raw.IsNull() {
+		t.Error("no state may be persisted when the create is refused before dispatch")
 	}
 }
 
@@ -2585,14 +2519,13 @@ func TestServerSnapshotResource_Create_ConcurrentSnapshotInGapNotAdopted(t *test
 			listCalls++
 			w.WriteHeader(http.StatusOK)
 			if listCalls == 1 {
-				// Pre-listing: only the old snapshot.
-				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+				// Pre-listing: no snapshot exists before the create.
+				_, _ = w.Write([]byte("[]"))
 			} else {
 				// Post-finish: the created snapshot is not listed yet (lag),
 				// but a concurrent same-name snapshot created in the gap
 				// between the pre-listing and the task start is.
 				_, _ = w.Write([]byte("[" +
-					snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "," +
 					snapshotListEntry(t, "snap-uuid-other", "pre-upgrade", "", "2026-01-02T02:30:00Z", "SHUTOFF", "system", false, false, nil) +
 					"]"))
 			}
@@ -2651,12 +2584,12 @@ func TestServerSnapshotResource_Create_MultipleNewSameNameNotAdopted(t *testing.
 			listCalls++
 			w.WriteHeader(http.StatusOK)
 			if listCalls == 1 {
-				_, _ = w.Write([]byte("[" + snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "]"))
+				// Pre-listing: no snapshot exists before the create.
+				_, _ = w.Write([]byte("[]"))
 			} else {
 				// Two NEW same-name snapshots, both created after the task
 				// started: the created one and a concurrent create.
 				_, _ = w.Write([]byte("[" +
-					snapshotListEntry(t, "snap-uuid-old", "pre-upgrade", "", "2025-01-01T00:00:00Z", "SHUTOFF", "system", false, false, nil) + "," +
 					snapshotListEntry(t, "snap-uuid-a", "pre-upgrade", "", "2026-01-02T03:01:00Z", "SHUTOFF", "system", false, false, nil) + "," +
 					snapshotListEntry(t, "snap-uuid-b", "pre-upgrade", "", "2026-01-02T03:02:00Z", "SHUTOFF", "system", false, false, nil) +
 					"]"))
@@ -2858,6 +2791,160 @@ func TestServerSnapshotResource_Delete_ConcurrentSnapshotInGapRefuses(t *testing
 	}
 	if deleted {
 		t.Error("the name-based delete must not run when the listed snapshot predates the create task's start")
+	}
+}
+
+// TestServerSnapshotResource_Read_FinishedTaskEmptySetMultipleNotAdopted
+// verifies that a persisted EMPTY pre-create UUID set (nothing existed before
+// the dispatch) is not collapsed to "no set": with a finished task that omits
+// startedAt, multiple newly listed same-name snapshots must NOT be adopted
+// (sole-candidate rule) instead of falling back to newest-wins.
+func TestServerSnapshotResource_Read_FinishedTaskEmptySetMultipleNotAdopted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/tasks/task-1":
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-a", "pre-upgrade", "", "2026-01-02T03:01:00Z", "SHUTOFF", "system", false, false, nil) + "," +
+				snapshotListEntry(t, "snap-uuid-b", "pre-upgrade", "", "2026-01-02T03:02:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":           tftypes.NewValue(tftypes.String, "123"),
+		"name":                tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":                tftypes.NewValue(tftypes.Bool, true),
+		"uuid":                tftypes.NewValue(tftypes.String, nil),
+		"task_id":             tftypes.NewValue(tftypes.String, "task-1"),
+		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-01-02T02:59:00Z"),
+		"pre_create_uuids":    snapshotStringListVal(),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state must be kept while the created snapshot cannot be attributed")
+	}
+	var got serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if !got.UUID.IsNull() {
+		t.Errorf("uuid = %q, want null (with an empty pre-create set, two new same-name snapshots cannot be attributed)", got.UUID.ValueString())
+	}
+}
+
+// TestServerSnapshotResource_Read_FinishedTaskEmptySetSoleAdopted verifies the
+// empty pre-create set does not over-exclude: with nothing pre-existing and no
+// task startedAt, the sole newly listed same-name snapshot is adopted.
+func TestServerSnapshotResource_Read_FinishedTaskEmptySetSoleAdopted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/tasks/task-1":
+			_, _ = w.Write([]byte(`{"uuid":"task-1","state":"FINISHED"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-new", "pre-upgrade", "", "2026-01-02T03:01:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":           tftypes.NewValue(tftypes.String, "123"),
+		"name":                tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":                tftypes.NewValue(tftypes.Bool, true),
+		"uuid":                tftypes.NewValue(tftypes.String, nil),
+		"task_id":             tftypes.NewValue(tftypes.String, "task-1"),
+		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-01-02T02:59:00Z"),
+		"pre_create_uuids":    snapshotStringListVal(),
+	})
+
+	var resp resource.ReadResponse
+	resp.State = tfsdk.State{Schema: schemaResp.Schema}
+	resp.State.Raw = state.Raw
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: state.Raw}}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read() unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state must be kept and the created snapshot adopted")
+	}
+	var got serverSnapshotResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if got.UUID.ValueString() != "snap-uuid-new" {
+		t.Errorf("uuid = %q, want snap-uuid-new (the sole new same-name snapshot)", got.UUID.ValueString())
+	}
+}
+
+// TestServerSnapshotResource_Delete_EmptySetGapSnapshotRefuses verifies that
+// with an EMPTY persisted pre-create set (nothing existed before the dispatch)
+// and no task start time, a single same-name snapshot created before the
+// recorded dispatch (a concurrent create in the gap) is still refused by the
+// host-clock dispatch bound rather than deleted.
+func TestServerSnapshotResource_Delete_EmptySetGapSnapshotRefuses(t *testing.T) {
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/servers/123/snapshots/pre-upgrade":
+			deleted = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"uuid":"task-del","state":"PENDING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/123/snapshots":
+			_, _ = w.Write([]byte("[" +
+				snapshotListEntry(t, "snap-uuid-other", "pre-upgrade", "", "2026-01-02T02:30:00Z", "SHUTOFF", "system", false, false, nil) +
+				"]"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := netcup.New(netcup.WithAPIEndpoint(srv.URL), netcup.WithAccessToken("tok"))
+	r, schemaResp := configureServerSnapshotResource(t, client)
+
+	ctx := context.Background()
+	state := resourceState(schemaResp, map[string]tftypes.Value{
+		"server_id":           tftypes.NewValue(tftypes.String, "123"),
+		"name":                tftypes.NewValue(tftypes.String, "pre-upgrade"),
+		"wait":                tftypes.NewValue(tftypes.Bool, false),
+		"uuid":                tftypes.NewValue(tftypes.String, nil),
+		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-01-02T02:59:00Z"),
+		"pre_create_uuids":    snapshotStringListVal(),
+	})
+
+	var resp resource.DeleteResponse
+	resp.State = state
+	r.(resource.Resource).Delete(ctx, resource.DeleteRequest{State: state}, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic when the only same-name snapshot predates the dispatch")
+	}
+	if deleted {
+		t.Error("the name-based delete must not run when the listed snapshot predates the dispatch bound")
 	}
 }
 
