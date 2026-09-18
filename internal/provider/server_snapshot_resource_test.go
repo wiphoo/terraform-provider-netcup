@@ -164,9 +164,12 @@ func TestServerSnapshotResource_Schema(t *testing.T) {
 	if sa, ok := s.Attributes["wait"].(schema.BoolAttribute); !ok || sa.Default == nil {
 		t.Error("wait: expected a default value")
 	}
-	// name and description carry the length validator.
-	if na, ok := s.Attributes["name"].(schema.StringAttribute); !ok || len(na.Validators) != 1 {
-		t.Error("name: expected exactly one validator (length)")
+	// name carries the length and blank validators; description the length one.
+	if na, ok := s.Attributes["name"].(schema.StringAttribute); !ok || len(na.Validators) != 2 {
+		t.Error("name: expected exactly two validators (length, blank)")
+	}
+	if da, ok := s.Attributes["description"].(schema.StringAttribute); !ok || len(da.Validators) != 1 {
+		t.Error("description: expected exactly one validator (length)")
 	}
 	if da, ok := s.Attributes["description"].(schema.StringAttribute); !ok || len(da.Validators) != 1 {
 		t.Error("description: expected exactly one validator (length)")
@@ -198,6 +201,31 @@ func TestSnapshotStringFieldLengthValidator(t *testing.T) {
 	}
 	if run(strings.Repeat("ß", 255)) {
 		t.Error("unexpected error for a 255-rune multi-byte description")
+	}
+}
+
+// TestSnapshotNameBlankValidator verifies that an empty or whitespace-only
+// snapshot name is rejected at plan time, matching the SDK's ErrPreDispatch
+// guard.
+func TestSnapshotNameBlankValidator(t *testing.T) {
+	v := snapshotNameBlankValidator{}
+	run := func(s string) bool {
+		var resp validator.StringResponse
+		v.ValidateString(context.Background(), validator.StringRequest{
+			ConfigValue: types.StringValue(s),
+			Path:        path.Root("name"),
+		}, &resp)
+		return resp.Diagnostics.HasError()
+	}
+
+	if !run("") {
+		t.Error("expected an error for an empty name")
+	}
+	if !run("   ") {
+		t.Error("expected an error for a whitespace-only name")
+	}
+	if run("pre-upgrade") {
+		t.Error("unexpected error for a valid name")
 	}
 }
 

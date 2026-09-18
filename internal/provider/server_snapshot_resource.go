@@ -72,6 +72,32 @@ func (v snapshotStringFieldLengthValidator) ValidateString(_ context.Context, re
 	}
 }
 
+// snapshotNameBlankValidator rejects an empty or whitespace-only snapshot
+// name at plan time, matching the SDK's ErrPreDispatch guard that would
+// otherwise reject it during apply.
+type snapshotNameBlankValidator struct{}
+
+func (v snapshotNameBlankValidator) Description(_ context.Context) string {
+	return "the name must not be blank"
+}
+
+func (v snapshotNameBlankValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (v snapshotNameBlankValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsUnknown() || req.ConfigValue.IsNull() {
+		return
+	}
+	if strings.TrimSpace(req.ConfigValue.ValueString()) == "" {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Snapshot name is blank",
+			"The snapshot name must not be empty or whitespace-only.",
+		)
+	}
+}
+
 var _ resource.Resource = &serverSnapshotResource{}
 var _ resource.ResourceWithConfigure = &serverSnapshotResource{}
 var _ resource.ResourceWithImportState = &serverSnapshotResource{}
@@ -139,6 +165,7 @@ func (r *serverSnapshotResource) Schema(_ context.Context, _ resource.SchemaRequ
 					"identity for the snapshot — deletion is addressed by name. Forces replacement if changed.",
 				Validators: []validator.String{
 					snapshotStringFieldLengthValidator{field: "name"},
+					snapshotNameBlankValidator{},
 				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
