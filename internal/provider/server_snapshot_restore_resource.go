@@ -373,4 +373,5 @@ func (r *serverSnapshotRestoreResource) ImportState(ctx context.Context, req res
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.StringValue(strconv.FormatInt(int64(parsedServerID), 10)))...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), types.StringValue(strconv.FormatInt(int64(parsedServerID), 10)))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("snapshot_name"), types.StringValue(name))...)}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("snapshot_name"), types.StringValue(name))...)
+}
