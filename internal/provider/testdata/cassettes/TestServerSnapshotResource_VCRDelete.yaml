@@ -33,3 +33,19 @@ interactions:
     status: 202 Accepted
     code: 202
     duration: ""
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/77777777-7777-4777-8777-777777777777
+    method: GET
+  response:
+    body: '{"uuid":"77777777-7777-4777-8777-777777777777","name":"DeleteSnapshot","state":"FINISHED","startedAt":"2026-08-20T10:00:00Z","finishedAt":"2026-08-20T10:04:30Z","executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-08-20T10:04:30Z","progressInPercent":100},"steps":[{"uuid":"s1-0000-4000-8000-000000000001","name":"snapshot-delete","state":"FINISHED","startedAt":"2026-08-20T10:00:00Z","finishedAt":"2026-08-20T10:04:30Z"}],"result":{"deleted":true},"onRollback":false}'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""
