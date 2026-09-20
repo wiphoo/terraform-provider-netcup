@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -359,9 +360,17 @@ func (r *serverSnapshotRestoreResource) ImportState(ctx context.Context, req res
 		)
 		return
 	}
-	// Set id, server_id, and snapshot_name from the import ID so Read can
-	// locate the server and the first plan won't replace on a missing required attribute.
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.StringValue(serverID))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), types.StringValue(serverID))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("snapshot_name"), types.StringValue(name))...)
-}
+	// Only server_id and name are seeded; the subsequent Read resolves the server.
+	// server_id is stored in canonical base-10 (the parsed value) so noncanonical
+	// import spellings such as "00123" or "+123" do not drift from a config's "123".
+	parsedServerID, err := parseServerID(serverID)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid import ID",
+			fmt.Sprintf("The server part of the import ID must be a numeric server ID; got %q.", req.ID),
+		)
+		return
+	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.StringValue(strconv.FormatInt(int64(parsedServerID), 10)))...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), types.StringValue(strconv.FormatInt(int64(parsedServerID), 10)))...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("snapshot_name"), types.StringValue(name))...)}
