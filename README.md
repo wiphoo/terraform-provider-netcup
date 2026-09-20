@@ -299,6 +299,8 @@ downtime profile; the Terraform lifecycle adds specific failure modes:
 | `netcup_server_reinstall` | **Destroy** | **No** | **No-op** — removes only Terraform state; does not reinstall/wipe |
 | `netcup_server_snapshot` | Create or replace | Depends | Offline snapshots need the server stopped; `online_snapshot = true` snapshots a running server without downtime. Any input change replaces (deletes and re-takes) the snapshot |
 | `netcup_server_snapshot` | **Destroy** | **No** | **Deletes the snapshot** from SCP (irrecoverable) |
+| `netcup_server_snapshot_restore` | Create or replace | **Yes** | **Reverts the server** to the specified snapshot; all changes since the snapshot are lost |
+| `netcup_server_snapshot_restore` | **Destroy** | **No** | **No-op** — removes only Terraform state; does not revert or restore the server |
 | `netcup_server_images` / `netcup_server_snapshots` | Read | No | Read-only data sources |
 
 Key semantics:
@@ -313,6 +315,11 @@ Key semantics:
 - **Reinstall is destructive.** Creating or replacing `netcup_server_reinstall`
   wipes the server; any changed install input (including `custom_script`) runs
   another reinstall. Destroy is deliberately a no-op.
+- **Restore is destructive.** Creating or replacing `netcup_server_snapshot_restore`
+  reverts the server to the specified snapshot, discarding all changes made since
+  that snapshot. Destroy is a no-op. Import must include the snapshot name (e.g.
+  `terraform import netcup_server_snapshot_restore.<alias> 123:pre-upgrade`) so
+  the resource isn't replaced on the first apply.
 - **Reinstall secrets are Sensitive.** Treat `custom_script` as a secret (it may
   contain credentials) and never put `additional_user_password` in logs or
   source control.
