@@ -188,6 +188,7 @@ func (p *netcupProvider) Resources(_ context.Context) []func() resource.Resource
 		NewServerPowerResource,
 		NewServerReinstallResource,
 		NewServerSnapshotResource,
+		NewServerSnapshotRestoreResource,
 		NewSSHKeyResource,
 	}
 }

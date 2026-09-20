@@ -21,3 +21,4 @@ rejected.
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-server-reinstall-resource-lifecycle.md) | `netcup_server_reinstall` resource lifecycle | Accepted |
+| [0002](0002-snapshot-restore-resource-lifecycle.md) | `netcup_server_snapshot_restore` resource lifecycle | Accepted |
