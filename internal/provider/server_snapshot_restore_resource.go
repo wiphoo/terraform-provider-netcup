@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -340,20 +341,27 @@ func (r *serverSnapshotRestoreResource) Delete(_ context.Context, _ resource.Del
 }
 
 func (r *serverSnapshotRestoreResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	// Validate that the import ID is a numeric server ID, reusing parseServerID so
-	// the import path stays in sync with the parse rule used everywhere else.
-	if _, err := parseServerID(req.ID); err != nil {
+	// Parse import ID in format "server_id:snapshot_name" or just "server_id".
+	sep := strings.Index(req.ID, ":")
+	if sep <= 0 || sep == len(req.ID)-1 {
 		resp.Diagnostics.AddError(
 			"Invalid import ID",
-			fmt.Sprintf("The import ID must be a numeric server ID; got %q.", req.ID),
+			fmt.Sprintf("The import ID must be of the form server_id:snapshot_name (e.g. 123:pre-upgrade); got %q.", req.ID),
 		)
 		return
 	}
-
-	// Set both `id` and `server_id` from the import ID so the subsequent Read can
-	// parse server_id. NOTE: snapshot_name is not recoverable from the API alone,
-	// so an imported resource whose config supplies it will plan a replacement
-	// (a restore) on the next apply — see ADR-0002.
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), req.ID)...)
+	serverID := req.ID[:sep]
+	name := req.ID[sep+1:]
+	if _, err := parseServerID(serverID); err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid import ID",
+			fmt.Sprintf("The server part of the import ID must be a numeric server ID; got %q.", req.ID),
+		)
+		return
+	}
+	// Set id, server_id, and snapshot_name from the import ID so Read can
+	// locate the server and the first plan won't replace on a missing required attribute.
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.StringValue(serverID))...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("server_id"), types.StringValue(serverID))...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("snapshot_name"), types.StringValue(name))...)
 }
