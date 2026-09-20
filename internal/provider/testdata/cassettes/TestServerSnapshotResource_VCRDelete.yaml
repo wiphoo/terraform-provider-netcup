@@ -7,6 +7,22 @@ interactions:
     headers:
       Accept:
       - application/json
+    url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1681695467/snapshots
+    method: GET
+  response:
+    body: '[{"uuid":"77777777-7777-4777-8777-777777777777","name":"server-0a0b0c0d","description":"vcr-redacted-description","disks":["vda"],"creationTime":"2026-08-20T10:04:30Z","state":"SHUTOFF","online":false,"exported":false,"exportedSizeInKiB":null}]'
+    headers:
+      Content-Type:
+      - application/json
+    status: 200 OK
+    code: 200
+    duration: ""
+- request:
+    body: ""
+    form: {}
+    headers:
+      Accept:
+      - application/json
     url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1681695467/snapshots/server-0a0b0c0d
     method: DELETE
   response:
