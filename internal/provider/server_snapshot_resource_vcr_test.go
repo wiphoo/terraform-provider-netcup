@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"strconv"
 	"testing"
@@ -133,7 +134,8 @@ func TestServerSnapshotResource_VCRDelete(t *testing.T) {
 	if os.Getenv("VCR_RECORD") == "1" {
 		t.Skip("replay-only: snapshot VCR cassette")
 	}
-	client := vcr.NewClient(t, "TestServerSnapshotResource_VCRDelete")
+	var requests vcr.RequestLog
+	client := vcr.NewRequestLoggingClient(t, "TestServerSnapshotResource_VCRDelete", &requests)
 	serverID := vcr.ServerIDForTest(t, "TestServerSnapshotResource_VCRDelete")
 
 	r, schemaResp := configureServerSnapshotResourceVCR(t, client)
@@ -160,5 +162,14 @@ func TestServerSnapshotResource_VCRDelete(t *testing.T) {
 	r.Delete(ctx, resource.DeleteRequest{State: deleteState}, &deleteResp)
 	if deleteResp.Diagnostics.HasError() {
 		t.Fatalf("Delete() unexpected diagnostics: %v", deleteResp.Diagnostics.Errors())
+	}
+
+	// wait=true must actually poll the delete task. go-vcr replay does NOT
+	// fail when a cassette interaction goes unconsumed, so a Delete regression
+	// that stopped polling after listing + DELETE would replay green. Assert the
+	// terminal task GET was issued to pin the wait path this test claims to exercise.
+	taskURL := "https://www.servercontrolpanel.de/scp-core/api/v1/tasks/77777777-7777-4777-8777-777777777777"
+	if !requests.Contains(http.MethodGet, taskURL) {
+		t.Errorf("Delete() with wait=true did not poll the delete task (want GET %s); requests:\n%s", taskURL, &requests)
 	}
 }
