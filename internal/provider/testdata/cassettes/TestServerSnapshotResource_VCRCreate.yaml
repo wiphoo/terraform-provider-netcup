@@ -44,7 +44,7 @@ interactions:
     url: https://www.servercontrolpanel.de/scp-core/api/v1/tasks/77777777-7777-4777-8777-777777777777
     method: GET
   response:
-    body: '{"uuid":"77777777-7777-4777-8777-777777777777","name":"ServerSnapshot","state":"FINISHED","startedAt":"2026-08-20T10:00:00Z","finishedAt":"2026-08-20T10:04:30Z","executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-08-20T10:04:30Z","progressInPercent":100},"steps":[{"uuid":"s1-0000-4000-8000-000000000001","name":"snapshot-create","state":"FINISHED","startedAt":"2026-08-20T10:00:00Z","finishedAt":"2026-08-20T10:04:30Z"}],"result":{"uuid":"77777777-7777-4777-8777-777777777777","name":"server-0a0b0c0d","description":"vcr-redacted-description","disks":["vda"],"creationTime":"2026-08-20T10:04:30Z","state":"FINISHED","online":true,"exported":false,"exportedSizeInKiB":null,"taskProgress":null},"onRollback":false}'
+    body: '{"uuid":"77777777-7777-4777-8777-777777777777","name":"ServerSnapshot","state":"FINISHED","startedAt":"2026-08-20T10:00:00Z","finishedAt":"2026-08-20T10:04:30Z","executingUser":{"id":10001,"username":"vcr-redacted-username"},"taskProgress":{"expectedFinishedAt":"2026-08-20T10:04:30Z","progressInPercent":100},"steps":[{"uuid":"s1-0000-4000-8000-000000000001","name":"snapshot-create","state":"FINISHED","startedAt":"2026-08-20T10:00:00Z","finishedAt":"2026-08-20T10:04:30Z"}],"result":{"uuid":"88888888-8888-4888-8888-888888888888","name":"server-0a0b0c0d","description":"vcr-redacted-description","disks":["vda"],"creationTime":"2026-08-20T10:04:30Z","state":"FINISHED","online":true,"exported":false,"exportedSizeInKiB":null,"taskProgress":null},"onRollback":false}'
     headers:
       Content-Type:
       - application/json
@@ -60,7 +60,7 @@ interactions:
     url: https://www.servercontrolpanel.de/scp-core/api/v1/servers/1681695467/snapshots
     method: GET
   response:
-    body: '[{"uuid":"77777777-7777-4777-8777-777777777777","name":"server-0a0b0c0d","description":"vcr-redacted-description","disks":["vda"],"creationTime":"2026-08-20T10:04:30Z","state":"FINISHED","online":true,"exported":false,"exportedSizeInKiB":null}]'
+    body: '[{"uuid":"88888888-8888-4888-8888-888888888888","name":"server-0a0b0c0d","description":"vcr-redacted-description","disks":["vda"],"creationTime":"2026-08-20T10:04:30Z","state":"FINISHED","online":true,"exported":false,"exportedSizeInKiB":null}]'
     headers:
       Content-Type:
       - application/json

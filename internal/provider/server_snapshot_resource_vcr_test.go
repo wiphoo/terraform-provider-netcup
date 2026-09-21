@@ -111,8 +111,8 @@ func TestServerSnapshotResource_VCRCreate(t *testing.T) {
 		t.Fatalf("State.Get() unexpected diagnostics: %v", createResp.Diagnostics.Errors())
 	}
 
-	if state.UUID.ValueString() != "77777777-7777-4777-8777-777777777777" {
-		t.Errorf("UUID = %q, want 77777777-7777-4777-8777-777777777777", state.UUID.ValueString())
+	if state.UUID.ValueString() != "88888888-8888-4888-8888-888888888888" {
+		t.Errorf("UUID = %q, want 88888888-8888-4888-8888-888888888888", state.UUID.ValueString())
 	}
 	if state.TaskID.ValueString() != "77777777-7777-4777-8777-777777777777" {
 		t.Errorf("TaskID = %q, want 77777777-7777-4777-8777-777777777777", state.TaskID.ValueString())
