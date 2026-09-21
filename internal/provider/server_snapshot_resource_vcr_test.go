@@ -83,12 +83,12 @@ func TestServerSnapshotResource_VCRCreate(t *testing.T) {
 
 	// Prepare create request (Plan)
 	plan := snapshotResourceVCRPlan(schemaResp, map[string]tftypes.Value{
-		"server_id":          tftypes.NewValue(tftypes.String, strconv.FormatInt(int64(serverID), 10)),
-		"name":               tftypes.NewValue(tftypes.String, "server-0a0b0c0d"),
-		"description":        tftypes.NewValue(tftypes.String, desc),
-		"disk_name":          tftypes.NewValue(tftypes.String, disk),
-		"online_snapshot":    tftypes.NewValue(tftypes.Bool, true),
-		"wait":               tftypes.NewValue(tftypes.Bool, true),
+		"server_id":           tftypes.NewValue(tftypes.String, strconv.FormatInt(int64(serverID), 10)),
+		"name":                tftypes.NewValue(tftypes.String, "server-0a0b0c0d"),
+		"description":         tftypes.NewValue(tftypes.String, desc),
+		"disk_name":           tftypes.NewValue(tftypes.String, disk),
+		"online_snapshot":     tftypes.NewValue(tftypes.Bool, true),
+		"wait":                tftypes.NewValue(tftypes.Bool, true),
 		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-08-20T10:00:00Z"),
 	})
 
@@ -138,14 +138,14 @@ func TestServerSnapshotResource_VCRDelete(t *testing.T) {
 	// Prepare delete request (State) - the Delete cassette's initial GET
 	// listing returns a snapshot with this UUID, so the state must have it.
 	deleteState := snapshotResourceVCRState(schemaResp, map[string]tftypes.Value{
-		"server_id":          tftypes.NewValue(tftypes.String, strconv.FormatInt(int64(serverID), 10)),
-		"name":               tftypes.NewValue(tftypes.String, name),
-		"uuid":               tftypes.NewValue(tftypes.String, "77777777-7777-4777-8777-777777777777"),
-		"task_id":            tftypes.NewValue(tftypes.String, "77777777-7777-4777-8777-777777777777"),
-		"wait":               tftypes.NewValue(tftypes.Bool, true),
-		"description":        tftypes.NewValue(tftypes.String, "vcr-redacted-description"),
-		"disk_name":          tftypes.NewValue(tftypes.String, "vda"),
-		"online_snapshot":    tftypes.NewValue(tftypes.Bool, true),
+		"server_id":           tftypes.NewValue(tftypes.String, strconv.FormatInt(int64(serverID), 10)),
+		"name":                tftypes.NewValue(tftypes.String, name),
+		"uuid":                tftypes.NewValue(tftypes.String, "77777777-7777-4777-8777-777777777777"),
+		"task_id":             tftypes.NewValue(tftypes.String, "77777777-7777-4777-8777-777777777777"),
+		"wait":                tftypes.NewValue(tftypes.Bool, true),
+		"description":         tftypes.NewValue(tftypes.String, "vcr-redacted-description"),
+		"disk_name":           tftypes.NewValue(tftypes.String, "vda"),
+		"online_snapshot":     tftypes.NewValue(tftypes.Bool, true),
 		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-08-20T10:00:00Z"),
 	})
 
