@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"testing"
 
@@ -72,6 +73,9 @@ func configureServerSnapshotResourceVCR(t *testing.T, client *netcup.Client) (re
 // TestServerSnapshotResource_VCRCreate replays the CreateSnapshot lifecycle
 // using the TestServerSnapshotResource_VCRCreate.yaml cassette.
 func TestServerSnapshotResource_VCRCreate(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("replay-only: snapshot VCR cassette")
+	}
 	client := vcr.NewClient(t, "TestServerSnapshotResource_VCRCreate")
 	serverID := vcr.ServerIDForTest(t, "TestServerSnapshotResource_VCRCreate")
 
@@ -81,13 +85,12 @@ func TestServerSnapshotResource_VCRCreate(t *testing.T) {
 	desc := "vcr-redacted-description"
 	disk := "vda"
 
-	// Prepare create request (Plan)
+	// Prepare create request (Plan) — align with cassette: cassette POST omits onlineSnapshot.
 	plan := snapshotResourceVCRPlan(schemaResp, map[string]tftypes.Value{
 		"server_id":           tftypes.NewValue(tftypes.String, strconv.FormatInt(int64(serverID), 10)),
 		"name":                tftypes.NewValue(tftypes.String, "server-0a0b0c0d"),
 		"description":         tftypes.NewValue(tftypes.String, desc),
 		"disk_name":           tftypes.NewValue(tftypes.String, disk),
-		"online_snapshot":     tftypes.NewValue(tftypes.Bool, true),
 		"wait":                tftypes.NewValue(tftypes.Bool, true),
 		"create_requested_at": tftypes.NewValue(tftypes.String, "2026-08-20T10:00:00Z"),
 	})
@@ -127,6 +130,9 @@ func TestServerSnapshotResource_VCRCreate(t *testing.T) {
 // TestServerSnapshotResource_VCRDelete replays the DeleteSnapshot lifecycle
 // using the TestServerSnapshotResource_VCRDelete.yaml cassette.
 func TestServerSnapshotResource_VCRDelete(t *testing.T) {
+	if os.Getenv("VCR_RECORD") == "1" {
+		t.Skip("replay-only: snapshot VCR cassette")
+	}
 	client := vcr.NewClient(t, "TestServerSnapshotResource_VCRDelete")
 	serverID := vcr.ServerIDForTest(t, "TestServerSnapshotResource_VCRDelete")
 
