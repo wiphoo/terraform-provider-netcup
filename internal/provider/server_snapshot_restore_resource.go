@@ -172,6 +172,12 @@ func (r *serverSnapshotRestoreResource) Create(ctx context.Context, req resource
 		return
 	}
 
+	// Canonicalize server_id in the plan so noncanonical spellings
+	// (e.g. "00123") are stored as base-10 ("123") in state, matching
+	// ImportState behavior and preventing a spurious RequiresReplace
+	// drift on the first post-import plan.
+	plan.ServerID = types.StringValue(strconv.FormatInt(int64(id), 10))
+
 	snapshotName := plan.SnapshotName.ValueString()
 
 	task, err := r.client.RestoreSnapshot(ctx, id, snapshotName)
