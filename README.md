@@ -196,7 +196,7 @@ export NETCUP_REFRESH_TOKEN="..."   # pre-issued; optional when using auth login
 Treat the refresh token like a password — it can mint new access tokens without
 another browser approval. Never log or commit tokens.
 
-## Terraform provider (v0.6.2 — available)
+## Terraform provider (v0.7.1 — available)
 
 The provider is built on the same Go SDK as `netcupctl`. See [examples/](examples/)
 for ready-to-use configurations.
@@ -206,7 +206,8 @@ for ready-to-use configurations.
 [`netcup_server_rescue`](examples/server_rescue.tf) (v0.4.0),
 [`netcup_server_reinstall`](examples/server_reinstall.tf) (v0.6.0; destructive),
 [`netcup_ssh_key`](examples/ssh_key.tf) (v0.6.1),
-[`netcup_server_snapshot`](examples/server_snapshot.tf) (upcoming in v0.7.1).
+[`netcup_server_snapshot`](examples/server_snapshot.tf) (v0.7.1),
+[`netcup_server_snapshot_restore`](examples/server_snapshot_restore.tf) (v0.7.1; destructive).
 
 **Data sources:** [`netcup_servers`](examples/servers.tf),
 [`netcup_server`](examples/server.tf) (v0.2.0),
