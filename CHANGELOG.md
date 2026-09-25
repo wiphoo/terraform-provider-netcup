@@ -33,6 +33,19 @@ This file is the human-curated companion to those release notes:
   Every input is immutable (any change replaces the snapshot);
   `online_snapshot` and `disk_name` are mutually exclusive, and an offline
   snapshot requires `disk_name`. See `examples/server_snapshot.tf`.
+- **`netcup_server_snapshot_restore` resource** (upcoming in v0.7.1): restore a
+  server from a snapshot in Terraform — revert via
+  `POST /v1/servers/{id}/snapshots/{name}/revert`, with optional task waiting
+  (`wait`, default `true`) and import via `server_id:snapshot_name`. The restore
+  is **destructive**: all changes made since the snapshot are lost and the
+  server is rebooted. Destroy is a no-op (removes only Terraform state). See
+  `examples/server_snapshot_restore.tf`.
+
+### Breaking Changes
+
+- **`netcup_server_snapshot_restore`** performs destructive operations (server
+  disk revert + reboot) that permanently discard changes made since the
+  snapshot — data loss is possible.
 
 ## [0.7.0] - 2026-08-26
 
