@@ -154,7 +154,7 @@ Shipped **CLI + SDK only**: `netcupctl server snapshots create|delete|restore`
 `RestoreSnapshot` SDK methods. The provider snapshot **resource** is a future
 slot — `netcup_server_snapshots` remains a read-only data source.
 
-## v0.7.1 - Provider Snapshot (provider-snapshot) - *In Progress*
+## v0.7.1 - Provider Snapshot (provider-snapshot) - *Shipped*
 
 Scope:
 

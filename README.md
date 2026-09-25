@@ -206,7 +206,8 @@ for ready-to-use configurations.
 [`netcup_server_rescue`](examples/server_rescue.tf) (v0.4.0),
 [`netcup_server_reinstall`](examples/server_reinstall.tf) (v0.6.0; destructive),
 [`netcup_ssh_key`](examples/ssh_key.tf) (v0.6.1),
-[`netcup_server_snapshot`](examples/server_snapshot.tf) (upcoming in v0.7.1).
+[`netcup_server_snapshot`](examples/server_snapshot.tf) (v0.7.1),
+[`netcup_server_snapshot_restore`](examples/server_snapshot_restore.tf) (v0.7.1; destructive).
 
 **Data sources:** [`netcup_servers`](examples/servers.tf),
 [`netcup_server`](examples/server.tf) (v0.2.0),
