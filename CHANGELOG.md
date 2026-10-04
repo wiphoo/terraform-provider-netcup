@@ -22,6 +22,8 @@ This file is the human-curated companion to those release notes:
   [CONTRIBUTING.md](CONTRIBUTING.md), the generated release notes and this file
   should tell the same story.
 
+## [Unreleased]
+
 ## [0.7.1] - 2026-09-25
 
 ### Added
@@ -39,14 +41,6 @@ This file is the human-curated companion to those release notes:
   `server_id:snapshot_name`. The restore is **destructive**: all changes made
   since the snapshot are lost and the server is rebooted. Destroy is a no-op
   (removes only Terraform state). See `examples/server_snapshot_restore.tf`.
-
-### Breaking Changes
-
-- **`netcup_server_snapshot_restore`** performs destructive operations (server
-  disk revert + reboot) that permanently discard changes made since the
-  snapshot — data loss is possible.
-
-## [Unreleased]
 
 ## [0.7.0] - 2026-08-26
 
