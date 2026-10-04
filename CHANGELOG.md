@@ -24,7 +24,9 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
-Planned for v0.7.2 (documentation and examples only).
+## [0.7.2] - 2026-10-05
+
+Documentation and examples only; no provider code changes.
 
 ### Changed
 
@@ -235,7 +237,8 @@ Initial release: `netcupctl` CLI, shared Go SDK, CI, and release automation.
 See the
 [v0.1.0 release notes](https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.1...v0.6.2
