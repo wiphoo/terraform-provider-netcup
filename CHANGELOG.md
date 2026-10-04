@@ -24,6 +24,16 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+Planned for v0.7.2 (documentation and examples only).
+
+### Changed
+
+- `examples/server_snapshot_restore.tf`: new opt-in example for the destructive
+  `netcup_server_snapshot_restore` resource; its output is `restore_task_id`
+  (the restore task), not the server ID.
+- `examples/server_snapshot.tf`: tidied; output renamed to `snapshot_id`.
+- README and roadmap now list both snapshot resources as shipped in v0.7.1.
+
 ## [0.7.1] - 2026-09-25
 
 ### Added
