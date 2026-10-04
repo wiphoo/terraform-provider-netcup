@@ -30,16 +30,16 @@ variable "restore_snapshot_name" {
 }
 
 resource "netcup_server_snapshot_restore" "example" {
-  count             = var.restore_server_id != null && var.restore_enabled ? 1 : 0
-  server_id         = var.restore_server_id
-  snapshot_name     = var.restore_snapshot_name
+  count         = var.restore_server_id != null && var.restore_enabled ? 1 : 0
+  server_id     = var.restore_server_id
+  snapshot_name = var.restore_snapshot_name
 
   # Keep the example synchronous by default. Set wait=false when callers only
   # need the API acceptance and will monitor the task separately.
   wait = true
 }
 
-output "restore_id" {
-  description = "The ID of the initiated restore operation, or null when disabled."
-  value       = try(one(netcup_server_snapshot_restore.example).id, null)
+output "restore_task_id" {
+  description = "Task ID of the initiated restore operation, or null when disabled."
+  value       = try(one(netcup_server_snapshot_restore.example).task_id, null)
 }
