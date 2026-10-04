@@ -161,8 +161,6 @@ Scope:
 - `netcup_server_snapshot` resource — create server snapshots
 - `netcup_server_snapshot_restore` resource — restore servers from snapshots
 
-(Following the v0.7.1 release plan with examples, risk write-up, and destructive-operation warnings.)
-
 - [x] Server snapshot example
 - [x] Server snapshot_restore example
 - [x] Documentation updates
