@@ -24,15 +24,35 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-05
+
+Documentation and examples only; no provider code changes.
+
+### Changed
+
+- `examples/server_snapshot_restore.tf`: new opt-in example for the destructive
+  `netcup_server_snapshot_restore` resource; its output is `restore_task_id`
+  (the restore task), not the server ID.
+- `examples/server_snapshot.tf`: tidied; output renamed to `snapshot_id`.
+- README and roadmap now list both snapshot resources as shipped in v0.7.1.
+
+## [0.7.1] - 2026-09-25
+
 ### Added
 
-- **`netcup_server_snapshot` resource** (upcoming in v0.7.1): manage a server
-  snapshot in Terraform — create (`POST /v1/servers/{id}/snapshots`), refresh,
-  and delete (`DELETE /v1/servers/{id}/snapshots/{name}`), with optional task
-  waiting (`wait`, default `true`) and import via `server_id:snapshot_name`.
-  Every input is immutable (any change replaces the snapshot);
-  `online_snapshot` and `disk_name` are mutually exclusive, and an offline
-  snapshot requires `disk_name`. See `examples/server_snapshot.tf`.
+- **`netcup_server_snapshot` resource**: manage a server snapshot in Terraform —
+  create (`POST /v1/servers/{id}/snapshots`), refresh, and delete
+  (`DELETE /v1/servers/{id}/snapshots/{name}`), with optional task waiting
+  (`wait`, default `true`) and import via `server_id:snapshot_name`. Every input
+  is immutable (any change replaces the snapshot); `online_snapshot` and
+  `disk_name` are mutually exclusive, and an offline snapshot requires
+  `disk_name`. See `examples/server_snapshot.tf`.
+- **`netcup_server_snapshot_restore` resource**: restore a server from a
+  snapshot in Terraform — revert via `POST /v1/servers/{id}/snapshots/{name}/revert`,
+  with optional task waiting (`wait`, default `true`) and import via
+  `server_id:snapshot_name`. The restore is **destructive**: all changes made
+  since the snapshot are lost and the server is rebooted. Destroy is a no-op
+  (removes only Terraform state). See `examples/server_snapshot_restore.tf`.
 
 ## [0.7.0] - 2026-08-26
 
@@ -217,7 +237,9 @@ Initial release: `netcupctl` CLI, shared Go SDK, CI, and release automation.
 See the
 [v0.1.0 release notes](https://github.com/wiphoo/terraform-provider-netcup/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/wiphoo/terraform-provider-netcup/compare/v0.6.0...v0.6.1

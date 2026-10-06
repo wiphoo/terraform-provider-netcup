@@ -1,12 +1,6 @@
-# Opt-in snapshot example. The resource is created only when you pass a real
-# server ID, so a bare `terraform plan` in this directory stays a read-only
-# smoke test:
+# Manage a server snapshot in Terraform.
 #
-#   terraform plan -var 'server_id=123456' -var 'disk_name=system'
-#   terraform plan -var 'server_id=123456' -var 'online_snapshot=true'
-#
-# Every input is immutable: changing server_id, name, description, disk_name,
-# online_snapshot, or wait REPLACES the snapshot (the old one is deleted and a
+# Every input is immutable (any change replaces the snapshot – the old one is deleted and a
 # new one is taken). Destroying the resource DELETES the snapshot.
 #
 # Offline/online rules (same as `netcupctl server snapshots create`):
@@ -15,6 +9,7 @@
 #
 # Adopt an existing snapshot instead of creating one with:
 #   terraform import 'netcup_server_snapshot.example[0]' '<server_id>:<snapshot_name>'
+
 variable "server_id" {
   type        = string
   default     = null
@@ -46,9 +41,13 @@ resource "netcup_server_snapshot" "example" {
   description     = "Created by the server_snapshot example"
   disk_name       = var.disk_name != "" ? var.disk_name : null
   online_snapshot = var.online_snapshot
+
+  # Keep the example synchronous by default. Set wait=false when callers only
+  # need the API acceptance and will monitor the task separately.
+  wait = true
 }
 
-output "snapshot_uuid" {
-  description = "UUID of the snapshot (null when the resource is skipped)."
-  value       = one(netcup_server_snapshot.example[*].uuid)
+output "snapshot_id" {
+  description = "The ID of the created snapshot, or null when disabled."
+  value       = try(one(netcup_server_snapshot.example).id, null)
 }
