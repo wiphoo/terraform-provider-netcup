@@ -302,3 +302,38 @@ func TestNewDNSClient_EndpointValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestGetZone(t *testing.T) {
+	c, _ := newTestDNS(t)
+	z, err := c.GetZone(context.Background(), " Example.COM. ")
+	if err != nil {
+		t.Fatalf("GetZone: %v", err)
+	}
+	want := DNSZone{Name: "example.com", TTL: 86400, Serial: 2026101701, Refresh: 28800, Retry: 7200, Expire: 1209600}
+	if *z != want {
+		t.Errorf("zone = %+v, want %+v", *z, want)
+	}
+}
+
+func TestUpdateZone_SendsStringsAndValidates(t *testing.T) {
+	c, f := newTestDNS(t)
+	ctx := context.Background()
+
+	if _, err := c.UpdateZone(ctx, DNSZone{Name: "example.com", TTL: 0, Refresh: 1, Retry: 1, Expire: 1}); err == nil {
+		t.Fatal("UpdateZone with ttl=0: error = nil, want validation error")
+	}
+	if got := f.calls(); len(got) != 0 {
+		t.Fatalf("validation failure must not hit the network, calls = %v", got)
+	}
+
+	z, err := c.UpdateZone(ctx, DNSZone{Name: "example.com", TTL: 3600, Serial: 2026101701, Refresh: 28800, Retry: 7200, Expire: 1209600})
+	if err != nil {
+		t.Fatalf("UpdateZone: %v", err)
+	}
+	if z.TTL != 3600 {
+		t.Errorf("TTL = %d, want 3600", z.TTL)
+	}
+	if !strings.Contains(string(f.lastZone), `"ttl":"3600"`) {
+		t.Errorf("zone body = %s, want ttl sent as a string", f.lastZone)
+	}
+}

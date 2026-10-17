@@ -313,3 +313,69 @@ func (c *DNSClient) ListRecords(ctx context.Context, domain string) ([]DNSRecord
 	}
 	return set.records(), nil
 }
+
+// DNSZone is the SOA-level configuration of a zone.
+type DNSZone struct {
+	Name    string `json:"name"`
+	TTL     int    `json:"ttl"`
+	Serial  int    `json:"serial"`
+	Refresh int    `json:"refresh"`
+	Retry   int    `json:"retry"`
+	Expire  int    `json:"expire"`
+	DNSSEC  bool   `json:"dnssec"`
+}
+
+type zoneWire struct {
+	Name         string  `json:"name"`
+	TTL          flexInt `json:"ttl"`
+	Serial       flexInt `json:"serial"`
+	Refresh      flexInt `json:"refresh"`
+	Retry        flexInt `json:"retry"`
+	Expire       flexInt `json:"expire"`
+	DNSSECStatus bool    `json:"dnssecstatus"`
+}
+
+func (w zoneWire) zone() DNSZone {
+	return DNSZone{
+		Name: w.Name, TTL: int(w.TTL), Serial: int(w.Serial), Refresh: int(w.Refresh),
+		Retry: int(w.Retry), Expire: int(w.Expire), DNSSEC: w.DNSSECStatus,
+	}
+}
+
+// GetZone returns the zone configuration for domain. CCP has no "list zones"
+// call, so zones are addressed by domain name.
+func (c *DNSClient) GetZone(ctx context.Context, domain string) (*DNSZone, error) {
+	domain, err := normalizeDomain(domain)
+	if err != nil {
+		return nil, err
+	}
+	var w zoneWire
+	if err := c.authed(ctx, "infoDnsZone", map[string]any{"domainname": domain}, &w); err != nil {
+		return nil, err
+	}
+	z := w.zone()
+	return &z, nil
+}
+
+// UpdateZone writes the zone configuration (typically a zone fetched with
+// GetZone and then modified) and returns the zone as stored. TTL, Refresh,
+// Retry and Expire must be positive.
+func (c *DNSClient) UpdateZone(ctx context.Context, z DNSZone) (*DNSZone, error) {
+	domain, err := normalizeDomain(z.Name)
+	if err != nil {
+		return nil, err
+	}
+	if z.TTL <= 0 || z.Refresh <= 0 || z.Retry <= 0 || z.Expire <= 0 {
+		return nil, errors.New("zone ttl, refresh, retry and expire must be positive")
+	}
+	wire := zoneWire{
+		Name: domain, TTL: flexInt(z.TTL), Serial: flexInt(z.Serial), Refresh: flexInt(z.Refresh),
+		Retry: flexInt(z.Retry), Expire: flexInt(z.Expire), DNSSECStatus: z.DNSSEC,
+	}
+	var out zoneWire
+	if err := c.authed(ctx, "updateDnsZone", map[string]any{"domainname": domain, "dnszone": wire}, &out); err != nil {
+		return nil, err
+	}
+	updated := out.zone()
+	return &updated, nil
+}
