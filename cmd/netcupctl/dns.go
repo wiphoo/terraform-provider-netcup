@@ -49,6 +49,7 @@ DNS uses the CCP API, not the SCP device login. Set:
   NETCUP_DNS_API_KEY          API key from the CCP (Master data > API)
   NETCUP_DNS_API_PASSWORD     API password from the CCP
 
+Destinations starting with '-': put '--' before them (or use --destination=-x).
 Use @ for the zone apex and * for a wildcard. Record types: A AAAA MX CNAME CAA
 SRV TXT TLSA NS DS. Deleting a record is permanent and prompts for confirmation
 unless --force (or --yes) is given.
@@ -169,7 +170,20 @@ func dnsZoneUpdate(args []string, out io.Writer) error {
 	if err != nil || done {
 		return err
 	}
-	if *ttl == 0 && *refresh == 0 && *retry == 0 && *expire == 0 {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	vals := map[string]int{"ttl": *ttl, "refresh": *refresh, "retry": *retry, "expire": *expire}
+	anySet := false
+	for _, name := range []string{"ttl", "refresh", "retry", "expire"} {
+		if !set[name] {
+			continue
+		}
+		anySet = true
+		if vals[name] <= 0 {
+			return fmt.Errorf("--%s must be positive", name)
+		}
+	}
+	if !anySet {
 		return errors.New("dns zone update needs at least one of --ttl, --refresh, --retry, --expire")
 	}
 	return withDNS(func(ctx context.Context, c *netcup.DNSClient) error {
@@ -177,16 +191,16 @@ func dnsZoneUpdate(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if *ttl != 0 {
+		if set["ttl"] {
 			z.TTL = *ttl
 		}
-		if *refresh != 0 {
+		if set["refresh"] {
 			z.Refresh = *refresh
 		}
-		if *retry != 0 {
+		if set["retry"] {
 			z.Retry = *retry
 		}
-		if *expire != 0 {
+		if set["expire"] {
 			z.Expire = *expire
 		}
 		updated, err := c.UpdateZone(ctx, *z)
@@ -276,13 +290,23 @@ func dnsRecordsUpdate(args []string, out io.Writer) error {
 	hostname := fs.String("hostname", "", "new hostname")
 	typ := fs.String("type", "", "new record type")
 	destination := fs.String("destination", "", "new destination")
-	priority := fs.Int("priority", -1, "new priority")
+	priority := fs.Int("priority", 0, "new priority")
 	pos, done, err := parseDNSArgs(fs, args, 2, "dns records update takes <domain> <id>")
 	if err != nil || done {
 		return err
 	}
-	if *hostname == "" && *typ == "" && *destination == "" && *priority < 0 {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if len(set) == 0 || (set["json"] && len(set) == 1) {
 		return errors.New("dns records update needs at least one of --hostname, --type, --destination, --priority")
+	}
+	for name, v := range map[string]string{"hostname": *hostname, "type": *typ, "destination": *destination} {
+		if set[name] && v == "" {
+			return fmt.Errorf("--%s must not be empty", name)
+		}
+	}
+	if set["priority"] && *priority < 0 {
+		return errors.New("--priority must be >= 0")
 	}
 	return withDNS(func(ctx context.Context, c *netcup.DNSClient) error {
 		recs, err := c.ListRecords(ctx, pos[0])
@@ -293,21 +317,22 @@ func dnsRecordsUpdate(args []string, out io.Writer) error {
 		for i := range recs {
 			if recs[i].ID == pos[1] {
 				rec = &recs[i]
+				break
 			}
 		}
 		if rec == nil {
 			return fmt.Errorf("record %s not found in %s", pos[1], pos[0])
 		}
-		if *hostname != "" {
+		if set["hostname"] {
 			rec.Hostname = *hostname
 		}
-		if *typ != "" {
+		if set["type"] {
 			rec.Type = *typ
 		}
-		if *destination != "" {
+		if set["destination"] {
 			rec.Destination = *destination
 		}
-		if *priority >= 0 {
+		if set["priority"] {
 			rec.Priority = *priority
 		}
 		updated, err := c.UpdateRecord(ctx, pos[0], *rec)
@@ -332,6 +357,9 @@ func dnsRecordsDelete(args []string, out, errW io.Writer, in io.Reader) error {
 	yesFlag := fs.Bool("yes", false, "alias for --force")
 	pos, done, err := parseDNSArgs(fs, args, 2, "dns records delete takes <domain> <id>")
 	if err != nil || done {
+		return err
+	}
+	if _, err := netcup.DNSCredentialsFromEnv(); err != nil {
 		return err
 	}
 	if !*forceFlag && !*yesFlag {

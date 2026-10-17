@@ -139,7 +139,7 @@ func NewDNSClient(creds DNSCredentials, opts ...DNSOption) (*DNSClient, error) {
 	if u.Hostname() == "" {
 		return nil, fmt.Errorf("DNS endpoint %q has no host", u.Redacted())
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
 		return nil, fmt.Errorf("DNS endpoint %q must use https (credentials are sent in the request)", u.Redacted())
 	}
 	return c, nil
