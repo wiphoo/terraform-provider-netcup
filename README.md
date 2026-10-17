@@ -42,6 +42,7 @@ netcupctl server list
 netcupctl server get <id>
 netcupctl rdns get <ip>
 netcupctl rdns set <ip> <hostname>
+netcupctl dns records list <domain>   # CCP credentials, see docs/DNS.md
 netcupctl version
 ```
 
@@ -380,6 +381,7 @@ the PR process. Please report security vulnerabilities privately — see
 ## Documentation
 
 - [Roadmap](docs/ROADMAP.md)
+- [DNS (netcupctl dns)](docs/DNS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [MVP Specification](docs/MVP.md)
 - [Contributing](CONTRIBUTING.md)
