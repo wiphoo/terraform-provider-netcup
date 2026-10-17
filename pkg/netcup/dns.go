@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -120,6 +122,14 @@ func NewDNSClient(creds DNSCredentials, opts ...DNSOption) (*DNSClient, error) {
 	for _, opt := range opts {
 		opt(c)
 	}
+	// Credentials travel in the request body, so refuse cleartext to non-loopback hosts.
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DNS endpoint %q: %w", c.endpoint, err)
+	}
+	if h := u.Hostname(); u.Scheme != "https" && h != "localhost" && !(net.ParseIP(h) != nil && net.ParseIP(h).IsLoopback()) {
+		return nil, fmt.Errorf("DNS endpoint %q must use https (credentials are sent in the request)", c.endpoint)
+	}
 	return c, nil
 }
 
@@ -137,7 +147,7 @@ type ccpResponse struct {
 func (c *DNSClient) do(ctx context.Context, action string, param map[string]any, out any) error {
 	body, err := json.Marshal(map[string]any{"action": action, "param": param})
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: encoding %s request: %w", ErrPreDispatch, action, err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -148,7 +158,7 @@ func (c *DNSClient) do(ctx context.Context, action string, param map[string]any,
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("netcup DNS %s: %w", action, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
@@ -159,11 +169,11 @@ func (c *DNSClient) do(ctx context.Context, action string, param map[string]any,
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return fmt.Errorf("decoding %s response: %w", action, err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
 	if r.Status != "success" {
 		return &DNSError{Action: action, StatusCode: r.StatusCode, Short: r.ShortMessage, Long: r.LongMessage}
 	}
-	if out != nil && len(r.ResponseData) > 0 {
+	// CCP sends "" as responsedata on some successes; never decode that into a struct.
+	if raw := bytes.TrimSpace(r.ResponseData); out != nil && len(raw) > 0 && string(raw) != `""` && string(raw) != "null" {
 		if err := json.Unmarshal(r.ResponseData, out); err != nil {
 			return fmt.Errorf("decoding %s data: %w", action, err)
 		}
@@ -184,7 +194,7 @@ func (c *DNSClient) login(ctx context.Context) error {
 		return err
 	}
 	if data.SessionID == "" {
-		return fmt.Errorf("netcup DNS API login returned no session id")
+		return errors.New("netcup DNS API login returned no session id")
 	}
 	c.sessionID = data.SessionID
 	return nil
@@ -244,7 +254,7 @@ func (f flexInt) MarshalJSON() ([]byte, error) { return json.Marshal(strconv.Ito
 func normalizeDomain(d string) (string, error) {
 	d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
 	if d == "" {
-		return "", fmt.Errorf("domain must not be empty")
+		return "", errors.New("domain must not be empty")
 	}
 	return d, nil
 }

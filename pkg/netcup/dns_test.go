@@ -210,3 +210,95 @@ func TestDNS_LoginFailureDoesNotLeakSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestListRecords_Priorities(t *testing.T) {
+	c, _ := newTestDNS(t)
+	recs, err := c.ListRecords(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("ListRecords: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("len = %d, want 2", len(recs))
+	}
+	if recs[0].Type != "A" || recs[0].Priority != 0 || recs[1].Type != "MX" || recs[1].Priority != 10 {
+		t.Errorf("records = %+v", recs)
+	}
+}
+
+func TestNormalizeDomain(t *testing.T) {
+	got, err := normalizeDomain(" Example.COM. ")
+	if err != nil || got != "example.com" {
+		t.Errorf("got %q, %v; want example.com", got, err)
+	}
+	if _, err := normalizeDomain(""); err == nil {
+		t.Error("empty domain: error = nil")
+	}
+}
+
+func TestFlexInt(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    flexInt
+		wantErr bool
+	}{
+		{`"86400"`, 86400, false},
+		{`86400`, 86400, false},
+		{`null`, 0, false},
+		{`""`, 0, false},
+		{`"abc"`, 0, true},
+	}
+	for _, tt := range tests {
+		var f flexInt
+		err := json.Unmarshal([]byte(tt.in), &f)
+		if (err != nil) != tt.wantErr || f != tt.want {
+			t.Errorf("Unmarshal(%s) = %d, %v; want %d, err=%v", tt.in, f, err, tt.want, tt.wantErr)
+		}
+	}
+	b, err := json.Marshal(flexInt(86400))
+	if err != nil || string(b) != `"86400"` {
+		t.Errorf("Marshal = %s, %v; want \"86400\"", b, err)
+	}
+}
+
+func TestDNS_NonSuccessHTTPIsAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c, err := NewDNSClient(DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"}, WithDNSEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ListRecords(context.Background(), "example.com")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want *APIError", err)
+	}
+}
+
+func TestDNS_EmptyStringResponseDataIsNotDecoded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","statuscode":2000,"responsedata":""}`))
+	}))
+	defer srv.Close()
+	c, err := NewDNSClient(DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"}, WithDNSEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct{ Name string }
+	if err := c.do(context.Background(), "x", nil, &out); err != nil {
+		t.Fatalf("do with \"\" responsedata: %v", err)
+	}
+}
+
+func TestNewDNSClient_EndpointValidation(t *testing.T) {
+	creds := DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"}
+	if _, err := NewDNSClient(creds, WithDNSEndpoint("http://example.com/x")); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Errorf("http remote: error = %v, want https error", err)
+	}
+	for _, ok := range []string{"http://127.0.0.1:1234", "http://localhost:80", "https://example.com/x"} {
+		if _, err := NewDNSClient(creds, WithDNSEndpoint(ok)); err != nil {
+			t.Errorf("%s: error = %v, want nil", ok, err)
+		}
+	}
+}
