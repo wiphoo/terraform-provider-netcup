@@ -626,3 +626,47 @@ func TestRecordOps_FailFastWithoutNetwork(t *testing.T) {
 		t.Errorf("made HTTP calls %v, want none", got)
 	}
 }
+
+func TestUpdateRecord_UnchangedContentSucceeds(t *testing.T) {
+	c, _ := newTestDNS(t)
+	got, err := c.UpdateRecord(context.Background(), "example.com",
+		DNSRecord{ID: "1", Hostname: "@", Type: "A", Destination: "203.0.113.10"})
+	if err != nil {
+		t.Fatalf("UpdateRecord with unchanged content: %v", err)
+	}
+	if got.ID != "1" || got.Destination != "203.0.113.10" {
+		t.Errorf("record = %+v", got)
+	}
+}
+
+func TestSameDestination(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  string
+		a, b string
+		want bool
+	}{
+		{"A case-insensitive", "A", "ABC", "abc", true},
+		{"AAAA case-insensitive", "AAAA", "2001:DB8::1", "2001:db8::1", true},
+		{"A trailing dot matters", "A", "1.2.3.4", "1.2.3.4.", false},
+		{"CNAME case and dot", "CNAME", "Host.Example.com.", "host.example.com", true},
+		{"MX case and dot", "MX", "Mail.Example.com.", "mail.example.com", true},
+		{"NS case and dot", "NS", "NS1.Example.com.", "ns1.example.com", true},
+		{"SRV case and dot", "SRV", "0 5060 SIP.example.com.", "0 5060 sip.example.com", true},
+		{"CNAME only one dot ignored", "CNAME", "a.example.com..", "a.example.com", false},
+		{"lowercase type still folds", "cname", "A.example.com.", "a.example.com", true},
+		{"TXT case matters", "TXT", "v=SPF1", "v=spf1", false},
+		{"TXT trailing dot matters", "TXT", "hello.", "hello", false},
+		{"TXT exact", "TXT", "hello", "hello", true},
+		{"CAA case matters", "CAA", `0 issue "LetsEncrypt.org"`, `0 issue "letsencrypt.org"`, false},
+		{"TLSA trailing dot matters", "TLSA", "3 1 1 abcd.", "3 1 1 abcd", false},
+		{"DS case matters", "DS", "12345 8 2 ABCD", "12345 8 2 abcd", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sameDestination(tt.typ, tt.a, tt.b); got != tt.want {
+				t.Errorf("sameDestination(%q, %q, %q) = %v, want %v", tt.typ, tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
