@@ -94,7 +94,14 @@ func (f *fakeCCP) handler(t *testing.T) http.HandlerFunc {
 				DNSRecords []map[string]any `json:"dnsrecords"`
 			}
 			_ = json.Unmarshal(req.Param["dnsrecordset"], &set)
-			f.lastUpdate = set.DNSRecords
+			f.lastUpdate = nil
+			for _, in := range set.DNSRecords {
+				cp := make(map[string]any, len(in))
+				for k, v := range in {
+					cp[k] = v
+				}
+				f.lastUpdate = append(f.lastUpdate, cp)
+			}
 			for _, in := range set.DNSRecords {
 				id, _ := in["id"].(string)
 				if del, _ := in["deleterecord"].(bool); del {
@@ -405,5 +412,101 @@ func TestGetZone_DNSSEC(t *testing.T) {
 	}
 	if !z.DNSSEC {
 		t.Error("DNSSEC = false, want true")
+	}
+}
+
+func TestValidateRecord(t *testing.T) {
+	tests := []struct {
+		name    string
+		rec     DNSRecord
+		wantErr string
+	}{
+		{"ok A", DNSRecord{Hostname: "www", Type: "a", Destination: "203.0.113.5"}, ""},
+		{"ok wildcard", DNSRecord{Hostname: "*", Type: "CNAME", Destination: "example.com."}, ""},
+		{"empty hostname", DNSRecord{Type: "A", Destination: "1.2.3.4"}, "hostname"},
+		{"bad type", DNSRecord{Hostname: "@", Type: "BOGUS", Destination: "x"}, "type"},
+		{"empty destination", DNSRecord{Hostname: "@", Type: "A"}, "destination"},
+		{"negative priority", DNSRecord{Hostname: "@", Type: "MX", Destination: "m", Priority: -1}, "priority"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRecord(&tt.rec)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("error = %v, want nil", err)
+				}
+				if tt.rec.Type != strings.ToUpper(tt.rec.Type) {
+					t.Errorf("Type not uppercased: %q", tt.rec.Type)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCreateRecord(t *testing.T) {
+	c, f := newTestDNS(t)
+	ctx := context.Background()
+
+	got, err := c.CreateRecord(ctx, "example.com", DNSRecord{Hostname: "www", Type: "a", Destination: "203.0.113.5"})
+	if err != nil {
+		t.Fatalf("CreateRecord: %v", err)
+	}
+	if got.ID != "11" || got.Hostname != "www" || got.Type != "A" || got.Destination != "203.0.113.5" {
+		t.Errorf("record = %+v", got)
+	}
+	if len(f.lastUpdate) != 1 || f.lastUpdate[0]["id"] != "" {
+		t.Errorf("update body = %v, want one record with empty id", f.lastUpdate)
+	}
+}
+
+func TestCreateRecord_RefusesExactDuplicate(t *testing.T) {
+	c, f := newTestDNS(t)
+	_, err := c.CreateRecord(context.Background(), "example.com",
+		DNSRecord{Hostname: "@", Type: "A", Destination: "203.0.113.10"})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("error = %v, want already-exists", err)
+	}
+	for _, a := range f.calls() {
+		if a == "updateDnsRecords" {
+			t.Error("duplicate create must not send updateDnsRecords")
+		}
+	}
+}
+
+func TestUpdateRecord(t *testing.T) {
+	c, _ := newTestDNS(t)
+	got, err := c.UpdateRecord(context.Background(), "example.com",
+		DNSRecord{ID: "2", Hostname: "@", Type: "MX", Priority: 20, Destination: "mail2.example.com"})
+	if err != nil {
+		t.Fatalf("UpdateRecord: %v", err)
+	}
+	if got.Priority != 20 || got.Destination != "mail2.example.com" {
+		t.Errorf("record = %+v", got)
+	}
+	if _, err := c.UpdateRecord(context.Background(), "example.com",
+		DNSRecord{ID: "999", Hostname: "@", Type: "A", Destination: "1.2.3.4"}); err == nil {
+		t.Error("UpdateRecord of unknown id: error = nil")
+	}
+}
+
+func TestDeleteRecord(t *testing.T) {
+	c, f := newTestDNS(t)
+	ctx := context.Background()
+	if err := c.DeleteRecord(ctx, "example.com", "1"); err != nil {
+		t.Fatalf("DeleteRecord: %v", err)
+	}
+	if del, _ := f.lastUpdate[0]["deleterecord"].(bool); !del || f.lastUpdate[0]["hostname"] != "@" {
+		t.Errorf("update body = %v, want full record with deleterecord=true", f.lastUpdate)
+	}
+	recs, _ := c.ListRecords(ctx, "example.com")
+	if len(recs) != 1 || recs[0].ID != "2" {
+		t.Errorf("records after delete = %+v", recs)
+	}
+	if err := c.DeleteRecord(ctx, "example.com", "1"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("second delete error = %v, want not-found", err)
 	}
 }
