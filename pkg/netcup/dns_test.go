@@ -27,6 +27,11 @@ type fakeCCP struct {
 	lastUpdate []map[string]any
 	lastZone   json.RawMessage
 	dnssec     bool
+
+	// failure-injection knobs
+	normalizeDest bool // strip a trailing dot from destinations when storing
+	dropCreates   bool // accept creates but do not store them
+	ignoreDeletes bool // accept deletes but keep the record
 }
 
 func (f *fakeCCP) calls() []string {
@@ -105,6 +110,9 @@ func (f *fakeCCP) handler(t *testing.T) http.HandlerFunc {
 			for _, in := range set.DNSRecords {
 				id, _ := in["id"].(string)
 				if del, _ := in["deleterecord"].(bool); del {
+					if f.ignoreDeletes {
+						continue
+					}
 					kept := f.recs[:0:0]
 					for _, e := range f.recs {
 						if e["id"] != id {
@@ -115,7 +123,13 @@ func (f *fakeCCP) handler(t *testing.T) http.HandlerFunc {
 					continue
 				}
 				in["state"] = "yes"
+				if d, ok := in["destination"].(string); ok && f.normalizeDest {
+					in["destination"] = strings.TrimSuffix(d, ".")
+				}
 				if id == "" {
+					if f.dropCreates {
+						continue
+					}
 					f.nextID++
 					in["id"] = strconv.Itoa(f.nextID)
 					f.recs = append(f.recs, in)
@@ -422,6 +436,7 @@ func TestValidateRecord(t *testing.T) {
 		wantErr string
 	}{
 		{"ok A", DNSRecord{Hostname: "www", Type: "a", Destination: "203.0.113.5"}, ""},
+		{"trimmed", DNSRecord{Hostname: "  www ", Type: " a ", Destination: " 1.2.3.4 "}, ""},
 		{"ok wildcard", DNSRecord{Hostname: "*", Type: "CNAME", Destination: "example.com."}, ""},
 		{"empty hostname", DNSRecord{Type: "A", Destination: "1.2.3.4"}, "hostname"},
 		{"bad type", DNSRecord{Hostname: "@", Type: "BOGUS", Destination: "x"}, "type"},
@@ -478,7 +493,7 @@ func TestCreateRecord_RefusesExactDuplicate(t *testing.T) {
 }
 
 func TestUpdateRecord(t *testing.T) {
-	c, _ := newTestDNS(t)
+	c, f := newTestDNS(t)
 	got, err := c.UpdateRecord(context.Background(), "example.com",
 		DNSRecord{ID: "2", Hostname: "@", Type: "MX", Priority: 20, Destination: "mail2.example.com"})
 	if err != nil {
@@ -486,6 +501,9 @@ func TestUpdateRecord(t *testing.T) {
 	}
 	if got.Priority != 20 || got.Destination != "mail2.example.com" {
 		t.Errorf("record = %+v", got)
+	}
+	if f.lastUpdate[0]["id"] != "2" {
+		t.Errorf("update body = %v, want id 2", f.lastUpdate)
 	}
 	if _, err := c.UpdateRecord(context.Background(), "example.com",
 		DNSRecord{ID: "999", Hostname: "@", Type: "A", Destination: "1.2.3.4"}); err == nil {
@@ -508,5 +526,103 @@ func TestDeleteRecord(t *testing.T) {
 	}
 	if err := c.DeleteRecord(ctx, "example.com", "1"); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("second delete error = %v, want not-found", err)
+	}
+}
+
+func TestCreateRecord_NormalizationAwareDuplicates(t *testing.T) {
+	tests := []struct {
+		name    string
+		seed    map[string]any
+		rec     DNSRecord
+		wantDup bool
+	}{
+		{"case-insensitive host and type", map[string]any{"id": "5", "hostname": "www", "type": "A", "priority": "0", "destination": "1.2.3.4"},
+			DNSRecord{Hostname: "WWW", Type: "a", Destination: "1.2.3.4"}, true},
+		{"TXT case differs", map[string]any{"id": "5", "hostname": "t", "type": "TXT", "priority": "0", "destination": "Hello"},
+			DNSRecord{Hostname: "t", Type: "TXT", Destination: "hello"}, false},
+		{"CNAME trailing dot", map[string]any{"id": "5", "hostname": "c", "type": "CNAME", "priority": "0", "destination": "target.example.com"},
+			DNSRecord{Hostname: "c", Type: "CNAME", Destination: "Target.example.com."}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, f := newTestDNS(t)
+			f.recs = append(f.recs, tt.seed)
+			_, err := c.CreateRecord(context.Background(), "example.com", tt.rec)
+			if tt.wantDup {
+				if !errors.Is(err, ErrRecordExists) {
+					t.Fatalf("error = %v, want ErrRecordExists", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestCreateRecord_FallbackWhenCCPNormalizesDestination(t *testing.T) {
+	c, f := newTestDNS(t)
+	f.normalizeDest = true
+	got, err := c.CreateRecord(context.Background(), "example.com",
+		DNSRecord{Hostname: "c", Type: "CNAME", Destination: "target.example.com."})
+	if err != nil {
+		t.Fatalf("CreateRecord: %v", err)
+	}
+	if got.ID != "11" || got.Destination != "target.example.com" {
+		t.Errorf("record = %+v", got)
+	}
+}
+
+func TestCreateRecord_NotStored(t *testing.T) {
+	c, f := newTestDNS(t)
+	f.dropCreates = true
+	_, err := c.CreateRecord(context.Background(), "example.com", DNSRecord{Hostname: "x", Type: "A", Destination: "1.1.1.1"})
+	if err == nil || !strings.Contains(err.Error(), "not found in the zone afterwards") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDeleteRecord_StillPresent(t *testing.T) {
+	c, f := newTestDNS(t)
+	f.ignoreDeletes = true
+	err := c.DeleteRecord(context.Background(), "example.com", "1")
+	if err == nil || !strings.Contains(err.Error(), "still present after delete") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRecordSentinelErrors(t *testing.T) {
+	ctx := context.Background()
+	c, _ := newTestDNS(t)
+	if _, err := c.UpdateRecord(ctx, "example.com", DNSRecord{ID: "999", Hostname: "@", Type: "A", Destination: "1.2.3.4"}); !errors.Is(err, ErrRecordNotFound) {
+		t.Errorf("update unknown id: %v, want ErrRecordNotFound", err)
+	}
+	if err := c.DeleteRecord(ctx, "example.com", "999"); !errors.Is(err, ErrRecordNotFound) {
+		t.Errorf("delete unknown id: %v, want ErrRecordNotFound", err)
+	}
+	if _, err := c.CreateRecord(ctx, "example.com", DNSRecord{Hostname: "@", Type: "A", Destination: "203.0.113.10"}); !errors.Is(err, ErrRecordExists) {
+		t.Errorf("duplicate create: %v, want ErrRecordExists", err)
+	}
+	// Updating record 2 into an exact copy of record 1 must be refused.
+	if _, err := c.UpdateRecord(ctx, "example.com", DNSRecord{ID: "2", Hostname: "@", Type: "A", Destination: "203.0.113.10"}); !errors.Is(err, ErrRecordExists) {
+		t.Errorf("update into duplicate: %v, want ErrRecordExists", err)
+	}
+}
+
+func TestRecordOps_FailFastWithoutNetwork(t *testing.T) {
+	ctx := context.Background()
+	c, f := newTestDNS(t)
+	if _, err := c.UpdateRecord(ctx, "example.com", DNSRecord{Hostname: "@", Type: "A", Destination: "1.2.3.4"}); err == nil {
+		t.Error("UpdateRecord empty id: error = nil")
+	}
+	if err := c.DeleteRecord(ctx, "example.com", ""); err == nil {
+		t.Error("DeleteRecord empty id: error = nil")
+	}
+	if _, err := c.CreateRecord(ctx, "example.com", DNSRecord{Hostname: "@", Type: "BOGUS", Destination: "x"}); err == nil {
+		t.Error("CreateRecord invalid: error = nil")
+	}
+	if got := f.calls(); len(got) != 0 {
+		t.Errorf("made HTTP calls %v, want none", got)
 	}
 }

@@ -431,11 +431,45 @@ func validateRecord(r *DNSRecord) error {
 	return nil
 }
 
+// ErrRecordNotFound and ErrRecordExists let callers branch with errors.Is.
+var (
+	ErrRecordNotFound = errors.New("dns record not found")
+	ErrRecordExists   = errors.New("dns record already exists")
+)
+
+// sameDestination compares destinations the way DNS does for the record type:
+// hostnames (CNAME/MX/NS/SRV) ignore case and a trailing dot, addresses ignore
+// case, and TXT/CAA/TLSA/DS compare exactly.
+func sameDestination(typ, a, b string) bool {
+	switch strings.ToUpper(typ) {
+	case "CNAME", "MX", "NS", "SRV":
+		return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
+	case "A", "AAAA":
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 // sameRecord reports whether a and b describe the same record content
-// (hostname and type case-insensitively; destination and priority exactly).
+// (hostname and type case-insensitively; destination per sameDestination).
 func sameRecord(a, b DNSRecord) bool {
 	return strings.EqualFold(a.Hostname, b.Hostname) && strings.EqualFold(a.Type, b.Type) &&
-		a.Destination == b.Destination && a.Priority == b.Priority
+		sameDestination(a.Type, a.Destination, b.Destination) && a.Priority == b.Priority
+}
+
+// findRecord lists the zone and returns the record with id plus the full list.
+// A missing id yields an error wrapping ErrRecordNotFound.
+func (c *DNSClient) findRecord(ctx context.Context, domain, id string) (DNSRecord, []DNSRecord, error) {
+	recs, err := c.ListRecords(ctx, domain)
+	if err != nil {
+		return DNSRecord{}, nil, err
+	}
+	for _, e := range recs {
+		if e.ID == id {
+			return e, recs, nil
+		}
+	}
+	return DNSRecord{}, recs, fmt.Errorf("record %s in %s: %w", id, domain, ErrRecordNotFound)
 }
 
 // pushRecords sends changes via updateDnsRecords and returns the zone's full
@@ -453,8 +487,9 @@ func (c *DNSClient) pushRecords(ctx context.Context, domain string, changes []re
 }
 
 // CreateRecord adds rec to the zone and returns the stored record. It refuses
-// to create an exact duplicate of an existing record (same hostname, type,
-// destination and priority) so a retried create cannot mint a second copy.
+// to create a duplicate of an existing record (same hostname, type,
+// destination and priority, compared normalization-aware) so a retried create
+// cannot mint a second copy.
 func (c *DNSClient) CreateRecord(ctx context.Context, domain string, rec DNSRecord) (*DNSRecord, error) {
 	domain, err := normalizeDomain(domain)
 	if err != nil {
@@ -470,7 +505,7 @@ func (c *DNSClient) CreateRecord(ctx context.Context, domain string, rec DNSReco
 	had := make(map[string]bool, len(before))
 	for _, e := range before {
 		if sameRecord(e, rec) {
-			return nil, fmt.Errorf("record already exists (id %s); update or delete it instead", e.ID)
+			return nil, fmt.Errorf("record %s in %s: %w; update or delete it instead", e.ID, domain, ErrRecordExists)
 		}
 		had[e.ID] = true
 	}
@@ -479,17 +514,29 @@ func (c *DNSClient) CreateRecord(ctx context.Context, domain string, rec DNSReco
 	if err != nil {
 		return nil, err
 	}
+	var fresh []DNSRecord
 	for _, a := range after {
-		if !had[a.ID] && sameRecord(a, rec) {
+		if had[a.ID] {
+			continue
+		}
+		if sameRecord(a, rec) {
 			created := a
 			return &created, nil
 		}
+		if strings.EqualFold(a.Hostname, rec.Hostname) && strings.EqualFold(a.Type, rec.Type) {
+			fresh = append(fresh, a)
+		}
+	}
+	// CCP may normalize the destination (e.g. trailing dot); accept a single new look-alike.
+	if len(fresh) == 1 {
+		return &fresh[0], nil
 	}
 	return nil, errors.New("record was submitted but not found in the zone afterwards; check with 'dns records list'")
 }
 
 // UpdateRecord replaces the record identified by rec.ID with rec and returns
-// the stored record. It fails if no record with that id exists in the zone.
+// the stored record. It fails with ErrRecordNotFound if no record with that id
+// exists, and with ErrRecordExists if the result would duplicate another record.
 func (c *DNSClient) UpdateRecord(ctx context.Context, domain string, rec DNSRecord) (*DNSRecord, error) {
 	domain, err := normalizeDomain(domain)
 	if err != nil {
@@ -501,8 +548,14 @@ func (c *DNSClient) UpdateRecord(ctx context.Context, domain string, rec DNSReco
 	if err := validateRecord(&rec); err != nil {
 		return nil, err
 	}
-	if err := c.requireRecord(ctx, domain, rec.ID); err != nil {
+	_, recs, err := c.findRecord(ctx, domain, rec.ID)
+	if err != nil {
 		return nil, err
+	}
+	for _, e := range recs {
+		if e.ID != rec.ID && sameRecord(e, rec) {
+			return nil, fmt.Errorf("record %s in %s: %w", e.ID, domain, ErrRecordExists)
+		}
 	}
 	after, err := c.pushRecords(ctx, domain, []recordWire{recordToWire(rec)})
 	if err != nil {
@@ -518,46 +571,30 @@ func (c *DNSClient) UpdateRecord(ctx context.Context, domain string, rec DNSReco
 }
 
 // DeleteRecord removes the record with the given id from the zone. CCP needs
-// the full record on delete, so it is looked up first; an unknown id is an error.
+// the full record on delete, so it is looked up first; an unknown id wraps
+// ErrRecordNotFound.
 func (c *DNSClient) DeleteRecord(ctx context.Context, domain, id string) error {
 	domain, err := normalizeDomain(domain)
 	if err != nil {
 		return err
 	}
-	recs, err := c.ListRecords(ctx, domain)
+	if id == "" {
+		return errors.New("record id must not be empty")
+	}
+	e, _, err := c.findRecord(ctx, domain, id)
 	if err != nil {
 		return err
 	}
-	for _, e := range recs {
-		if e.ID != id {
-			continue
-		}
-		w := recordToWire(e)
-		w.DeleteRecord = true
-		after, err := c.pushRecords(ctx, domain, []recordWire{w})
-		if err != nil {
-			return err
-		}
-		for _, a := range after {
-			if a.ID == id {
-				return fmt.Errorf("record %s still present after delete", id)
-			}
-		}
-		return nil
-	}
-	return fmt.Errorf("record %s not found in %s", id, domain)
-}
-
-// requireRecord returns an error unless the zone holds a record with this id.
-func (c *DNSClient) requireRecord(ctx context.Context, domain, id string) error {
-	recs, err := c.ListRecords(ctx, domain)
+	w := recordToWire(e)
+	w.DeleteRecord = true
+	after, err := c.pushRecords(ctx, domain, []recordWire{w})
 	if err != nil {
 		return err
 	}
-	for _, e := range recs {
-		if e.ID == id {
-			return nil
+	for _, a := range after {
+		if a.ID == id {
+			return fmt.Errorf("record %s still present after delete", id)
 		}
 	}
-	return fmt.Errorf("record %s not found in %s", id, domain)
+	return nil
 }
