@@ -7,7 +7,7 @@ Netcup DNS is **not** part of the SCP REST API (the live OpenAPI has only
 
 ## Credentials
 
-Create an API key and API password in the CCP (Master data > API), then export:
+Create an API key and API password in the CCP (look for the API settings under your master data), then export:
 
 ```bash
 export NETCUP_CUSTOMER_NUMBER="123456"
@@ -74,10 +74,10 @@ the same CCP credentials and writes ordinary records into the zone. `netcupctl`
 is a convenient way to check what they did:
 
 ```bash
-# cert-manager: the challenge TXT record appears while an Order is pending
+# cert-manager: the challenge TXT record (typically named _acme-challenge...) appears while an Order is pending
 netcupctl dns records list example.com --json | jq '.[] | select(.hostname | startswith("_acme-challenge"))'
 
-# ExternalDNS: records it owns carry a TXT ownership marker alongside the A/CNAME
+# ExternalDNS: typically, when its TXT registry is enabled, records it owns carry a TXT ownership marker alongside the A/CNAME
 netcupctl dns records list example.com --json | jq '.[] | select(.type == "TXT")'
 
 # clean up a stuck challenge record by hand
@@ -90,5 +90,5 @@ repository does not ship one.
 
 ## Known limits (v0.8.0)
 
-- No automatic re-login if the ~15 minute CCP session expires mid-command.
+- No automatic re-login if the CCP session expires mid-command (a limited session lifetime, about 15 minutes per netcup's docs - unverified here).
 - Terraform resources for DNS are planned for v0.8.1.
