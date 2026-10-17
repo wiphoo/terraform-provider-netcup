@@ -26,6 +26,7 @@ type fakeCCP struct {
 	nextID     int
 	lastUpdate []map[string]any
 	lastZone   json.RawMessage
+	dnssec     bool
 }
 
 func (f *fakeCCP) calls() []string {
@@ -78,7 +79,7 @@ func (f *fakeCCP) handler(t *testing.T) http.HandlerFunc {
 		case "infoDnsZone":
 			reply("success", 2000, "ok", map[string]any{
 				"name": "example.com", "ttl": "86400", "serial": "2026101701",
-				"refresh": "28800", "retry": "7200", "expire": "1209600", "dnssecstatus": false,
+				"refresh": "28800", "retry": "7200", "expire": "1209600", "dnssecstatus": f.dnssec,
 			})
 		case "updateDnsZone":
 			f.lastZone = req.Param["dnszone"]
@@ -293,13 +294,57 @@ func TestDNS_EmptyStringResponseDataIsNotDecoded(t *testing.T) {
 
 func TestNewDNSClient_EndpointValidation(t *testing.T) {
 	creds := DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"}
-	if _, err := NewDNSClient(creds, WithDNSEndpoint("http://example.com/x")); err == nil || !strings.Contains(err.Error(), "must use https") {
-		t.Errorf("http remote: error = %v, want https error", err)
+	rejects := []string{
+		"http://example.com/x", "http://localhost.evil.com", "http://127.0.0.1@evil.com",
+		"ftp://x", "https:///x", "https://user:pw@host",
 	}
-	for _, ok := range []string{"http://127.0.0.1:1234", "http://localhost:80", "https://example.com/x"} {
-		if _, err := NewDNSClient(creds, WithDNSEndpoint(ok)); err != nil {
-			t.Errorf("%s: error = %v, want nil", ok, err)
+	for _, ep := range rejects {
+		_, err := NewDNSClient(creds, WithDNSEndpoint(ep))
+		if err == nil {
+			t.Errorf("%s: error = nil, want rejection", ep)
+		} else if strings.Contains(err.Error(), "pw") {
+			t.Errorf("%s: error leaks credentials: %v", ep, err)
 		}
+	}
+	accepts := []string{
+		"http://127.0.0.1:1234", "http://localhost:80", "HTTP://LOCALHOST", "http://[::1]:80", "https://ccp.example.com/x",
+	}
+	for _, ep := range accepts {
+		if _, err := NewDNSClient(creds, WithDNSEndpoint(ep)); err != nil {
+			t.Errorf("%s: error = %v, want nil", ep, err)
+		}
+	}
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("NETCUP_DNS_ENDPOINT", "http://example.com/x")
+		if _, err := NewDNSClient(creds); err == nil {
+			t.Error("env http remote: error = nil, want rejection")
+		}
+		t.Setenv("NETCUP_DNS_ENDPOINT", "http://127.0.0.1:1234")
+		if _, err := NewDNSClient(creds); err != nil {
+			t.Errorf("env loopback: %v", err)
+		}
+	})
+}
+
+func TestDNS_DoesNotFollowRedirects(t *testing.T) {
+	var hits int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hits++ }))
+	defer target.Close()
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redir.Close()
+	c, err := NewDNSClient(DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"}, WithDNSEndpoint(redir.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ListRecords(context.Background(), "example.com")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want *APIError", err)
+	}
+	if hits != 0 {
+		t.Errorf("redirect target hit %d times, want 0", hits)
 	}
 }
 
@@ -319,8 +364,21 @@ func TestUpdateZone_SendsStringsAndValidates(t *testing.T) {
 	c, f := newTestDNS(t)
 	ctx := context.Background()
 
-	if _, err := c.UpdateZone(ctx, DNSZone{Name: "example.com", TTL: 0, Refresh: 1, Retry: 1, Expire: 1}); err == nil {
-		t.Fatal("UpdateZone with ttl=0: error = nil, want validation error")
+	for _, field := range []string{"ttl", "refresh", "retry", "expire"} {
+		z := DNSZone{Name: "example.com", TTL: 1, Refresh: 1, Retry: 1, Expire: 1}
+		switch field {
+		case "ttl":
+			z.TTL = 0
+		case "refresh":
+			z.Refresh = 0
+		case "retry":
+			z.Retry = 0
+		case "expire":
+			z.Expire = -1
+		}
+		if _, err := c.UpdateZone(ctx, z); err == nil || !strings.Contains(err.Error(), "zone "+field+" must be positive") {
+			t.Fatalf("UpdateZone %s invalid: error = %v, want %q", field, err, "zone "+field+" must be positive")
+		}
 	}
 	if got := f.calls(); len(got) != 0 {
 		t.Fatalf("validation failure must not hit the network, calls = %v", got)
@@ -335,5 +393,17 @@ func TestUpdateZone_SendsStringsAndValidates(t *testing.T) {
 	}
 	if !strings.Contains(string(f.lastZone), `"ttl":"3600"`) {
 		t.Errorf("zone body = %s, want ttl sent as a string", f.lastZone)
+	}
+}
+
+func TestGetZone_DNSSEC(t *testing.T) {
+	c, f := newTestDNS(t)
+	f.dnssec = true
+	z, err := c.GetZone(context.Background(), "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !z.DNSSEC {
+		t.Error("DNSSEC = false, want true")
 	}
 }

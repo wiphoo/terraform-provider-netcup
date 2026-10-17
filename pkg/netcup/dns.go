@@ -97,6 +97,8 @@ func WithDNSEndpoint(endpoint string) DNSOption {
 }
 
 // WithDNSHTTPClient sets a custom *http.Client (for timeouts, transports, tests).
+// The caller is responsible for the client's redirect policy: the request body
+// carries the API key and password, and the default client refuses redirects.
 func WithDNSHTTPClient(h *http.Client) DNSOption {
 	return func(c *DNSClient) {
 		if h != nil {
@@ -112,9 +114,13 @@ func NewDNSClient(creds DNSCredentials, opts ...DNSOption) (*DNSClient, error) {
 		return nil, err
 	}
 	c := &DNSClient{
-		creds:      creds,
-		endpoint:   DefaultDNSEndpoint,
-		httpClient: &http.Client{Timeout: defaultTimeout},
+		creds:    creds,
+		endpoint: DefaultDNSEndpoint,
+		httpClient: &http.Client{
+			Timeout: defaultTimeout,
+			// Redirects would re-send the credential-bearing POST body elsewhere.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 	if v := os.Getenv("NETCUP_DNS_ENDPOINT"); v != "" {
 		c.endpoint = v
@@ -125,12 +131,28 @@ func NewDNSClient(creds DNSCredentials, opts ...DNSOption) (*DNSClient, error) {
 	// Credentials travel in the request body, so refuse cleartext to non-loopback hosts.
 	u, err := url.Parse(c.endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("invalid DNS endpoint %q: %w", c.endpoint, err)
+		return nil, errors.New("invalid DNS endpoint")
 	}
-	if h := u.Hostname(); u.Scheme != "https" && h != "localhost" && !(net.ParseIP(h) != nil && net.ParseIP(h).IsLoopback()) {
-		return nil, fmt.Errorf("DNS endpoint %q must use https (credentials are sent in the request)", c.endpoint)
+	if u.User != nil {
+		return nil, fmt.Errorf("DNS endpoint %q must not contain userinfo", u.Redacted())
+	}
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("DNS endpoint %q has no host", u.Redacted())
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return nil, fmt.Errorf("DNS endpoint %q must use https (credentials are sent in the request)", u.Redacted())
 	}
 	return c, nil
+}
+
+// isLoopbackHost reports whether h is "localhost" or a loopback IP address.
+func isLoopbackHost(h string) bool {
+	h = strings.TrimSuffix(strings.ToLower(h), ".")
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ccpResponse is the CCP response envelope.
@@ -173,7 +195,7 @@ func (c *DNSClient) do(ctx context.Context, action string, param map[string]any,
 		return &DNSError{Action: action, StatusCode: r.StatusCode, Short: r.ShortMessage, Long: r.LongMessage}
 	}
 	// CCP sends "" as responsedata on some successes; never decode that into a struct.
-	if raw := bytes.TrimSpace(r.ResponseData); out != nil && len(raw) > 0 && string(raw) != `""` && string(raw) != "null" {
+	if raw := bytes.TrimSpace(r.ResponseData); out != nil && !bytes.Equal(raw, []byte(`""`)) && !bytes.Equal(raw, []byte("null")) && len(raw) > 0 {
 		if err := json.Unmarshal(r.ResponseData, out); err != nil {
 			return fmt.Errorf("decoding %s data: %w", action, err)
 		}
@@ -365,8 +387,13 @@ func (c *DNSClient) UpdateZone(ctx context.Context, z DNSZone) (*DNSZone, error)
 	if err != nil {
 		return nil, err
 	}
-	if z.TTL <= 0 || z.Refresh <= 0 || z.Retry <= 0 || z.Expire <= 0 {
-		return nil, errors.New("zone ttl, refresh, retry and expire must be positive")
+	for _, f := range []struct {
+		name string
+		v    int
+	}{{"ttl", z.TTL}, {"refresh", z.Refresh}, {"retry", z.Retry}, {"expire", z.Expire}} {
+		if f.v <= 0 {
+			return nil, fmt.Errorf("zone %s must be positive", f.name)
+		}
 	}
 	wire := zoneWire{
 		Name: domain, TTL: flexInt(z.TTL), Serial: flexInt(z.Serial), Refresh: flexInt(z.Refresh),
