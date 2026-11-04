@@ -32,6 +32,8 @@ func run(args []string) error {
 		return cmdServer(args[1:])
 	case "rdns":
 		return cmdRDNS(args[1:])
+	case "dns":
+		return cmdDNS(args[1:])
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -55,6 +57,7 @@ Commands:
   auth       OAuth 2.0 device-authorization login and token refresh
   server     List and manage servers
   rdns       Manage reverse DNS entries
+  dns        Manage DNS zones and records (CCP API)
   version    Print the netcupctl version
   help       Show this help
 `)

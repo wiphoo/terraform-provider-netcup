@@ -167,15 +167,27 @@ Scope:
 - [x] Risk write-up and warnings
 - [x] Release preparation
 
-## v0.8.0 - DNS Support
+## v0.8.0 - DNS Support (CLI + SDK) - *Shipped*
 
 Scope:
 
-- DNS zones
-- DNS records
-- Examples for cert-manager and ExternalDNS
+- DNS zone get / update (SOA timings)
+- DNS record list / add / update / delete
+- Verification examples for cert-manager and ExternalDNS ([docs/DNS.md](DNS.md))
 
-(CLI first, then provider, following the release strategy above.)
+Shipped **CLI + SDK only**: `netcupctl dns zone|records ...` and the
+`DNSClient` in `pkg/netcup`. Netcup DNS is served by the CCP JSON API (the SCP
+OpenAPI has no DNS endpoints), so it authenticates with the customer number +
+API key + API password instead of the OIDC device flow.
+
+## v0.8.1 - DNS Support (Terraform provider)
+
+Scope:
+
+- `netcup_dns_zone` resource
+- `netcup_dns_record` resource (import support)
+- Provider credentials for the CCP DNS API
+- go-vcr replay and acceptance tests
 
 ## v1.0.0
 
