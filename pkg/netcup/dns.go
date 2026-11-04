@@ -12,6 +12,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 // DefaultDNSEndpoint is the netcup CCP JSON API endpoint that serves DNS
@@ -272,13 +274,18 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 
 func (f flexInt) MarshalJSON() ([]byte, error) { return json.Marshal(strconv.Itoa(int(f))) }
 
-// normalizeDomain lowercases a domain and strips whitespace and a trailing dot.
+// normalizeDomain lowercases a domain, strips whitespace and a trailing dot,
+// and converts internationalized names to Punycode (the form CCP expects).
 func normalizeDomain(d string) (string, error) {
 	d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
 	if d == "" {
 		return "", errors.New("domain must not be empty")
 	}
-	return d, nil
+	ascii, err := idna.Lookup.ToASCII(d)
+	if err != nil {
+		return "", fmt.Errorf("invalid domain %q: %w", d, err)
+	}
+	return ascii, nil
 }
 
 // DNSRecord is one record of a zone.
@@ -403,6 +410,11 @@ func (c *DNSClient) UpdateZone(ctx context.Context, z DNSZone) (*DNSZone, error)
 	if err := c.authed(ctx, "updateDnsZone", map[string]any{"domainname": domain, "dnszone": wire}, &out); err != nil {
 		return nil, err
 	}
+	if out.Name == "" {
+		// CCP may acknowledge the update without echoing the zone; re-read it
+		// so callers never see an empty zone with zero SOA values.
+		return c.GetZone(ctx, domain)
+	}
 	updated := out.zone()
 	return &updated, nil
 }
@@ -473,7 +485,8 @@ func (c *DNSClient) findRecord(ctx context.Context, domain, id string) (DNSRecor
 }
 
 // pushRecords sends changes via updateDnsRecords and returns the zone's full
-// record list as CCP reports it afterwards.
+// record list afterwards. CCP may acknowledge the update with an empty
+// response, so a successful push with no records is confirmed by re-listing.
 func (c *DNSClient) pushRecords(ctx context.Context, domain string, changes []recordWire) ([]DNSRecord, error) {
 	var set recordSet
 	err := c.authed(ctx, "updateDnsRecords", map[string]any{
@@ -483,7 +496,10 @@ func (c *DNSClient) pushRecords(ctx context.Context, domain string, changes []re
 	if err != nil {
 		return nil, err
 	}
-	return set.records(), nil
+	if recs := set.records(); len(recs) > 0 {
+		return recs, nil
+	}
+	return c.ListRecords(ctx, domain)
 }
 
 // CreateRecord adds rec to the zone and returns the stored record. It refuses

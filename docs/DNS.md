@@ -92,3 +92,5 @@ repository does not ship one.
 
 - No automatic re-login if the CCP session expires mid-command (a limited session lifetime, about 15 minutes per netcup's docs - unverified here).
 - Terraform resources for DNS are planned for v0.8.1.
+
+> **Limitation:** this uses the legacy CCP API. Zones created in or migrated to netcup CloudDNS are not reachable through it and will fail; manage those via the CloudDNS API instead.

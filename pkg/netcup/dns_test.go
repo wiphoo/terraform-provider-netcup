@@ -670,3 +670,10 @@ func TestSameDestination(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeDomainPunycode(t *testing.T) {
+	got, err := normalizeDomain(" Bücher.Example. ")
+	if err != nil || got != "xn--bcher-kva.example" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
