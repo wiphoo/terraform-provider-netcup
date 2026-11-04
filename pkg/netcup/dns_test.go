@@ -677,3 +677,16 @@ func TestNormalizeDomainPunycode(t *testing.T) {
 		t.Fatalf("got %q, %v", got, err)
 	}
 }
+
+func TestSameDestinationIPv6(t *testing.T) {
+	if !sameDestination("AAAA", "2001:db8::1", "2001:0db8:0:0:0:0:0:1") {
+		t.Fatal("equivalent IPv6 forms must match")
+	}
+}
+
+func TestValidateRecordKeepsTXTWhitespace(t *testing.T) {
+	r := DNSRecord{Hostname: "@", Type: "txt", Destination: " v=spf1 "}
+	if err := validateRecord(&r); err != nil || r.Destination != " v=spf1 " {
+		t.Fatalf("got %q, %v", r.Destination, err)
+	}
+}

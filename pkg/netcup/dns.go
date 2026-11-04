@@ -429,13 +429,16 @@ var dnsRecordTypes = map[string]bool{
 func validateRecord(r *DNSRecord) error {
 	r.Hostname = strings.TrimSpace(r.Hostname)
 	r.Type = strings.ToUpper(strings.TrimSpace(r.Type))
-	r.Destination = strings.TrimSpace(r.Destination)
+	// TXT payloads are significant verbatim; other destinations are trimmed.
+	if r.Type != "TXT" {
+		r.Destination = strings.TrimSpace(r.Destination)
+	}
 	switch {
 	case r.Hostname == "":
 		return errors.New("record hostname must not be empty (use @ for the apex)")
 	case !dnsRecordTypes[r.Type]:
 		return fmt.Errorf("unsupported record type %q", r.Type)
-	case r.Destination == "":
+	case strings.TrimSpace(r.Destination) == "":
 		return errors.New("record destination must not be empty")
 	case r.Priority < 0:
 		return errors.New("record priority must not be negative")
@@ -450,13 +453,17 @@ var (
 )
 
 // sameDestination compares destinations the way DNS does for the record type:
-// hostnames (CNAME/MX/NS/SRV) ignore case and a trailing dot, addresses ignore
-// case, and TXT/CAA/TLSA/DS compare exactly.
+// hostnames (CNAME/MX/NS/SRV) ignore case and a trailing dot, addresses compare
+// by parsed IP value, and TXT/CAA/TLSA/DS compare exactly.
 func sameDestination(typ, a, b string) bool {
 	switch strings.ToUpper(typ) {
 	case "CNAME", "MX", "NS", "SRV":
 		return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
 	case "A", "AAAA":
+		ia, ib := net.ParseIP(a), net.ParseIP(b)
+		if ia != nil && ib != nil {
+			return ia.Equal(ib)
+		}
 		return strings.EqualFold(a, b)
 	}
 	return a == b
