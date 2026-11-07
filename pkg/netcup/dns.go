@@ -21,7 +21,8 @@ import (
 const DefaultDNSEndpoint = "https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON"
 
 // DNSCredentials are the CCP API credentials: the customer number plus an API
-// key and API password created in the CCP ("Master data" > "API").
+// key and API password created in the CCP (look for the API settings under your
+// master data).
 type DNSCredentials struct {
 	CustomerNumber string
 	APIKey         string
@@ -160,7 +161,7 @@ func isLoopbackHost(h string) bool {
 // ccpResponse is the CCP response envelope.
 type ccpResponse struct {
 	Status       string          `json:"status"`
-	StatusCode   int             `json:"statuscode"`
+	StatusCode   flexInt         `json:"statuscode"`
 	ShortMessage string          `json:"shortmessage"`
 	LongMessage  string          `json:"longmessage"`
 	ResponseData json.RawMessage `json:"responsedata"`
@@ -194,7 +195,7 @@ func (c *DNSClient) do(ctx context.Context, action string, param map[string]any,
 		return fmt.Errorf("decoding %s response: %w", action, err)
 	}
 	if r.Status != "success" {
-		return &DNSError{Action: action, StatusCode: r.StatusCode, Short: r.ShortMessage, Long: r.LongMessage}
+		return &DNSError{Action: action, StatusCode: int(r.StatusCode), Short: r.ShortMessage, Long: r.LongMessage}
 	}
 	// CCP sends "" as responsedata on some successes; never decode that into a struct.
 	if raw := bytes.TrimSpace(r.ResponseData); out != nil && !bytes.Equal(raw, []byte(`""`)) && !bytes.Equal(raw, []byte("null")) && len(raw) > 0 {
@@ -273,6 +274,23 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 }
 
 func (f flexInt) MarshalJSON() ([]byte, error) { return json.Marshal(strconv.Itoa(int(f))) }
+
+// flexBool decodes a JSON bool that CCP may send as true/false, "true"/"false"
+// or "1"/"0". It encodes as a plain JSON bool.
+type flexBool bool
+
+func (f *flexBool) UnmarshalJSON(b []byte) error {
+	s := strings.ToLower(strings.Trim(strings.TrimSpace(string(b)), `"`))
+	switch s {
+	case "true", "1":
+		*f = true
+	case "false", "0", "", "null":
+		*f = false
+	default:
+		return fmt.Errorf("invalid bool %q", s)
+	}
+	return nil
+}
 
 // normalizeDomain lowercases a domain, strips whitespace and a trailing dot,
 // and converts internationalized names to Punycode (the form CCP expects).
@@ -355,19 +373,19 @@ type DNSZone struct {
 }
 
 type zoneWire struct {
-	Name         string  `json:"name"`
-	TTL          flexInt `json:"ttl"`
-	Serial       flexInt `json:"serial"`
-	Refresh      flexInt `json:"refresh"`
-	Retry        flexInt `json:"retry"`
-	Expire       flexInt `json:"expire"`
-	DNSSECStatus bool    `json:"dnssecstatus"`
+	Name         string   `json:"name"`
+	TTL          flexInt  `json:"ttl"`
+	Serial       flexInt  `json:"serial"`
+	Refresh      flexInt  `json:"refresh"`
+	Retry        flexInt  `json:"retry"`
+	Expire       flexInt  `json:"expire"`
+	DNSSECStatus flexBool `json:"dnssecstatus"`
 }
 
 func (w zoneWire) zone() DNSZone {
 	return DNSZone{
 		Name: w.Name, TTL: int(w.TTL), Serial: int(w.Serial), Refresh: int(w.Refresh),
-		Retry: int(w.Retry), Expire: int(w.Expire), DNSSEC: w.DNSSECStatus,
+		Retry: int(w.Retry), Expire: int(w.Expire), DNSSEC: bool(w.DNSSECStatus),
 	}
 }
 
@@ -404,7 +422,7 @@ func (c *DNSClient) UpdateZone(ctx context.Context, z DNSZone) (*DNSZone, error)
 	}
 	wire := zoneWire{
 		Name: domain, TTL: flexInt(z.TTL), Serial: flexInt(z.Serial), Refresh: flexInt(z.Refresh),
-		Retry: flexInt(z.Retry), Expire: flexInt(z.Expire), DNSSECStatus: z.DNSSEC,
+		Retry: flexInt(z.Retry), Expire: flexInt(z.Expire), DNSSECStatus: flexBool(z.DNSSEC),
 	}
 	var out zoneWire
 	if err := c.authed(ctx, "updateDnsZone", map[string]any{"domainname": domain, "dnszone": wire}, &out); err != nil {

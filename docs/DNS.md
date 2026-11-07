@@ -90,6 +90,7 @@ repository does not ship one.
 
 ## Known limits (v0.8.0)
 
+- **Not yet verified against a live CCP account.** The request/response shapes follow netcup's published CCP JSON API and are covered by mock-server tests only. The client tolerates numbers and booleans sent as strings, but report anything that behaves differently.
 - No automatic re-login if the CCP session expires mid-command (a limited session lifetime, about 15 minutes per netcup's docs - unverified here).
 - Terraform resources for DNS are planned for v0.8.1.
 

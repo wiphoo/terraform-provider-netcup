@@ -690,3 +690,22 @@ func TestValidateRecordKeepsTXTWhitespace(t *testing.T) {
 		t.Fatalf("got %q, %v", r.Destination, err)
 	}
 }
+
+func TestCCPTolerantWireTypes(t *testing.T) {
+	var r ccpResponse
+	if err := json.Unmarshal([]byte(`{"status":"error","statuscode":"4001","shortmessage":"x"}`), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.StatusCode != 4001 {
+		t.Errorf("StatusCode = %d, want 4001", r.StatusCode)
+	}
+	for in, want := range map[string]bool{`true`: true, `"true"`: true, `"1"`: true, `false`: false, `"0"`: false, `""`: false} {
+		var w zoneWire
+		if err := json.Unmarshal([]byte(`{"dnssecstatus":`+in+`}`), &w); err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if bool(w.DNSSECStatus) != want {
+			t.Errorf("dnssecstatus %s = %v, want %v", in, w.DNSSECStatus, want)
+		}
+	}
+}

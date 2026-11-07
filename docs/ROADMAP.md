@@ -178,7 +178,8 @@ Scope:
 Shipped **CLI + SDK only**: `netcupctl dns zone|records ...` and the
 `DNSClient` in `pkg/netcup`. Netcup DNS is served by the CCP JSON API (the SCP
 OpenAPI has no DNS endpoints), so it authenticates with the customer number +
-API key + API password instead of the OIDC device flow.
+API key + API password instead of the OIDC device flow. Not yet verified
+against a live CCP account (mock-server tests only).
 
 ## v0.8.1 - DNS Support (Terraform provider)
 

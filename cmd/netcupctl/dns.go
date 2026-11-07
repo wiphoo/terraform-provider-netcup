@@ -46,7 +46,7 @@ Usage:
 
 DNS uses the CCP API, not the SCP device login. Set:
   NETCUP_CUSTOMER_NUMBER      your customer number
-  NETCUP_DNS_API_KEY          API key from the CCP (Master data > API)
+  NETCUP_DNS_API_KEY          API key created in the CCP (API settings)
   NETCUP_DNS_API_PASSWORD     API password from the CCP
 
 Destinations starting with '-': put '--' before them (or use --destination=-x).
