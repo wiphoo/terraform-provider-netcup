@@ -24,6 +24,16 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+### Added
+
+- `netcupctl dns zone get|update` and `netcupctl dns records list|add|update|delete`
+  for DNS management through the CCP JSON API (authenticated with
+  `NETCUP_CUSTOMER_NUMBER`, `NETCUP_DNS_API_KEY`, `NETCUP_DNS_API_PASSWORD`).
+  The endpoint override `NETCUP_DNS_ENDPOINT` must be https (http only for loopback).
+- SDK: `netcup.DNSClient` (`GetZone`, `UpdateZone`, `ListRecords`, `CreateRecord`,
+  `UpdateRecord`, `DeleteRecord`).
+- `docs/DNS.md`: credentials, usage, and cert-manager / ExternalDNS verification examples.
+
 ## [0.7.2] - 2026-10-05
 
 Documentation and examples only; no provider code changes.

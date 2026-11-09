@@ -5,8 +5,9 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/wiphoo/terraform-provider-netcup.svg)](https://pkg.go.dev/github.com/wiphoo/terraform-provider-netcup)
 
 A modern, open-source Terraform provider and CLI for [Netcup](https://www.netcup.de/)
-infrastructure. It targets the SCP (Server Control Panel) REST API first, with
-CCP/DNS support planned in later releases.
+infrastructure. It targets the SCP (Server Control Panel) REST API first. DNS
+zone and record management is available in `netcupctl` and the Go SDK (v0.8.0,
+see [docs/DNS.md](docs/DNS.md)); Terraform DNS resources are planned for v0.8.1.
 
 ## Status
 
@@ -42,6 +43,7 @@ netcupctl server list
 netcupctl server get <id>
 netcupctl rdns get <ip>
 netcupctl rdns set <ip> <hostname>
+netcupctl dns records list <domain>   # CCP credentials, see docs/DNS.md
 netcupctl version
 ```
 
@@ -380,6 +382,7 @@ the PR process. Please report security vulnerabilities privately — see
 ## Documentation
 
 - [Roadmap](docs/ROADMAP.md)
+- [DNS (netcupctl dns)](docs/DNS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [MVP Specification](docs/MVP.md)
 - [Contributing](CONTRIBUTING.md)
