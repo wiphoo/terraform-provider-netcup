@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
@@ -66,8 +69,17 @@ func withDNS(fn func(context.Context, *netcup.DNSClient) error) error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
-	defer func() { _ = c.Logout(ctx) }()
+	if v := os.Getenv("NETCUP_DNS_ENDPOINT"); v != "" && v != netcup.DefaultDNSEndpoint {
+		fmt.Fprintln(os.Stderr, "netcupctl: using custom DNS endpoint from NETCUP_DNS_ENDPOINT; credentials are sent there")
+	}
+	// Ctrl-C cancels the call but still logs out, on a fresh short context.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	defer func() {
+		lctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = c.Logout(lctx)
+	}()
 	return fn(ctx, c)
 }
 
@@ -99,7 +111,7 @@ func printDNSZone(out io.Writer, z *netcup.DNSZone, asJSON bool) error {
 		return writeDNSJSON(out, z)
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintf(tw, "Domain:\t%s\n", z.Name)
+	fmt.Fprintf(tw, "Domain:\t%s\n", netcup.SanitizeText(z.Name))
 	fmt.Fprintf(tw, "TTL:\t%d\n", z.TTL)
 	fmt.Fprintf(tw, "Serial:\t%d\n", z.Serial)
 	fmt.Fprintf(tw, "Refresh:\t%d\n", z.Refresh)
@@ -113,7 +125,8 @@ func printDNSRecords(out io.Writer, recs []netcup.DNSRecord) error {
 	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "ID\tHOSTNAME\tTYPE\tPRIORITY\tDESTINATION")
 	for _, r := range recs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", r.ID, r.Hostname, r.Type, r.Priority, r.Destination)
+		clean := netcup.SanitizeText
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", clean(r.ID), clean(r.Hostname), clean(r.Type), r.Priority, clean(r.Destination))
 	}
 	return tw.Flush()
 }
