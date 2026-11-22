@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -29,9 +30,10 @@ type fakeCCP struct {
 	dnssec     bool
 
 	// failure-injection knobs
-	normalizeDest bool // strip a trailing dot from destinations when storing
-	dropCreates   bool // accept creates but do not store them
-	ignoreDeletes bool // accept deletes but keep the record
+	normalizeDest bool   // strip a trailing dot from destinations when storing
+	dropCreates   bool   // accept creates but do not store them
+	ignoreDeletes bool   // accept deletes but keep the record
+	rewriteDest   string // store creates with this destination instead
 }
 
 func (f *fakeCCP) calls() []string {
@@ -123,6 +125,9 @@ func (f *fakeCCP) handler(t *testing.T) http.HandlerFunc {
 					continue
 				}
 				in["state"] = "yes"
+				if f.rewriteDest != "" && id == "" {
+					in["destination"] = f.rewriteDest
+				}
 				if d, ok := in["destination"].(string); ok && f.normalizeDest {
 					in["destination"] = strings.TrimSuffix(d, ".")
 				}
@@ -375,7 +380,7 @@ func TestGetZone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetZone: %v", err)
 	}
-	want := DNSZone{Name: "example.com", TTL: 86400, Serial: 2026101701, Refresh: 28800, Retry: 7200, Expire: 1209600}
+	want := DNSZone{Name: "example.com", TTL: 86400, Serial: 2026101701, Refresh: 28800, Retry: 7200, Expire: 1209600, dnssecKnown: true}
 	if *z != want {
 		t.Errorf("zone = %+v, want %+v", *z, want)
 	}
@@ -442,6 +447,8 @@ func TestValidateRecord(t *testing.T) {
 		{"bad type", DNSRecord{Hostname: "@", Type: "BOGUS", Destination: "x"}, "type"},
 		{"empty destination", DNSRecord{Hostname: "@", Type: "A"}, "destination"},
 		{"negative priority", DNSRecord{Hostname: "@", Type: "MX", Destination: "m", Priority: -1}, "priority"},
+		{"priority too large", DNSRecord{Hostname: "@", Type: "MX", Destination: "m", Priority: 65536}, "priority"},
+		{"max priority", DNSRecord{Hostname: "@", Type: "MX", Destination: "m", Priority: 65535}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -699,13 +706,172 @@ func TestCCPTolerantWireTypes(t *testing.T) {
 	if r.StatusCode != 4001 {
 		t.Errorf("StatusCode = %d, want 4001", r.StatusCode)
 	}
-	for in, want := range map[string]bool{`true`: true, `"true"`: true, `"1"`: true, `false`: false, `"0"`: false, `""`: false} {
+	for in, want := range map[string]bool{`true`: true, `"true"`: true, `"1"`: true, `false`: false, `"0"`: false} {
 		var w zoneWire
 		if err := json.Unmarshal([]byte(`{"dnssecstatus":`+in+`}`), &w); err != nil {
 			t.Fatalf("%s: %v", in, err)
 		}
-		if bool(w.DNSSECStatus) != want {
-			t.Errorf("dnssecstatus %s = %v, want %v", in, w.DNSSECStatus, want)
+		if got, known := parseWireBool(w.DNSSECStatus); !known || got != want {
+			t.Errorf("dnssecstatus %s = %v/%v, want %v/true", in, got, known, want)
 		}
+	}
+	for _, in := range []string{`""`, `null`, ``} {
+		if _, known := parseWireBool(json.RawMessage(in)); known {
+			t.Errorf("dnssecstatus %q reported as known", in)
+		}
+	}
+}
+
+func TestUpdateZone_DNSSECOnlySentWhenKnown(t *testing.T) {
+	c, f := newTestDNS(t)
+	ctx := context.Background()
+	f.dnssec = true
+	z, err := c.GetZone(ctx, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	z.TTL = 3600
+	if _, err := c.UpdateZone(ctx, *z); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(f.lastZone), `"dnssecstatus":true`) {
+		t.Errorf("zone body = %s, want dnssecstatus true written back", f.lastZone)
+	}
+	// A zone not read with a DNSSEC status must not send one (would disable it).
+	if _, err := c.UpdateZone(ctx, DNSZone{Name: "example.com", TTL: 1, Refresh: 1, Retry: 1, Expire: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(f.lastZone), "dnssecstatus") {
+		t.Errorf("zone body = %s, want no dnssecstatus", f.lastZone)
+	}
+}
+
+func TestGetZone_AbsentDNSSECIsNotWrittenBack(t *testing.T) {
+	var sent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Action string          `json:"action"`
+			Param  json.RawMessage `json:"param"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		data := any("")
+		switch req.Action {
+		case "login":
+			data = map[string]string{"apisessionid": "s"}
+		case "infoDnsZone":
+			data = map[string]any{"name": "example.com", "ttl": "1", "serial": "1", "refresh": "1", "retry": "1", "expire": "1", "dnssecstatus": ""}
+		case "updateDnsZone":
+			sent = string(req.Param)
+			data = map[string]any{"name": "example.com", "ttl": "2", "refresh": "1", "retry": "1", "expire": "1"}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "statuscode": 2000, "responsedata": data})
+	}))
+	defer srv.Close()
+	c, err := NewDNSClient(DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"}, WithDNSEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := c.GetZone(context.Background(), "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	z.TTL = 2
+	if _, err := c.UpdateZone(context.Background(), *z); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(sent, "dnssecstatus") {
+		t.Errorf("update sent %s, want no dnssecstatus", sent)
+	}
+}
+
+func TestDNS_ResponseSizeLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","responsedata":"`))
+		_, _ = w.Write(make([]byte, maxDNSResponse))
+	}))
+	defer srv.Close()
+	c, err := NewDNSClient(DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"}, WithDNSEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ListRecords(context.Background(), "example.com")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want size-limit error", err)
+	}
+}
+
+func TestDNSError_StripsControlCharacters(t *testing.T) {
+	msg := (&DNSError{Action: "x", StatusCode: 1, Short: "a\x1b[31mred", Long: "b\nc"}).Error()
+	if strings.ContainsAny(msg, "\x1b\n") {
+		t.Errorf("message %q contains control characters", msg)
+	}
+}
+
+func TestWithDNSHTTPClient_KeepsNoRedirectProtection(t *testing.T) {
+	var hits int
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	defer target.Close()
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redir.Close()
+	custom := &http.Client{}
+	c, err := NewDNSClient(DNSCredentials{CustomerNumber: "1", APIKey: "k", APIPassword: "p"},
+		WithDNSEndpoint(redir.URL), WithDNSHTTPClient(custom))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListRecords(context.Background(), "example.com"); err == nil {
+		t.Fatal("want error from the redirect response")
+	}
+	if hits != 0 {
+		t.Errorf("redirect target hit %d times, want 0", hits)
+	}
+	if custom.CheckRedirect != nil {
+		t.Error("caller's client was mutated")
+	}
+}
+
+func TestDNS_HTTPErrorDoesNotEchoBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		http.Error(w, string(b), http.StatusBadGateway) // reflects the request, credentials included
+	}))
+	defer srv.Close()
+	c, err := NewDNSClient(DNSCredentials{CustomerNumber: "1", APIKey: "key-abc", APIPassword: "s3cret-pass"}, WithDNSEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ListRecords(context.Background(), "example.com")
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("error = %v, want HTTP 502", err)
+	}
+	if strings.Contains(err.Error(), "s3cret-pass") || strings.Contains(err.Error(), "key-abc") {
+		t.Errorf("error leaks request body: %v", err)
+	}
+}
+
+func TestCreateRecord_RejectsLookAlikeWithDifferentDestination(t *testing.T) {
+	c, f := newTestDNS(t)
+	f.rewriteDest = "198.51.100.99" // stored record differs from what was sent
+	_, err := c.CreateRecord(context.Background(), "example.com", DNSRecord{Hostname: "w", Type: "A", Destination: "192.0.2.1"})
+	if err == nil {
+		t.Fatal("want error: stored record does not match what was sent")
+	}
+}
+
+func TestDNSClient_ConcurrentUse(t *testing.T) {
+	c, _ := newTestDNS(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.ListRecords(context.Background(), "example.com")
+		}()
+	}
+	wg.Wait()
+	if err := c.Logout(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

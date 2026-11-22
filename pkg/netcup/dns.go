@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode"
 
 	"golang.org/x/net/idna"
 )
@@ -72,23 +75,36 @@ type DNSError struct {
 }
 
 func (e *DNSError) Error() string {
-	msg := fmt.Sprintf("netcup DNS API %s failed (%d): %s", e.Action, e.StatusCode, e.Short)
+	msg := fmt.Sprintf("netcup DNS API %s failed (%d): %s", e.Action, e.StatusCode, SanitizeText(e.Short))
 	if e.Long != "" {
-		msg += ": " + e.Long
+		msg += ": " + SanitizeText(e.Long)
 	}
 	return msg
+}
+
+// SanitizeText replaces control characters (including ESC, so terminal escape
+// sequences) in server-supplied text with '?' before it is shown to a user.
+func SanitizeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // DNSClient talks to the CCP DNS API. Construct it with NewDNSClient. It logs
 // in lazily on first use and caches the session id; call Logout when done.
 //
-// ponytail: not goroutine-safe and no re-login on session expiry (~15 min);
-// add a mutex + retry-on-4001 when the long-running provider consumes it.
+// Session state is mutex-guarded. ponytail: no re-login on session expiry
+// (~15 min); add retry-on-4001 when the long-running provider consumes it.
 type DNSClient struct {
 	creds      DNSCredentials
 	endpoint   string
 	httpClient *http.Client
-	sessionID  string
+
+	mu        sync.Mutex // guards sessionID
+	sessionID string
 }
 
 // DNSOption customizes a DNSClient during construction.
@@ -100,15 +116,27 @@ func WithDNSEndpoint(endpoint string) DNSOption {
 }
 
 // WithDNSHTTPClient sets a custom *http.Client (for timeouts, transports, tests).
-// The caller is responsible for the client's redirect policy: the request body
-// carries the API key and password, and the default client refuses redirects.
+// The request body carries the API key and password, so the client is
+// shallow-copied and, when it has no CheckRedirect of its own, refuses redirects.
 func WithDNSHTTPClient(h *http.Client) DNSOption {
 	return func(c *DNSClient) {
-		if h != nil {
-			c.httpClient = h
+		if h == nil {
+			return
 		}
+		hc := *h
+		if hc.CheckRedirect == nil {
+			hc.CheckRedirect = noRedirect
+		}
+		c.httpClient = &hc
 	}
 }
+
+// noRedirect would re-send the credential-bearing POST body elsewhere, so it
+// stops at the first response.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// maxDNSResponse bounds a decoded CCP success body.
+const maxDNSResponse = 4 << 20 // 4 MiB
 
 // NewDNSClient creates a DNSClient. The endpoint defaults to DefaultDNSEndpoint,
 // is overridden by NETCUP_DNS_ENDPOINT when set, and finally by any options.
@@ -120,9 +148,8 @@ func NewDNSClient(creds DNSCredentials, opts ...DNSOption) (*DNSClient, error) {
 		creds:    creds,
 		endpoint: DefaultDNSEndpoint,
 		httpClient: &http.Client{
-			Timeout: defaultTimeout,
-			// Redirects would re-send the credential-bearing POST body elsewhere.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			Timeout:       defaultTimeout,
+			CheckRedirect: noRedirect,
 		},
 	}
 	if v := os.Getenv("NETCUP_DNS_ENDPOINT"); v != "" {
@@ -187,11 +214,19 @@ func (c *DNSClient) do(ctx context.Context, action string, param map[string]any,
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
-		return newAPIError(resp)
+		// Status only: the body may echo the credential-bearing request.
+		return &APIError{StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDNSResponse+1))
+	if err != nil {
+		return fmt.Errorf("reading %s response: %w", action, err)
+	}
+	if len(raw) > maxDNSResponse {
+		return fmt.Errorf("netcup DNS %s response exceeds %d bytes", action, maxDNSResponse)
+	}
 	var r ccpResponse
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	if err := json.Unmarshal(raw, &r); err != nil {
 		return fmt.Errorf("decoding %s response: %w", action, err)
 	}
 	if r.Status != "success" {
@@ -225,34 +260,52 @@ func (c *DNSClient) login(ctx context.Context) error {
 	return nil
 }
 
-// authed runs action with the session credentials merged into param, logging
-// in first when there is no session yet.
-func (c *DNSClient) authed(ctx context.Context, action string, extra map[string]any, out any) error {
+// session returns the session id, logging in first when there is none.
+func (c *DNSClient) session(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.sessionID == "" {
 		if err := c.login(ctx); err != nil {
-			return err
+			return "", err
 		}
 	}
+	return c.sessionID, nil
+}
+
+// sessionParams merges the session credentials into extra.
+func (c *DNSClient) sessionParams(id string, extra map[string]any) map[string]any {
 	param := map[string]any{
 		"customernumber": c.creds.CustomerNumber,
 		"apikey":         c.creds.APIKey,
-		"apisessionid":   c.sessionID,
+		"apisessionid":   id,
 	}
 	for k, v := range extra {
 		param[k] = v
 	}
-	return c.do(ctx, action, param, out)
+	return param
+}
+
+// authed runs action with the session credentials merged into param, logging
+// in first when there is no session yet.
+func (c *DNSClient) authed(ctx context.Context, action string, extra map[string]any, out any) error {
+	id, err := c.session(ctx)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, action, c.sessionParams(id, extra), out)
 }
 
 // Logout ends the CCP session. It is a no-op when no session is open, and the
 // local session is cleared even if the server call fails.
 func (c *DNSClient) Logout(ctx context.Context) error {
-	if c.sessionID == "" {
+	c.mu.Lock()
+	id := c.sessionID
+	c.sessionID = ""
+	c.mu.Unlock()
+	if id == "" {
 		return nil
 	}
-	err := c.authed(ctx, "logout", nil, nil)
-	c.sessionID = ""
-	return err
+	return c.do(ctx, "logout", c.sessionParams(id, nil), nil)
 }
 
 // flexInt decodes a JSON number that CCP may send either as a number or as a
@@ -275,21 +328,16 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 
 func (f flexInt) MarshalJSON() ([]byte, error) { return json.Marshal(strconv.Itoa(int(f))) }
 
-// flexBool decodes a JSON bool that CCP may send as true/false, "true"/"false"
-// or "1"/"0". It encodes as a plain JSON bool.
-type flexBool bool
-
-func (f *flexBool) UnmarshalJSON(b []byte) error {
-	s := strings.ToLower(strings.Trim(strings.TrimSpace(string(b)), `"`))
-	switch s {
+// parseWireBool decodes a CCP bool sent as true/false, "true"/"false" or
+// "1"/"0". known is false for absent, null, empty or unrecognised values.
+func parseWireBool(raw json.RawMessage) (v, known bool) {
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(string(raw)), `"`)) {
 	case "true", "1":
-		*f = true
-	case "false", "0", "", "null":
-		*f = false
-	default:
-		return fmt.Errorf("invalid bool %q", s)
+		return true, true
+	case "false", "0":
+		return false, true
 	}
-	return nil
+	return false, false
 }
 
 // normalizeDomain lowercases a domain, strips whitespace and a trailing dot,
@@ -370,22 +418,28 @@ type DNSZone struct {
 	Retry   int    `json:"retry"`
 	Expire  int    `json:"expire"`
 	DNSSEC  bool   `json:"dnssec"`
+
+	// dnssecKnown is set by GetZone when CCP reported the DNSSEC status. UpdateZone
+	// only writes DNSSEC back when it is set, so a zone built without it (or read
+	// without it) cannot flip DNSSEC off.
+	dnssecKnown bool
 }
 
 type zoneWire struct {
-	Name         string   `json:"name"`
-	TTL          flexInt  `json:"ttl"`
-	Serial       flexInt  `json:"serial"`
-	Refresh      flexInt  `json:"refresh"`
-	Retry        flexInt  `json:"retry"`
-	Expire       flexInt  `json:"expire"`
-	DNSSECStatus flexBool `json:"dnssecstatus"`
+	Name         string          `json:"name"`
+	TTL          flexInt         `json:"ttl"`
+	Serial       flexInt         `json:"serial"`
+	Refresh      flexInt         `json:"refresh"`
+	Retry        flexInt         `json:"retry"`
+	Expire       flexInt         `json:"expire"`
+	DNSSECStatus json.RawMessage `json:"dnssecstatus,omitempty"`
 }
 
 func (w zoneWire) zone() DNSZone {
+	dnssec, known := parseWireBool(w.DNSSECStatus)
 	return DNSZone{
 		Name: w.Name, TTL: int(w.TTL), Serial: int(w.Serial), Refresh: int(w.Refresh),
-		Retry: int(w.Retry), Expire: int(w.Expire), DNSSEC: bool(w.DNSSECStatus),
+		Retry: int(w.Retry), Expire: int(w.Expire), DNSSEC: dnssec, dnssecKnown: known,
 	}
 }
 
@@ -422,7 +476,10 @@ func (c *DNSClient) UpdateZone(ctx context.Context, z DNSZone) (*DNSZone, error)
 	}
 	wire := zoneWire{
 		Name: domain, TTL: flexInt(z.TTL), Serial: flexInt(z.Serial), Refresh: flexInt(z.Refresh),
-		Retry: flexInt(z.Retry), Expire: flexInt(z.Expire), DNSSECStatus: flexBool(z.DNSSEC),
+		Retry: flexInt(z.Retry), Expire: flexInt(z.Expire),
+	}
+	if z.dnssecKnown {
+		wire.DNSSECStatus = json.RawMessage(strconv.FormatBool(z.DNSSEC))
 	}
 	var out zoneWire
 	if err := c.authed(ctx, "updateDnsZone", map[string]any{"domainname": domain, "dnszone": wire}, &out); err != nil {
@@ -458,8 +515,8 @@ func validateRecord(r *DNSRecord) error {
 		return fmt.Errorf("unsupported record type %q", r.Type)
 	case strings.TrimSpace(r.Destination) == "":
 		return errors.New("record destination must not be empty")
-	case r.Priority < 0:
-		return errors.New("record priority must not be negative")
+	case r.Priority < 0 || r.Priority > 65535:
+		return errors.New("record priority must be between 0 and 65535")
 	}
 	return nil
 }
@@ -555,22 +612,13 @@ func (c *DNSClient) CreateRecord(ctx context.Context, domain string, rec DNSReco
 	if err != nil {
 		return nil, err
 	}
-	var fresh []DNSRecord
 	for _, a := range after {
-		if had[a.ID] {
-			continue
-		}
-		if sameRecord(a, rec) {
+		// Only a new record matching what was sent (normalization-aware) is ours;
+		// a look-alike could be another writer's.
+		if !had[a.ID] && sameRecord(a, rec) {
 			created := a
 			return &created, nil
 		}
-		if strings.EqualFold(a.Hostname, rec.Hostname) && strings.EqualFold(a.Type, rec.Type) {
-			fresh = append(fresh, a)
-		}
-	}
-	// CCP may normalize the destination (e.g. trailing dot); accept a single new look-alike.
-	if len(fresh) == 1 {
-		return &fresh[0], nil
 	}
 	return nil, errors.New("record was submitted but not found in the zone afterwards; check with 'dns records list'")
 }
