@@ -1,12 +1,27 @@
 package provider
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
+
+// A 5xx from the OIDC refresh wraps an APIError in ErrPreDispatch: the reinstall
+// was never sent, so it must stay a definitive rejection even though the
+// sanitized error no longer carries the sentinel.
+func TestPreDispatchClassifiedBeforeBodyStripped(t *testing.T) {
+	orig := fmt.Errorf("%w: getting access token: %w", netcup.ErrPreDispatch,
+		&netcup.APIError{StatusCode: http.StatusBadGateway, Status: "502 Bad Gateway", Body: "x"})
+	if !isDefinitiveReinstallRejection(orig) {
+		t.Fatal("original error should be definitive (pre-dispatch)")
+	}
+	if isDefinitiveReinstallRejection(withoutAPIBody(orig)) {
+		t.Fatal("test premise: stripped copy loses the sentinel, so Create must classify before stripping")
+	}
+}
 
 func TestWithoutAPIBody_DropsTruncatedSecretEcho(t *testing.T) {
 	// A truncated echo of a long script cannot be matched by value redaction;

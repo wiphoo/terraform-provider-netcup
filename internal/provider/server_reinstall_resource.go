@@ -389,6 +389,9 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 
 	task, err := r.client.ReinstallServer(ctx, id, setup)
 	if err != nil {
+		// Classify the ORIGINAL error: sanitizing below can drop wrappers such
+		// as ErrPreDispatch that the classification depends on.
+		definitive := isDefinitiveReinstallRejection(err)
 		err = withoutAPIBody(err)
 		// Distinguish a DEFINITIVE rejection from an AMBIGUOUS dispatch outcome:
 		//
@@ -407,7 +410,7 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 		//    running. Persist state + warn (mirroring the indeterminate
 		//    WaitForTask branch below) so the next apply does NOT wipe the
 		//    server a second time.
-		if isDefinitiveReinstallRejection(err) {
+		if definitive {
 			d, _ := apiErrorToDiag(err, true)
 			resp.Diagnostics.AddError(d.Summary(), redactSecrets(d.Detail(), plan.AdditionalUserPassword.ValueString(), plan.CustomScript.ValueString()))
 			return
