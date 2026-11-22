@@ -2,7 +2,6 @@ package netcup
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,7 +94,7 @@ func (c *Client) GetServer(ctx context.Context, id int32) (*Server, error) {
 	}
 
 	var server Server
-	if err := json.NewDecoder(resp.Body).Decode(&server); err != nil {
+	if err := decodeJSON(resp.Body, &server); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
@@ -121,7 +120,7 @@ func (c *Client) ListServers(ctx context.Context) ([]ServerListMinimal, error) {
 	}
 
 	var servers []ServerListMinimal
-	if err := json.NewDecoder(resp.Body).Decode(&servers); err != nil {
+	if err := decodeJSON(resp.Body, &servers); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).

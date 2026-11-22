@@ -74,7 +74,7 @@ func serverReinstall(args []string, out, errW io.Writer, in io.Reader) error {
 		return nil
 	})
 	hostnameFlag := fs.String("hostname", "", "hostname to set on the reinstalled server")
-	customScriptFlag := fs.String("custom-script", "", "post-install bootstrap script (inline)")
+	customScriptFlag := fs.String("custom-script", "", "post-install bootstrap script (inline; visible in process listings and shell history, use --custom-script-file for secrets)")
 	customScriptFileFlag := fs.String("custom-script-file", "", "post-install bootstrap script from a file ('-' for stdin)")
 	sshPasswordAuthFlag := fs.Bool("ssh-password-auth", false, "enable SSH password authentication")
 	sshPasswordAuthSet := false

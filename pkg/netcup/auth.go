@@ -50,6 +50,9 @@ func (e *oidcError) Error() string {
 
 // newOIDCRequest builds a form-encoded POST request against the OIDC endpoint.
 func (c *Client) newOIDCRequest(ctx context.Context, path string, form url.Values) (*http.Request, error) {
+	if c.endpointErr != nil {
+		return nil, c.endpointErr
+	}
 	u := strings.TrimRight(c.oidcEndpoint, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(form.Encode()))
 	if err != nil {

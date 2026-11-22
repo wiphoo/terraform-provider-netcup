@@ -1,9 +1,13 @@
 package provider
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 
@@ -48,4 +52,39 @@ func apiErrorToDiag(err error, notFoundIsError bool) (diagnostic diag.Diagnostic
 	default:
 		return diag.NewErrorDiagnostic("netcup API error", apiErr.Error()), false
 	}
+}
+
+// redactSecrets replaces every occurrence of each non-empty secret in text with
+// "(sensitive)". API error bodies can echo request fields back, and diagnostics
+// are not subject to the schema's Sensitive flag. API error bodies are
+// typically JSON, where newlines, quotes and backslashes are escaped, so the
+// JSON-encoded forms of each secret are redacted as well as the raw value.
+//
+// All forms of all secrets are replaced longest first, so a secret that
+// contains another (e.g. a script containing the password) is redacted whole
+// rather than being broken up by the shorter replacement.
+func redactSecrets(text string, secrets ...string) string {
+	var forms []string
+	for _, sec := range secrets {
+		if sec == "" {
+			continue
+		}
+		forms = append(forms, sec)
+		// Go's HTML escaping on and off.
+		for _, escapeHTML := range []bool{true, false} {
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(escapeHTML)
+			if enc.Encode(sec) != nil {
+				continue
+			}
+			quoted := strings.TrimSuffix(buf.String(), "\n")
+			forms = append(forms, quoted[1:len(quoted)-1])
+		}
+	}
+	sort.SliceStable(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
+	for _, f := range forms {
+		text = strings.ReplaceAll(text, f, "(sensitive)")
+	}
+	return text
 }

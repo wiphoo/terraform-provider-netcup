@@ -109,6 +109,13 @@ func (p *netcupProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		netcup.WithOIDCEndpoint(oidcEndpoint),
 	}
 
+	// Tokens are sent to these endpoints: reject cleartext/non-https (loopback
+	// excepted), userinfo, and empty hosts before anything is configured.
+	if err := netcup.New(endpointOpts...).Validate(); err != nil {
+		resp.Diagnostics.AddError("Invalid netcup endpoint", err.Error())
+		return
+	}
+
 	// The TokenSource needs its own *Client (sharing the same endpoints) to
 	// make the OIDC refresh call; it is otherwise unrelated to the *Client
 	// exposed to data sources/resources below.
