@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -53,12 +55,26 @@ func apiErrorToDiag(err error, notFoundIsError bool) (diagnostic diag.Diagnostic
 
 // redactSecrets replaces every occurrence of each non-empty secret in text with
 // "(sensitive)". API error bodies can echo request fields back, and diagnostics
-// are not subject to the schema's Sensitive flag.
+// are not subject to the schema's Sensitive flag. API error bodies are
+// typically JSON, where newlines, quotes and backslashes are escaped, so the
+// JSON-encoded forms of each secret are redacted as well as the raw value.
 func redactSecrets(text string, secrets ...string) string {
 	for _, sec := range secrets {
-		if sec != "" {
-			text = strings.ReplaceAll(text, sec, "(sensitive)")
+		if sec == "" {
+			continue
 		}
+		// Escaped forms first (with and without Go's HTML escaping), raw last.
+		for _, escapeHTML := range []bool{true, false} {
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(escapeHTML)
+			if enc.Encode(sec) != nil {
+				continue
+			}
+			quoted := strings.TrimSuffix(buf.String(), "\n")
+			text = strings.ReplaceAll(text, quoted[1:len(quoted)-1], "(sensitive)")
+		}
+		text = strings.ReplaceAll(text, sec, "(sensitive)")
 	}
 	return text
 }

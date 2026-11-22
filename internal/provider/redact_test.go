@@ -1,12 +1,37 @@
 package provider
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
+
+func TestRedactSecrets_JSONEscaped(t *testing.T) {
+	script := "#!/bin/sh\necho \"s3cret\" \\ <tok>&"
+	pw := `pa"ss\word<&>`
+	for _, enc := range []func(string) string{
+		func(s string) string { b, _ := json.Marshal(s); return string(b) },
+		func(s string) string {
+			var buf bytes.Buffer
+			e := json.NewEncoder(&buf)
+			e.SetEscapeHTML(false)
+			_ = e.Encode(s)
+			return buf.String()
+		},
+	} {
+		body := `{"customScript":` + enc(script) + `,"additionalUserPassword":` + enc(pw) + `}`
+		got := redactSecrets("netcup API error: "+body, pw, script)
+		for _, leak := range []string{"s3cret", "echo", "pa\\\"ss", "<tok>", "u003c"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("leaked %q in %q", leak, got)
+			}
+		}
+	}
+}
 
 func TestRedactSecrets(t *testing.T) {
 	err := &netcup.APIError{StatusCode: http.StatusUnprocessableEntity, Status: "422", Body: `{"additionalUserPassword":"hunter2!","customScript":"echo s3cret"}`}
