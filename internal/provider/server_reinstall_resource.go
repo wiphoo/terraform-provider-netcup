@@ -394,7 +394,7 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 		//    server a second time.
 		if isDefinitiveReinstallRejection(err) {
 			d, _ := apiErrorToDiag(err, true)
-			resp.Diagnostics.Append(d)
+			resp.Diagnostics.AddError(d.Summary(), redactSecrets(d.Detail(), plan.AdditionalUserPassword.ValueString(), plan.CustomScript.ValueString()))
 			return
 		}
 
@@ -409,7 +409,7 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 					"after the request was forwarded. The reinstall is likely already running.\n\n"+
 					"The resource has been recorded in Terraform state to avoid re-issuing the (destructive) "+
 					"reinstall on the next apply. Check the server / task status in the SCP control panel.",
-				err.Error(),
+				redactSecrets(err.Error(), plan.AdditionalUserPassword.ValueString(), plan.CustomScript.ValueString()),
 			),
 		)
 		return

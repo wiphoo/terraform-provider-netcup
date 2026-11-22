@@ -2,7 +2,6 @@ package netcup
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,7 +44,7 @@ func (c *Client) ListImageFlavours(ctx context.Context, id int32) ([]ImageFlavou
 	}
 
 	var flavours []ImageFlavour
-	if err := json.NewDecoder(resp.Body).Decode(&flavours); err != nil {
+	if err := decodeJSON(resp.Body, &flavours); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).

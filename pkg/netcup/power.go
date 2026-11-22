@@ -77,7 +77,7 @@ func (c *Client) SetPowerState(ctx context.Context, id int32, state PowerState, 
 	// applied synchronously with no task to track.
 	if resp.StatusCode == http.StatusAccepted {
 		var task TaskInfo
-		if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+		if err := decodeJSON(resp.Body, &task); err != nil {
 			return nil, err
 		}
 		// Drain any trailing bytes so the connection can be reused (keep-alive).

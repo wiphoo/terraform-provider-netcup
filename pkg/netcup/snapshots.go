@@ -47,7 +47,7 @@ func (c *Client) ListSnapshots(ctx context.Context, id int32) ([]SnapshotMinimal
 	}
 
 	var snapshots []SnapshotMinimal
-	if err := json.NewDecoder(resp.Body).Decode(&snapshots); err != nil {
+	if err := decodeJSON(resp.Body, &snapshots); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
@@ -99,7 +99,7 @@ func (c *Client) CreateSnapshot(ctx context.Context, id int32, opts ServerSnapsh
 	}
 
 	var task TaskInfo
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+	if err := decodeJSON(resp.Body, &task); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
@@ -115,6 +115,9 @@ func (c *Client) CreateSnapshot(ctx context.Context, id int32, opts ServerSnapsh
 func (c *Client) DeleteSnapshot(ctx context.Context, id int32, name string) (*TaskInfo, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, fmt.Errorf("%w: snapshot name is required", ErrPreDispatch)
+	}
+	if name == "." || name == ".." {
+		return nil, fmt.Errorf("%w: invalid snapshot name %q", ErrPreDispatch, name)
 	}
 
 	req, err := c.newRequest(ctx, http.MethodDelete, fmt.Sprintf("/v1/servers/%d/snapshots/%s", id, url.PathEscape(name)), "application/json", nil, true)
@@ -133,7 +136,7 @@ func (c *Client) DeleteSnapshot(ctx context.Context, id int32, name string) (*Ta
 	}
 
 	var task TaskInfo
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+	if err := decodeJSON(resp.Body, &task); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
@@ -150,6 +153,9 @@ func (c *Client) DeleteSnapshot(ctx context.Context, id int32, name string) (*Ta
 func (c *Client) RestoreSnapshot(ctx context.Context, id int32, name string) (*TaskInfo, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, fmt.Errorf("%w: snapshot name is required", ErrPreDispatch)
+	}
+	if name == "." || name == ".." {
+		return nil, fmt.Errorf("%w: invalid snapshot name %q", ErrPreDispatch, name)
 	}
 
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/servers/%d/snapshots/%s/revert", id, url.PathEscape(name)), "application/json", nil, true)
@@ -168,7 +174,7 @@ func (c *Client) RestoreSnapshot(ctx context.Context, id int32, name string) (*T
 	}
 
 	var task TaskInfo
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+	if err := decodeJSON(resp.Body, &task); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).

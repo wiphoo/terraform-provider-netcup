@@ -78,7 +78,7 @@ func (c *Client) ListSSHKeys(ctx context.Context) ([]SSHKey, error) {
 		return nil, newAPIError(resp)
 	}
 	var keys []SSHKey
-	if err := json.NewDecoder(resp.Body).Decode(&keys); err != nil {
+	if err := decodeJSON(resp.Body, &keys); err != nil {
 		return nil, err
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -114,7 +114,7 @@ func (c *Client) CreateSSHKey(ctx context.Context, name, publicKey string) (*SSH
 		return nil, newAPIError(resp)
 	}
 	var key SSHKey
-	if err := json.NewDecoder(resp.Body).Decode(&key); err != nil {
+	if err := decodeJSON(resp.Body, &key); err != nil {
 		return nil, err
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)

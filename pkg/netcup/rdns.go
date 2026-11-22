@@ -108,7 +108,7 @@ func (c *Client) GetRDNS(ctx context.Context, ip string) (*RdnsEntry, error) {
 	}
 
 	var raw rdnsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := decodeJSON(resp.Body, &raw); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).

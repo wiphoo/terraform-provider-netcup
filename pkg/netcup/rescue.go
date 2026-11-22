@@ -2,7 +2,6 @@ package netcup
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,7 +37,7 @@ func (c *Client) GetRescueSystem(ctx context.Context, id int32) (*RescueSystemSt
 	}
 
 	var status RescueSystemStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+	if err := decodeJSON(resp.Body, &status); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
@@ -71,7 +70,7 @@ func (c *Client) EnableRescueSystem(ctx context.Context, id int32) (*TaskInfo, e
 	}
 
 	var task TaskInfo
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+	if err := decodeJSON(resp.Body, &task); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
@@ -105,7 +104,7 @@ func (c *Client) DisableRescueSystem(ctx context.Context, id int32) (*TaskInfo, 
 	}
 
 	var task TaskInfo
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+	if err := decodeJSON(resp.Body, &task); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 
@@ -48,4 +49,16 @@ func apiErrorToDiag(err error, notFoundIsError bool) (diagnostic diag.Diagnostic
 	default:
 		return diag.NewErrorDiagnostic("netcup API error", apiErr.Error()), false
 	}
+}
+
+// redactSecrets replaces every occurrence of each non-empty secret in text with
+// "(sensitive)". API error bodies can echo request fields back, and diagnostics
+// are not subject to the schema's Sensitive flag.
+func redactSecrets(text string, secrets ...string) string {
+	for _, sec := range secrets {
+		if sec != "" {
+			text = strings.ReplaceAll(text, sec, "(sensitive)")
+		}
+	}
+	return text
 }

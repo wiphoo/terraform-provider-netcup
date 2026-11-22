@@ -59,7 +59,7 @@ func (c *Client) ReinstallServer(ctx context.Context, id int32, setup ServerImag
 	}
 
 	var task TaskInfo
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+	if err := decodeJSON(resp.Body, &task); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).

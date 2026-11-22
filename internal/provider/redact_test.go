@@ -1,0 +1,21 @@
+package provider
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
+)
+
+func TestRedactSecrets(t *testing.T) {
+	err := &netcup.APIError{StatusCode: http.StatusUnprocessableEntity, Status: "422", Body: `{"additionalUserPassword":"hunter2!","customScript":"echo s3cret"}`}
+	d, _ := apiErrorToDiag(err, true)
+	got := redactSecrets(d.Detail(), "hunter2!", "", "echo s3cret")
+	if strings.Contains(got, "hunter2!") || strings.Contains(got, "s3cret") {
+		t.Errorf("secret not redacted: %q", got)
+	}
+	if !strings.Contains(got, "(sensitive)") {
+		t.Errorf("want (sensitive) marker: %q", got)
+	}
+}

@@ -163,7 +163,7 @@ func (c *Client) GetTask(ctx context.Context, uuid string) (*TaskInfo, error) {
 	}
 
 	var task TaskInfo
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+	if err := decodeJSON(resp.Body, &task); err != nil {
 		return nil, err
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
