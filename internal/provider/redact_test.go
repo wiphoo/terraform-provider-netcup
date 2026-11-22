@@ -33,6 +33,15 @@ func TestRedactSecrets_JSONEscaped(t *testing.T) {
 	}
 }
 
+func TestRedactSecrets_OverlappingSecrets(t *testing.T) {
+	pw := "hunter2"
+	script := "echo hunter2; export API_TOKEN=another-secret"
+	got := redactSecrets(`{"customScript":"`+script+`"}`, pw, script)
+	if strings.Contains(got, "another-secret") || strings.Contains(got, "hunter2") {
+		t.Errorf("leaked overlapping secret: %q", got)
+	}
+}
+
 func TestRedactSecrets(t *testing.T) {
 	err := &netcup.APIError{StatusCode: http.StatusUnprocessableEntity, Status: "422", Body: `{"additionalUserPassword":"hunter2!","customScript":"echo s3cret"}`}
 	d, _ := apiErrorToDiag(err, true)
