@@ -6,10 +6,13 @@ package netcup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -46,6 +49,9 @@ const (
 	DefaultOIDCEndpoint = "https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect"
 
 	defaultTimeout = 30 * time.Second
+
+	// maxResponseBody bounds how much of a success response body is decoded.
+	maxResponseBody = 8 << 20 // 8 MiB
 )
 
 // Client talks to the netcup SCP REST API.
@@ -58,6 +64,10 @@ type Client struct {
 	refreshToken string
 	tokenSource  TokenSource
 	httpClient   *http.Client
+
+	// endpointErr is set by New when an endpoint fails validateEndpoint; every
+	// request then fails pre-dispatch with it, so no token is ever sent.
+	endpointErr error
 
 	// pollInterval overrides taskPollInterval for WaitForTask when > 0. It lets
 	// a caller that constructs a Client — notably the go-vcr replay tests, in an
@@ -148,7 +158,56 @@ func New(opts ...Option) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
+	if err := validateEndpoint("API endpoint", c.apiEndpoint); err != nil {
+		c.endpointErr = err
+	} else if err := validateEndpoint("OIDC endpoint", c.oidcEndpoint); err != nil {
+		c.endpointErr = err
+	}
 	return c
+}
+
+// Validate reports whether the configured endpoints are acceptable: https (or
+// http on a loopback host only), no userinfo, and a non-empty host. Bearer and
+// refresh tokens are sent to these URLs, so cleartext or credential-bearing
+// URLs are refused. Requests on an invalid Client fail with this error.
+func (c *Client) Validate() error { return c.endpointErr }
+
+func validateEndpoint(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid %s", name)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%s %q must not contain userinfo", name, u.Redacted())
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("%s %q has no host", name, u.Redacted())
+	}
+	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
+		return fmt.Errorf("%s %q must use https (access tokens are sent in the request)", name, u.Redacted())
+	}
+	return nil
+}
+
+// isLoopbackHost reports whether h is "localhost" or a loopback IP address.
+func isLoopbackHost(h string) bool {
+	h = strings.TrimSuffix(strings.ToLower(h), ".")
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// decodeJSON decodes a success body into dst, reading at most maxResponseBody
+// bytes, and drains the rest so the connection can be reused.
+func decodeJSON(r io.Reader, dst any) error {
+	lr := io.LimitReader(r, maxResponseBody)
+	if err := json.NewDecoder(lr).Decode(dst); err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, lr)
+	return nil
 }
 
 // APIEndpoint returns the configured REST API base URL.
@@ -172,6 +231,9 @@ func (c *Client) RefreshToken() string { return c.refreshToken }
 // error is ignored and the request is sent without a Bearer token instead of
 // failing outright.
 func (c *Client) newRequest(ctx context.Context, method, path, accept string, body io.Reader, authRequired bool) (*http.Request, error) {
+	if c.endpointErr != nil {
+		return nil, fmt.Errorf("%w: %w", ErrPreDispatch, c.endpointErr)
+	}
 	url := strings.TrimRight(c.apiEndpoint, "/") + path
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
