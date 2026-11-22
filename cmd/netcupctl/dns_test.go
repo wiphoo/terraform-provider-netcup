@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/wiphoo/terraform-provider-netcup/pkg/netcup"
 )
 
 // startFakeCCP serves a minimal CCP endpoint with one A record and points the
@@ -361,5 +365,34 @@ func TestDNS_FlagsBeforePositionals(t *testing.T) {
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil || got.Hostname != "www" || got.Priority != 5 {
 		t.Errorf("got %+v err %v out %q", got, err, out.String())
+	}
+}
+
+func TestPrintDNSRecords_StripsControlCharacters(t *testing.T) {
+	var buf bytes.Buffer
+	err := printDNSRecords(&buf, []netcup.DNSRecord{{ID: "1", Hostname: "a\x1b[2J", Type: "TXT", Destination: "x\ry"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(buf.String(), "\x1b\r") {
+		t.Errorf("output contains raw control characters: %q", buf.String())
+	}
+}
+
+func TestDNS_CustomEndpointNotice(t *testing.T) {
+	startFakeCCP(t) // sets NETCUP_DNS_ENDPOINT to a custom URL
+	r, w, _ := os.Pipe()
+	old := os.Stderr
+	os.Stderr = w
+	var buf bytes.Buffer
+	err := dnsRecordsList([]string{"example.com"}, &buf)
+	os.Stderr = old
+	_ = w.Close()
+	got, _ := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "NETCUP_DNS_ENDPOINT") {
+		t.Errorf("stderr = %q, want custom endpoint notice", got)
 	}
 }
