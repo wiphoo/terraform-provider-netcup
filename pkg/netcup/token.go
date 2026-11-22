@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// defaultRefreshedTokenTTL is assumed when a refresh response has neither a
+// positive expires_in nor a parsable JWT exp.
+const defaultRefreshedTokenTTL = time.Minute
 
 // TokenSource provides OAuth 2.0 access tokens, refreshing them automatically
 // before expiry when a refresh token is available.
@@ -126,12 +131,24 @@ func (s *refreshingTokenSource) Token(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	if resp.AccessToken == "" {
+		return "", errors.New("token refresh returned an empty access_token")
+	}
 	s.accessToken = resp.AccessToken
 	if resp.RefreshToken != "" {
 		s.refreshToken = resp.RefreshToken
 	}
-	if resp.ExpiresIn > 0 {
+	switch {
+	case resp.ExpiresIn > 0:
 		s.expiry = time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)
+	default:
+		// No usable expires_in: use the JWT exp, else a short default so a
+		// stale token is not trusted forever.
+		if exp, err := ParseAccessTokenExpiry(resp.AccessToken); err == nil {
+			s.expiry = exp
+		} else {
+			s.expiry = time.Now().Add(defaultRefreshedTokenTTL)
+		}
 	}
 
 	return s.accessToken, nil
