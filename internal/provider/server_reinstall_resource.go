@@ -263,6 +263,20 @@ func int32ID(v types.Int64, field string, diags *diag.Diagnostics) (int32, bool)
 // may have returned 502/504 after the upstream already accepted the POST, so
 // the destructive reinstall may be running and the outcome is indeterminate —
 // the caller must persist state + warn (see Create) rather than drop it.
+// withoutAPIBody drops the response body from a *netcup.APIError. The reinstall
+// request carries secrets (password, custom script) that the API may echo back,
+// possibly truncated, so the body is never surfaced; the status line remains.
+// Other errors are returned unchanged.
+func withoutAPIBody(err error) error {
+	var apiErr *netcup.APIError
+	if errors.As(err, &apiErr) {
+		c := *apiErr
+		c.Body = ""
+		return &c
+	}
+	return err
+}
+
 func isDefinitiveReinstallRejection(err error) bool {
 	if errors.Is(err, netcup.ErrPreDispatch) {
 		return true
@@ -375,6 +389,7 @@ func (r *serverReinstallResource) Create(ctx context.Context, req resource.Creat
 
 	task, err := r.client.ReinstallServer(ctx, id, setup)
 	if err != nil {
+		err = withoutAPIBody(err)
 		// Distinguish a DEFINITIVE rejection from an AMBIGUOUS dispatch outcome:
 		//
 		//  - errors.Is(err, netcup.ErrPreDispatch): the request was never built
