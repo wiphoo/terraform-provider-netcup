@@ -24,6 +24,20 @@ This file is the human-curated companion to those release notes:
 
 ## [Unreleased]
 
+### Security
+
+- `api_endpoint` / `oidc_endpoint` (and the `NETCUP_API_ENDPOINT` /
+  `NETCUP_OIDC_ENDPOINT` env vars, `netcupctl --endpoint` / `--oidc-endpoint`)
+  must now be https (http only for loopback hosts) with no userinfo and a host;
+  otherwise requests fail before any token is sent.
+- `netcup_server_reinstall` error diagnostics redact `additional_user_password`
+  and `custom_script` if the API echoes them back.
+- Snapshot names `.` and `..` are rejected; success response bodies are size
+  limited; a refresh response with an empty `access_token` is an error and a
+  missing `expires_in` no longer yields a never-expiring token.
+- Release: `go mod verify` replaces `go mod tidy` as the GoReleaser hook and the
+  GoReleaser version is pinned.
+
 ## [0.7.2] - 2026-10-05
 
 Documentation and examples only; no provider code changes.
